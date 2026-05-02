@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/*
+ * JetBrains "Island Dark"-inspired palette. We override Tailwind's neutral
+ * scale so the existing utilities (bg-neutral-900, border-neutral-800, etc.)
+ * automatically pick up the new look without rewriting every component.
+ *
+ * Anchor swatches:
+ *  - 950 #19191c  deepest panel (thread bg, terminal background)
+ *  - 900 #1e1f22  Island base (window chrome, sidebar, composer card)
+ *  - 800 #2b2d30  surface / divider tone
+ *  - 700 #393b40  hover / strong divider
+ *  - 500 #6f737a  muted text
+ *  - 300 #c4c7cf  primary body text
+ */
+@theme {
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular,
+    "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+
+  --color-neutral-50: #f6f7f9;
+  --color-neutral-100: #f0f1f3;
+  --color-neutral-200: #dfe1e5;
+  --color-neutral-300: #c4c7cf;
+  --color-neutral-400: #9aa0a6;
+  --color-neutral-500: #6f737a;
+  --color-neutral-600: #4e5157;
+  --color-neutral-700: #393b40;
+  --color-neutral-800: #2b2d30;
+  --color-neutral-900: #1e1f22;
+  --color-neutral-950: #19191c;
+
+  /* Accent tokens — use sparingly for active/selected state. */
+  --color-accent: #3574f0;
+  --color-accent-strong: #4f8af2;
+  --color-accent-purple: #9754eb;
+  --color-accent-emerald: #1f8050;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--color-neutral-900);
+  color: var(--color-neutral-300);
+  overflow: hidden;
+}
+
+/* Disable text selection inside drag regions — otherwise the drag gesture
+   selects text instead of moving the window. */
+[data-tauri-drag-region] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Scrollbar — slim Island-Dark style. */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-neutral-700);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-neutral-600);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}

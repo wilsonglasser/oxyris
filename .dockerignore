@@ -1,0 +1,25 @@
+# Build output
+target/
+dist/
+release/
+
+# Frontend
+apps/web/node_modules/
+apps/web/dist/
+node_modules/
+
+# Git / editors
+.git/
+.idea/
+.vscode/
+.claude/
+
+# Tauri generated
+apps/desktop/gen/
+
+# Env / local
+.env
+*.local
+
+# Logs
+*.log

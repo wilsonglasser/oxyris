@@ -1,0 +1,66 @@
+{
+  "app": {
+    "title": "Oxyris",
+    "tagline": "Desktop coding agent — Windows + WSL, multi-session.",
+    "footer": "Tauri + Rust + React"
+  },
+  "tabs": {
+    "chat": "Chat",
+    "settings": "Settings"
+  },
+  "sidebar": {
+    "projects": "Projects",
+    "sessions": "Sessions",
+    "no_sessions": "No threads yet",
+    "new_project": "New project",
+    "no_projects": "No projects yet",
+    "no_results": "No matches",
+    "search_placeholder": "Search projects…",
+    "open_settings": "Settings",
+    "update_available": "Update available — open Settings",
+    "new_thread": "New thread",
+    "close": "Close",
+    "worktrees": "Worktrees",
+    "new_worktree": "New worktree",
+    "new_worktree_prompt": "Branch name (new or existing) for the worktree in {{project}}:",
+    "remove_worktree_confirm": "Remove worktree \"{{name}}\"? The directory will be deleted from disk.",
+    "no_worktrees": "No worktrees",
+    "worktree_error": {
+      "git": "Git: {{message}}",
+      "storage": "Storage: {{message}}",
+      "project_not_found": "Project not found",
+      "projection": "Projection: {{message}}",
+      "empty_repo": "This repository has no commits yet. Create the first commit before adding a worktree.",
+      "unknown": "Unknown error"
+    },
+    "rename_session": "Rename",
+    "rename_session_prompt": "New name for this session:",
+    "untitled_session": "Untitled session",
+    "delete_session": "Delete session",
+    "delete_session_confirm": "Delete session \"{{name}}\"? Its history is kept in the event log but it disappears from the UI."
+  },
+  "language": {
+    "label": "Language",
+    "en": "English",
+    "pt-BR": "Portuguese (Brazil)"
+  },
+  "welcome": {
+    "title": "Welcome to Oxyris",
+    "tagline": "A desktop coding agent for Windows and WSL with parallel Claude sessions.",
+    "checks_heading": "Prerequisites",
+    "check_claude": "Claude CLI installed and authenticated",
+    "check_claude_missing_detail": "Run `claude auth login` in any environment you plan to use, then click Refresh in Settings.",
+    "next_heading": "Create your first project",
+    "next_body": "Pick a folder on Windows or inside a WSL distro. Each project can host multiple parallel sessions on separate git worktrees.",
+    "cta_new_project": "New project",
+    "shortcut_hint": "Shortcut: Ctrl+Shift+N opens this anywhere in the app. Esc interrupts the current turn."
+  },
+  "shortcuts": {
+    "new_project": "New project"
+  },
+  "docker_cleanup": {
+    "title": "Cleaned up orphan docker stacks",
+    "body": "{{count}} project(s) · {{containers}} containers · {{volumes}} volumes · {{networks}} networks",
+    "dismiss": "Dismiss"
+  }
+}

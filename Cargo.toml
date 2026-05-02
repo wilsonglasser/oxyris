@@ -1,0 +1,78 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/desktop",
+    "apps/agent",
+    "apps/mcp-server",
+    "crates/oxyris-core",
+    "crates/oxyris-git",
+    "crates/oxyris-index",
+    "crates/oxyris-ipc",
+    "crates/oxyris-provider",
+    "crates/oxyris-claude",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["Oxyris Contributors"]
+repository = "https://github.com/oxyris-code/oxyris"
+publish = false
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.47", features = ["full"] }
+
+# Serde
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Errors
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Time / IDs
+uuid = { version = "1.18", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Storage / git / fs / pty
+rusqlite = { version = "0.37", features = ["bundled"] }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+notify = "8.2"
+walkdir = "2.5"
+ignore = "0.4"
+portable-pty = "0.9"
+which = "8.0"
+encoding_rs = "0.8"
+
+# Tauri
+tauri = { version = "2.0", features = ["protocol-asset"] }
+tauri-build = { version = "2.0", features = [] }
+tauri-plugin-dialog = "2.0"
+tauri-plugin-updater = "2.0"
+
+# Internal crates
+oxyris-core = { path = "crates/oxyris-core" }
+oxyris-git = { path = "crates/oxyris-git" }
+oxyris-index = { path = "crates/oxyris-index" }
+oxyris-ipc = { path = "crates/oxyris-ipc" }
+oxyris-provider = { path = "crates/oxyris-provider" }
+oxyris-claude = { path = "crates/oxyris-claude" }
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

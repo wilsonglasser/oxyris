@@ -1,0 +1,90 @@
+//! Oxyris desktop backend library.
+//!
+//! `main.rs` is a thin entry point that calls [`run`]. Keeping the runtime in a
+//! library crate keeps the surface easy to integration-test and lets the Tauri
+//! mobile pipeline (if we ever want it) re-use the same entry point.
+
+mod app_state;
+mod domain;
+mod infra;
+mod tauri_commands;
+
+use tauri::Manager;
+
+use crate::app_state::AppState;
+
+pub fn run() {
+    // Logging is installed inside AppState::initialize once we know the
+    // data dir. Until then, stdlib println!/eprintln! are the only channel —
+    // that's fine, we don't do anything interesting before setup().
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            tauri_commands::greet,
+            tauri_commands::project::project_create,
+            tauri_commands::project::project_rename,
+            tauri_commands::project::project_delete,
+            tauri_commands::project::project_list,
+            tauri_commands::environment::environment_list,
+            tauri_commands::environment::path_to_posix,
+            tauri_commands::environment::path_to_windows,
+            tauri_commands::environment::wsl_system_info,
+            tauri_commands::environment::wsl_fs_stat,
+            tauri_commands::environment::wsl_fs_walk,
+            tauri_commands::session::session_start,
+            tauri_commands::session::session_send_message,
+            tauri_commands::session::session_interrupt,
+            tauri_commands::session::session_stop,
+            tauri_commands::session::session_resume,
+            tauri_commands::session::session_rename,
+            tauri_commands::session::session_delete,
+            tauri_commands::session::session_set_env_mode,
+            tauri_commands::session::session_list,
+            tauri_commands::session::session_get,
+            tauri_commands::session::session_turn_diff,
+            tauri_commands::session::session_turn_revert,
+            tauri_commands::worktree::worktree_create,
+            tauri_commands::worktree::worktree_remove,
+            tauri_commands::worktree::worktree_list,
+            tauri_commands::worktree::git_list_branches,
+            tauri_commands::worktree::git_list_worktrees,
+            tauri_commands::validate::project_validate_path,
+            tauri_commands::settings::settings_provider_discover,
+            tauri_commands::settings::settings_logs_dir,
+            tauri_commands::settings::settings_keybindings_path,
+            tauri_commands::settings::settings_keybindings_read,
+            tauri_commands::settings::settings_keybindings_write,
+            tauri_commands::terminal::terminal_spawn,
+            tauri_commands::terminal::terminal_write,
+            tauri_commands::terminal::terminal_resize,
+            tauri_commands::terminal::terminal_kill,
+            tauri_commands::terminal::terminal_list,
+            tauri_commands::terminal::terminal_rename,
+            tauri_commands::terminal::terminal_attach,
+            tauri_commands::attachments::attachment_save,
+            tauri_commands::action::action_list,
+            tauri_commands::action::action_upsert,
+            tauri_commands::action::action_delete,
+            tauri_commands::env::env_template_for_worktree,
+            tauri_commands::env::env_status_for_worktree,
+            tauri_commands::env::env_up_for_worktree,
+            tauri_commands::env::env_down_for_worktree,
+            tauri_commands::env::env_dotenv_render_for_worktree,
+            tauri_commands::env::env_dotenv_status_for_worktree,
+            tauri_commands::indexing::index_rebuild,
+            tauri_commands::indexing::index_query_symbol,
+            tauri_commands::indexing::index_list_symbols_in_file,
+            tauri_commands::indexing::index_project_map,
+            tauri_commands::indexing::index_stats,
+        ])
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir().expect("resolve app_data_dir");
+            let state = AppState::initialize(app.handle().clone(), data_dir)?;
+            app.manage(state);
+            tracing::info!("oxyris-desktop v{} booted", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running Oxyris");
+}

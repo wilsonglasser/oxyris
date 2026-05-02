@@ -1,0 +1,54 @@
+[package]
+name = "oxyris-desktop"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Oxyris desktop backend (Tauri)"
+
+[lib]
+name = "oxyris_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxyris-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { workspace = true }
+tauri-plugin-dialog.workspace = true
+tauri-plugin-updater.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+uuid.workspace = true
+oxyris-core.workspace = true
+oxyris-git.workspace = true
+oxyris-index.workspace = true
+oxyris-ipc.workspace = true
+oxyris-provider.workspace = true
+oxyris-claude.workspace = true
+ignore.workspace = true
+notify.workspace = true
+rusqlite.workspace = true
+encoding_rs.workspace = true
+git2.workspace = true
+which.workspace = true
+portable-pty.workspace = true
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3.16"

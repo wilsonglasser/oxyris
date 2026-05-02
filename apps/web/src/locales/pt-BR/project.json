@@ -1,0 +1,41 @@
+{
+  "heading": "Projetos",
+  "empty": "Nenhum projeto ainda. Crie um abaixo.",
+  "create": {
+    "heading": "Criar projeto",
+    "name": "Nome",
+    "name_placeholder": "Meu repositório",
+    "environment": "Ambiente",
+    "environment_windows": "Windows",
+    "environment_wsl": "WSL: {{distro}}",
+    "wsl_distro": "Distro WSL",
+    "wsl_distro_placeholder": "Ubuntu",
+    "root_path": "Caminho raiz",
+    "root_path_placeholder_windows": "C:\\dev\\meu-repo",
+    "root_path_placeholder_wsl": "/home/voce/meu-repo",
+    "browse": "Procurar…",
+    "submit": "Criar",
+    "submitting": "Criando…",
+    "validation_ok": "Diretório existe · repositório git",
+    "validation_ok_no_git": "Diretório existe (ainda não é um repo git)",
+    "validation_missing": "Caminho não existe",
+    "validation_not_dir": "Caminho existe mas não é um diretório",
+    "validation_warning": "{{message}}"
+  },
+  "list": {
+    "rename": "Renomear",
+    "rename_prompt": "Novo nome para {{name}}",
+    "delete": "Excluir",
+    "delete_confirm": "Excluir o projeto \"{{name}}\"? Isso remove os metadados do Oxyris; o diretório no disco não é afetado.",
+    "environment_windows": "Windows",
+    "environment_wsl": "WSL: {{distro}}",
+    "created_at": "Criado em {{date}}"
+  },
+  "error": {
+    "domain": "Inválido: {{message}}",
+    "concurrency": "Estado desatualizado — recarregue e tente de novo.",
+    "storage": "Erro de armazenamento: {{message}}",
+    "projection": "Erro de projeção: {{message}}",
+    "unknown": "Erro inesperado: {{message}}"
+  }
+}

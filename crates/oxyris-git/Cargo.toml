@@ -1,0 +1,17 @@
+[package]
+name = "oxyris-git"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Shared git2-based operations used by both the Windows-side desktop backend and the Linux-side WSL agent."
+
+[dependencies]
+chrono.workspace = true
+git2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

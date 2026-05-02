@@ -1,0 +1,66 @@
+{
+  "app": {
+    "title": "Oxyris",
+    "tagline": "Agente de código desktop — Windows + WSL, multi-sessão.",
+    "footer": "Tauri + Rust + React"
+  },
+  "tabs": {
+    "chat": "Chat",
+    "settings": "Configurações"
+  },
+  "sidebar": {
+    "projects": "Projetos",
+    "sessions": "Sessões",
+    "no_sessions": "Nenhuma thread ainda",
+    "new_project": "Novo projeto",
+    "no_projects": "Nenhum projeto ainda",
+    "no_results": "Nenhum resultado",
+    "search_placeholder": "Buscar projetos…",
+    "open_settings": "Configurações",
+    "update_available": "Update disponível — abrir Configurações",
+    "new_thread": "Nova thread",
+    "close": "Fechar",
+    "worktrees": "Worktrees",
+    "new_worktree": "Novo worktree",
+    "new_worktree_prompt": "Nome da branch (nova ou existente) para o worktree em {{project}}:",
+    "remove_worktree_confirm": "Remover worktree \"{{name}}\"? O diretório será apagado do disco.",
+    "no_worktrees": "Nenhum worktree",
+    "worktree_error": {
+      "git": "Git: {{message}}",
+      "storage": "Armazenamento: {{message}}",
+      "project_not_found": "Projeto não encontrado",
+      "projection": "Projeção: {{message}}",
+      "empty_repo": "Este repositório ainda não tem commits. Faça o primeiro commit antes de criar um worktree.",
+      "unknown": "Erro desconhecido"
+    },
+    "rename_session": "Renomear",
+    "rename_session_prompt": "Novo nome para esta sessão:",
+    "untitled_session": "Sessão sem título",
+    "delete_session": "Excluir sessão",
+    "delete_session_confirm": "Excluir a sessão \"{{name}}\"? O histórico fica preservado no event log mas some da interface."
+  },
+  "language": {
+    "label": "Idioma",
+    "en": "Inglês",
+    "pt-BR": "Português (Brasil)"
+  },
+  "welcome": {
+    "title": "Bem-vindo ao Oxyris",
+    "tagline": "Um agente de código desktop para Windows e WSL com sessões Claude paralelas.",
+    "checks_heading": "Pré-requisitos",
+    "check_claude": "Claude CLI instalado e autenticado",
+    "check_claude_missing_detail": "Execute `claude auth login` no ambiente que quer usar, depois clique em Atualizar nas Configurações.",
+    "next_heading": "Crie seu primeiro projeto",
+    "next_body": "Escolha uma pasta no Windows ou dentro de uma distro WSL. Cada projeto pode hospedar várias sessões paralelas em git worktrees separados.",
+    "cta_new_project": "Novo projeto",
+    "shortcut_hint": "Atalho: Ctrl+Shift+N abre isto em qualquer lugar do app. Esc interrompe o turno atual."
+  },
+  "shortcuts": {
+    "new_project": "Novo projeto"
+  },
+  "docker_cleanup": {
+    "title": "Stacks docker órfãos limpos",
+    "body": "{{count}} projeto(s) · {{containers}} containers · {{volumes}} volumes · {{networks}} networks",
+    "dismiss": "Dispensar"
+  }
+}

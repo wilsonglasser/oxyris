@@ -1,0 +1,22 @@
+[package]
+name = "oxyris-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ignore.workspace = true
+walkdir.workspace = true
+oxyris-git.workspace = true
+oxyris-ipc.workspace = true

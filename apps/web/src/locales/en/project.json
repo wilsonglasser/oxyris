@@ -1,0 +1,41 @@
+{
+  "heading": "Projects",
+  "empty": "No projects yet. Create one below.",
+  "create": {
+    "heading": "Create project",
+    "name": "Name",
+    "name_placeholder": "My repo",
+    "environment": "Environment",
+    "environment_windows": "Windows",
+    "environment_wsl": "WSL: {{distro}}",
+    "wsl_distro": "WSL distro",
+    "wsl_distro_placeholder": "Ubuntu",
+    "root_path": "Root path",
+    "root_path_placeholder_windows": "C:\\dev\\my-repo",
+    "root_path_placeholder_wsl": "/home/you/my-repo",
+    "browse": "Browse…",
+    "submit": "Create",
+    "submitting": "Creating…",
+    "validation_ok": "Directory exists · git repo",
+    "validation_ok_no_git": "Directory exists (not a git repo yet)",
+    "validation_missing": "Path does not exist",
+    "validation_not_dir": "Path exists but is not a directory",
+    "validation_warning": "{{message}}"
+  },
+  "list": {
+    "rename": "Rename",
+    "rename_prompt": "New name for {{name}}",
+    "delete": "Delete",
+    "delete_confirm": "Delete project \"{{name}}\"? This removes Oxyris metadata; the working tree on disk is untouched.",
+    "environment_windows": "Windows",
+    "environment_wsl": "WSL: {{distro}}",
+    "created_at": "Created {{date}}"
+  },
+  "error": {
+    "domain": "Invalid: {{message}}",
+    "concurrency": "Stale state — reload and try again.",
+    "storage": "Storage error: {{message}}",
+    "projection": "Projection error: {{message}}",
+    "unknown": "Unexpected error: {{message}}"
+  }
+}
