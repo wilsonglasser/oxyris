@@ -109,6 +109,7 @@ pub fn run() {
             tauri_commands::git::git_tag_delete,
             tauri_commands::git::git_cherry_pick,
             tauri_commands::git::git_revert,
+            tauri_commands::git::git_diff_revs,
             tauri_commands::indexing::index_rebuild,
             tauri_commands::indexing::index_query_symbol,
             tauri_commands::indexing::index_list_symbols_in_file,

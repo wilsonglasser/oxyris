@@ -130,6 +130,7 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         op_name::GIT_TAG_DELETE => git::tag_delete(from_args(args)?),
         op_name::GIT_CHERRY_PICK => git::cherry_pick(from_args(args)?),
         op_name::GIT_REVERT => git::revert(from_args(args)?),
+        op_name::GIT_DIFF_REVS => git::diff_revs(from_args(args)?),
         other => Err(OpError::UnknownOp(other.to_owned())),
     }
 }

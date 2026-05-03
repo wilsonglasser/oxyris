@@ -14,10 +14,10 @@ use oxyris_git::worktree;
 use oxyris_ipc::ops::{
     GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs,
     GitCheckpointCaptureArgs, GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCommitArgs,
-    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs,
-    GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs,
-    GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs, GitTagCreateArgs,
-    GitTagNameArgs,
+    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitDiffRevsArgs,
+    GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs,
+    GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs,
+    GitTagCreateArgs, GitTagNameArgs,
 };
 
 use super::OpError;
@@ -215,6 +215,11 @@ pub fn cherry_pick(args: GitCommitOidArgs) -> Result<serde_json::Value, OpError>
 pub fn revert(args: GitCommitOidArgs) -> Result<serde_json::Value, OpError> {
     let oid = git_cherry::revert(&args.repo_path, &args.oid)?;
     Ok(serde_json::to_value(oid)?)
+}
+
+pub fn diff_revs(args: GitDiffRevsArgs) -> Result<serde_json::Value, OpError> {
+    let files = git_status::diff_revs(&args.repo_path, &args.from, &args.to, args.find_renames)?;
+    Ok(serde_json::to_value(files)?)
 }
 
 fn parse_mode(s: &str) -> Result<DiffMode, OpError> {

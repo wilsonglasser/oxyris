@@ -413,6 +413,24 @@ export function gitCherryPick(args: {
   });
 }
 
+export function gitDiffRevs(args: {
+  projectId: string;
+  worktreeId: string;
+  from: string;
+  to: string;
+  findRenames?: boolean;
+}): Promise<FileDiff[]> {
+  return invoke<FileDiff[]>("git_diff_revs", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      from: args.from,
+      to: args.to,
+      find_renames: args.findRenames ?? true,
+    },
+  });
+}
+
 export function gitRevert(args: {
   projectId: string;
   worktreeId: string;

@@ -59,5 +59,13 @@
   "revert_conflict": "Revert gerou conflitos — resolva na lista de mudanças e commite.",
   "tag_here": "Criar tag aqui",
   "tag_name_prompt": "Nome da tag:",
-  "tag_message_prompt": "Mensagem de anotação (vazio = lightweight):"
+  "tag_message_prompt": "Mensagem de anotação (vazio = lightweight):",
+  "rev_show_changes": "Ver mudanças deste commit",
+  "rev_show_changes_in": "Mudanças em {{id}}",
+  "rev_compare_with_head": "{{id}} → HEAD",
+  "rev_compare_with_head_short": "Comparar com HEAD",
+  "rev_compare_with_worktree": "{{id}} → working tree",
+  "rev_compare_with_worktree_short": "Comparar com working tree",
+  "rev_diff_empty": "Sem mudanças entre revisões.",
+  "close": "Fechar"
 }

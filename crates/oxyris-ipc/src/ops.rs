@@ -49,6 +49,7 @@ pub mod op_name {
     pub const GIT_TAG_DELETE: &str = "git.tag_delete";
     pub const GIT_CHERRY_PICK: &str = "git.cherry_pick";
     pub const GIT_REVERT: &str = "git.revert";
+    pub const GIT_DIFF_REVS: &str = "git.diff_revs";
 }
 
 // ────── system.info ────────────────────────────────────────────────────────
@@ -486,4 +487,21 @@ pub struct GitTagNameArgs {
 pub struct GitCommitOidArgs {
     pub repo_path: String,
     pub oid: String,
+}
+
+// ────── git.diff_revs ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitDiffRevsArgs {
+    pub repo_path: String,
+    /// Source revision. Pass `"WORKTREE"` for the working tree + index.
+    pub from: String,
+    /// Destination revision. Pass `"WORKTREE"` for the working tree + index.
+    pub to: String,
+    #[serde(default = "default_true")]
+    pub find_renames: bool,
+}
+
+fn default_true() -> bool {
+    true
 }

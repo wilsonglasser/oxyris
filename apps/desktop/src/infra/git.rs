@@ -17,10 +17,10 @@ use oxyris_git::{
 };
 use oxyris_ipc::ops::{
     GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCommitArgs,
-    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs,
-    GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs,
-    GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs, GitTagCreateArgs,
-    GitTagNameArgs, op_name,
+    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitDiffRevsArgs,
+    GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs,
+    GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs,
+    GitTagCreateArgs, GitTagNameArgs, op_name,
 };
 use thiserror::Error;
 
@@ -879,6 +879,43 @@ pub async fn revert(
                     serde_json::to_value(GitCommitOidArgs {
                         repo_path: repo_path.to_owned(),
                         oid,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn diff_revs(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    from: String,
+    to: String,
+    find_renames: bool,
+) -> Result<Vec<FileDiff>, GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            let f = from.clone();
+            let t = to.clone();
+            tokio::task::spawn_blocking(move || git_status::diff_revs(&p, &f, &t, find_renames))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_DIFF_REVS,
+                    serde_json::to_value(GitDiffRevsArgs {
+                        repo_path: repo_path.to_owned(),
+                        from,
+                        to,
+                        find_renames,
                     })
                     .map_err(|e| GitError::Agent(e.to_string()))?,
                 )

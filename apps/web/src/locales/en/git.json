@@ -59,5 +59,13 @@
   "revert_conflict": "Revert produced conflicts — resolve in the changes list, then commit.",
   "tag_here": "Tag this commit",
   "tag_name_prompt": "Tag name:",
-  "tag_message_prompt": "Annotation message (blank = lightweight):"
+  "tag_message_prompt": "Annotation message (blank = lightweight):",
+  "rev_show_changes": "Show changes in this commit",
+  "rev_show_changes_in": "Changes in {{id}}",
+  "rev_compare_with_head": "{{id}} → HEAD",
+  "rev_compare_with_head_short": "Compare with HEAD",
+  "rev_compare_with_worktree": "{{id}} → working tree",
+  "rev_compare_with_worktree_short": "Compare with working tree",
+  "rev_diff_empty": "No file changes between revisions.",
+  "close": "Close"
 }

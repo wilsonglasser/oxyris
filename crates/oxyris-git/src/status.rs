@@ -338,6 +338,104 @@ pub fn commit(repo_path: &str, message: &str, amend: bool) -> Result<CommitResul
     })
 }
 
+// ────── diff between two revisions (or rev → workdir) ─────────────────────
+
+/// Diff every file changed between `from` and `to`. Either side can be a
+/// commit SHA, branch name, tag, or `"WORKTREE"` to mean the working tree
+/// (the same shape `git diff <rev>` uses). Pass `find_renames` to run
+/// libgit2's similarity matcher so the result surfaces renames as renames
+/// instead of delete + add.
+pub fn diff_revs(
+    repo_path: &str,
+    from: &str,
+    to: &str,
+    find_renames: bool,
+) -> Result<Vec<FileDiff>, GitError> {
+    let repo = open(repo_path)?;
+    let mut opts = git2::DiffOptions::new();
+    opts.show_binary(false).context_lines(3);
+
+    let diff = match (from, to) {
+        ("WORKTREE", _) | (_, "WORKTREE") => {
+            // Workdir comparisons go through `diff_tree_to_workdir_with_index`
+            // so unstaged + staged + untracked all show up consistently.
+            let rev = if from == "WORKTREE" { to } else { from };
+            let tree = repo.revparse_single(rev)?.peel_to_tree()?;
+            opts.include_untracked(true).recurse_untracked_dirs(true);
+            repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))?
+        }
+        _ => {
+            let from_tree = repo.revparse_single(from)?.peel_to_tree()?;
+            let to_tree = repo.revparse_single(to)?.peel_to_tree()?;
+            repo.diff_tree_to_tree(Some(&from_tree), Some(&to_tree), Some(&mut opts))?
+        }
+    };
+
+    let mut diff = diff;
+    if find_renames {
+        let mut find_opts = git2::DiffFindOptions::new();
+        find_opts.renames(true).copies(true);
+        diff.find_similar(Some(&mut find_opts))?;
+    }
+
+    let mut files: Vec<FileDiff> = Vec::new();
+    for delta in diff.deltas() {
+        let new_path = delta
+            .new_file()
+            .path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let old_path = delta
+            .old_file()
+            .path()
+            .map(|p| p.to_string_lossy().into_owned());
+        let renamed_old = old_path.filter(|p| p.as_str() != new_path.as_str());
+
+        let old_content = if delta.old_file().id().is_zero() {
+            None
+        } else {
+            read_blob(&repo, delta.old_file().id()).ok()
+        };
+        let new_content = if delta.new_file().id().is_zero() {
+            None
+        } else {
+            read_blob(&repo, delta.new_file().id()).ok()
+        };
+
+        files.push(FileDiff {
+            path: new_path,
+            old_path: renamed_old,
+            status: FileStatus::from(delta.status()),
+            old_content,
+            new_content,
+            unified: String::new(),
+        });
+    }
+
+    let mut buffers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+        let path = delta
+            .new_file()
+            .path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let buf = buffers.entry(path).or_default();
+        let origin = line.origin();
+        if matches!(origin, '+' | '-' | ' ') {
+            buf.push(origin);
+        }
+        buf.push_str(&String::from_utf8_lossy(line.content()));
+        true
+    })?;
+    for f in &mut files {
+        if let Some(text) = buffers.remove(&f.path) {
+            f.unified = text;
+        }
+    }
+
+    Ok(files)
+}
+
 // ────── apply patch (hunk-level stage / unstage) ───────────────────────────
 
 /// Apply a unified-diff patch to the index. Used for hunk-level staging.

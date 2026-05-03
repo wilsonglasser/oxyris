@@ -672,6 +672,37 @@ pub async fn git_revert(
     Ok(GitCommitOidOutput { oid })
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GitDiffRevsInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub from: String,
+    pub to: String,
+    #[serde(default = "default_true_renames")]
+    pub find_renames: bool,
+}
+
+fn default_true_renames() -> bool {
+    true
+}
+
+#[tauri::command]
+pub async fn git_diff_revs(
+    input: GitDiffRevsInput,
+    state: State<'_, AppState>,
+) -> Result<Vec<FileDiff>, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::diff_revs(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.from,
+        input.to,
+        input.find_renames,
+    )
+    .await?)
+}
+
 fn parse_mode(s: &str) -> Result<DiffMode, TauriGitError> {
     match s {
         "working_vs_head" => Ok(DiffMode::WorkingVsHead),

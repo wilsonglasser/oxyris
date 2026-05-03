@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  FileDiff as FileDiffIcon,
   GitBranch,
   GitCommit,
   History,
@@ -30,6 +31,7 @@ import {
 } from "~/stores/gitStore.ts";
 import type { DiffMode, StatusEntry } from "~/ipc/git.ts";
 import { MonacoDiffViewer } from "~/components/MonacoDiffViewer.tsx";
+import { RevDiffModal } from "~/components/RevDiffModal.tsx";
 import { MergeEditor } from "~/components/MergeEditor.tsx";
 import {
   buildSingleHunkPatch,
@@ -422,6 +424,9 @@ function LogSection({
   const [menu, setMenu] = useState<
     { x: number; y: number; oid: string; short: string } | null
   >(null);
+  const [revDiff, setRevDiff] = useState<
+    { from: string; to: string; title: string } | null
+  >(null);
 
   useEffect(() => {
     if (open) {
@@ -505,6 +510,52 @@ function LogSection({
         >
           <button
             type="button"
+            onClick={() => {
+              setRevDiff({
+                from: `${menu.oid}^`,
+                to: menu.oid,
+                title: t("rev_show_changes_in", { id: menu.short }),
+              });
+              setMenu(null);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
+          >
+            <FileDiffIcon size={11} />
+            {t("rev_show_changes")}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRevDiff({
+                from: menu.oid,
+                to: "HEAD",
+                title: t("rev_compare_with_head", { id: menu.short }),
+              });
+              setMenu(null);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
+          >
+            <FileDiffIcon size={11} />
+            {t("rev_compare_with_head_short")}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRevDiff({
+                from: menu.oid,
+                to: "WORKTREE",
+                title: t("rev_compare_with_worktree", { id: menu.short }),
+              });
+              setMenu(null);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
+          >
+            <FileDiffIcon size={11} />
+            {t("rev_compare_with_worktree_short")}
+          </button>
+          <div className="my-1 border-t border-neutral-800" />
+          <button
+            type="button"
             onClick={async () => {
               setMenu(null);
               const oid = await cherryPick(projectId, worktreeId, menu.oid);
@@ -548,6 +599,17 @@ function LogSection({
             {t("tag_here")}
           </button>
         </div>
+      )}
+      {revDiff && (
+        <RevDiffModal
+          projectId={projectId}
+          worktreeId={worktreeId}
+          from={revDiff.from}
+          to={revDiff.to}
+          title={revDiff.title}
+          open
+          onClose={() => setRevDiff(null)}
+        />
       )}
     </div>
   );
