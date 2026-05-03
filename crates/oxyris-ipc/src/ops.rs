@@ -12,6 +12,12 @@ pub mod op_name {
     pub const FS_WRITE: &str = "fs.write";
     pub const FS_WALK: &str = "fs.walk";
     pub const FS_LIST_DIR: &str = "fs.list_dir";
+    pub const FS_CREATE_FILE: &str = "fs.create_file";
+    pub const FS_CREATE_DIR: &str = "fs.create_dir";
+    pub const FS_RENAME: &str = "fs.rename";
+    pub const FS_DELETE: &str = "fs.delete";
+    pub const FS_READ_BYTES: &str = "fs.read_bytes";
+    pub const FS_SEARCH_PATHS: &str = "fs.search_paths";
     pub const GIT_LIST_BRANCHES: &str = "git.list_branches";
     pub const GIT_LIST_WORKTREES: &str = "git.list_worktrees";
     pub const GIT_CREATE_WORKTREE: &str = "git.create_worktree";
@@ -158,6 +164,83 @@ pub struct FsListDirEntry {
 pub struct FsListDirResult {
     pub path: String,
     pub entries: Vec<FsListDirEntry>,
+}
+
+// ────── fs.create_file / create_dir / rename / delete ─────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsPathArgs {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsCreateFileArgs {
+    pub path: String,
+    /// Initial contents; empty by default. Useful for templates.
+    #[serde(default)]
+    pub contents: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsRenameArgs {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsDeleteArgs {
+    pub path: String,
+    /// When true, recursively delete a directory. Required for non-empty
+    /// dirs; ignored for files.
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+// ────── fs.read_bytes (binary preview) ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsReadBytesArgs {
+    pub path: String,
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsReadBytesResult {
+    pub path: String,
+    /// Base64-encoded contents.
+    pub bytes_b64: String,
+    pub bytes_read: u64,
+    pub truncated: bool,
+}
+
+// ────── fs.search_paths (Ctrl+P quick open) ────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsSearchPathsArgs {
+    pub root: String,
+    pub query: String,
+    #[serde(default = "default_search_limit")]
+    pub limit: u32,
+}
+
+fn default_search_limit() -> u32 {
+    50
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsSearchHit {
+    /// Path relative to `root`.
+    pub rel_path: String,
+    /// Match score (lower = better; bare substring index of last matched
+    /// character in the basename — simple but effective).
+    pub score: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsSearchPathsResult {
+    pub hits: Vec<FsSearchHit>,
+    pub truncated: bool,
 }
 
 // ────── git.* ──────────────────────────────────────────────────────────────

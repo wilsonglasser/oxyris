@@ -4,6 +4,8 @@ import { ChatPanel } from "~/components/ChatPanel.tsx";
 import { FilesPanel } from "~/components/FilesPanel.tsx";
 import { GitPanel } from "~/components/GitPanel.tsx";
 import { Modal } from "~/components/Modal.tsx";
+import { QuickFileSearch } from "~/components/QuickFileSearch.tsx";
+import { PRIMARY_WORKTREE_ID } from "~/ipc/worktree.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 import { ProjectPanel } from "~/components/ProjectPanel.tsx";
 import { ProjectSettingsModal } from "~/components/ProjectSettingsModal.tsx";
@@ -39,7 +41,11 @@ export function App() {
     null,
   );
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const sessionSnapshot = useSessionStore((s) =>
+    activeSessionId ? s.snapshots[activeSessionId] : null,
+  );
   const setActiveSession = useSessionStore((s) => s.setActive);
   const bindings = useKeybindingsStore((s) => s.bindings);
   const loadBindings = useKeybindingsStore((s) => s.load);
@@ -130,10 +136,25 @@ export function App() {
         input?.focus();
         input?.select();
       }
+      // Ctrl+P / Cmd+P opens the quick file search modal (project-scoped).
+      // Fires from any tab, including chat — feels like an editor shortcut.
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "p" &&
+        activeId
+      ) {
+        e.preventDefault();
+        setQuickOpen(true);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [bindings, activeSessionId, activeId, setActiveSession]);
+
+  const quickWorktreeId =
+    sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
 
   const center = active ? (
     <div className="flex items-center gap-2">
@@ -260,6 +281,15 @@ export function App() {
           />
         )}
       </Modal>
+
+      {activeId && (
+        <QuickFileSearch
+          projectId={activeId}
+          worktreeId={quickWorktreeId}
+          open={quickOpen}
+          onClose={() => setQuickOpen(false)}
+        />
+      )}
 
       {cleanupReport && (
         <div

@@ -19,5 +19,17 @@
   "ctx_close_all": "Close all",
   "view_raw": "Raw",
   "view_preview": "Preview",
-  "preview_unsupported": "Preview not supported for this file type."
+  "preview_unsupported": "Preview not supported for this file type.",
+  "ctx_new_file": "New file",
+  "ctx_new_folder": "New folder",
+  "ctx_rename": "Rename",
+  "ctx_delete": "Delete",
+  "prompt_new_file": "New file name (path can include slashes):",
+  "prompt_new_folder": "New folder name:",
+  "prompt_rename": "Rename to:",
+  "confirm_delete": "Delete \"{{path}}\"? This cannot be undone.",
+  "op_failed": "Operation failed",
+  "quick_open_placeholder": "Search files…",
+  "quick_open_no_results": "No matches.",
+  "quick_open_hint": "Type to search files in this worktree."
 }

@@ -12,7 +12,9 @@ use std::path::{Component, Path, PathBuf};
 
 use oxyris_core::{AggregateId, Environment};
 use oxyris_ipc::ops::{
-    FsListDirArgs, FsListDirResult, FsReadArgs, FsReadResult, FsWriteArgs, FsWriteResult, op_name,
+    FsCreateFileArgs, FsDeleteArgs, FsListDirArgs, FsListDirResult, FsPathArgs, FsReadArgs,
+    FsReadBytesArgs, FsReadBytesResult, FsReadResult, FsRenameArgs, FsSearchPathsArgs,
+    FsSearchPathsResult, FsWriteArgs, FsWriteResult, op_name,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -217,6 +219,205 @@ pub async fn write_file(
     }
 }
 
+pub async fn create_file(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    abs_path: String,
+    contents: String,
+) -> Result<(), FsError> {
+    match env {
+        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+            let path = Path::new(&abs_path);
+            if path.exists() {
+                return Err(FsError::InvalidPath(format!("already exists: {abs_path}")));
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, &contents)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| FsError::Agent(format!("join: {e}")))?,
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::FS_CREATE_FILE,
+                    serde_json::to_value(FsCreateFileArgs {
+                        path: abs_path,
+                        contents,
+                    })
+                    .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn create_dir(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    abs_path: String,
+) -> Result<(), FsError> {
+    match env {
+        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+            std::fs::create_dir_all(&abs_path)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| FsError::Agent(format!("join: {e}")))?,
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::FS_CREATE_DIR,
+                    serde_json::to_value(FsPathArgs { path: abs_path })
+                        .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn rename(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    from: String,
+    to: String,
+) -> Result<(), FsError> {
+    match env {
+        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+            let from_p = Path::new(&from);
+            let to_p = Path::new(&to);
+            if !from_p.exists() {
+                return Err(FsError::InvalidPath(format!("not found: {from}")));
+            }
+            if let Some(parent) = to_p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(from_p, to_p)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| FsError::Agent(format!("join: {e}")))?,
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::FS_RENAME,
+                    serde_json::to_value(FsRenameArgs { from, to })
+                        .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn delete(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    abs_path: String,
+    recursive: bool,
+) -> Result<(), FsError> {
+    match env {
+        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+            let path = Path::new(&abs_path);
+            if !path.exists() {
+                return Err(FsError::InvalidPath(format!("not found: {abs_path}")));
+            }
+            let md = std::fs::symlink_metadata(path)?;
+            if md.is_dir() {
+                if recursive {
+                    std::fs::remove_dir_all(path)?;
+                } else {
+                    std::fs::remove_dir(path)?;
+                }
+            } else {
+                std::fs::remove_file(path)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| FsError::Agent(format!("join: {e}")))?,
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::FS_DELETE,
+                    serde_json::to_value(FsDeleteArgs {
+                        path: abs_path,
+                        recursive,
+                    })
+                    .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn read_bytes(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    abs_path: String,
+    max_bytes: Option<u64>,
+) -> Result<FsReadBytesResult, FsError> {
+    match env {
+        Environment::Windows => {
+            tokio::task::spawn_blocking(move || read_bytes_native(&abs_path, max_bytes))
+                .await
+                .map_err(|e| FsError::Agent(format!("join: {e}")))?
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::FS_READ_BYTES,
+                    serde_json::to_value(FsReadBytesArgs {
+                        path: abs_path,
+                        max_bytes,
+                    })
+                    .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| FsError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn search_paths(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    root: String,
+    query: String,
+    limit: u32,
+) -> Result<FsSearchPathsResult, FsError> {
+    match env {
+        Environment::Windows => {
+            let r = root.clone();
+            let q = query.clone();
+            tokio::task::spawn_blocking(move || search_paths_native(&r, &q, limit))
+                .await
+                .map_err(|e| FsError::Agent(format!("join: {e}")))?
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::FS_SEARCH_PATHS,
+                    serde_json::to_value(FsSearchPathsArgs { root, query, limit })
+                        .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| FsError::Agent(e.to_string()))
+        }
+    }
+}
+
 // ────── native impls (Windows projects) ────────────────────────────────────
 
 const DEFAULT_READ_CAP: u64 = 1_048_576;
@@ -302,6 +503,99 @@ fn write_file_native(path_str: &str, contents: &str) -> Result<FsWriteResult, Fs
         path: path_str.to_owned(),
         bytes_written: contents.len() as u64,
     })
+}
+
+fn read_bytes_native(path_str: &str, max_bytes: Option<u64>) -> Result<FsReadBytesResult, FsError> {
+    use base64::Engine;
+    use std::io::Read;
+    let path = Path::new(path_str);
+    if !path.exists() {
+        return Err(FsError::InvalidPath(format!("not found: {path_str}")));
+    }
+    let cap = max_bytes.unwrap_or(16 * 1024 * 1024);
+    let mut file = std::fs::File::open(path)?;
+    let total = file.metadata()?.len();
+    let mut buf = Vec::with_capacity(cap.min(total) as usize);
+    (&mut file).take(cap).read_to_end(&mut buf)?;
+    let bytes_read = buf.len() as u64;
+    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+    Ok(FsReadBytesResult {
+        path: path_str.to_owned(),
+        bytes_b64,
+        bytes_read,
+        truncated: total > bytes_read,
+    })
+}
+
+fn search_paths_native(
+    root_str: &str,
+    query: &str,
+    limit: u32,
+) -> Result<FsSearchPathsResult, FsError> {
+    use ignore::WalkBuilder;
+    use oxyris_ipc::ops::FsSearchHit;
+    let root = Path::new(root_str);
+    if !root.exists() {
+        return Err(FsError::InvalidPath(format!("not found: {root_str}")));
+    }
+    let q_lower = query.to_lowercase();
+    let mut hits: Vec<FsSearchHit> = Vec::new();
+    let mut walked = 0u32;
+    let mut truncated = false;
+    const WALK_CAP: u32 = 20_000;
+
+    for dent in WalkBuilder::new(root)
+        .standard_filters(true)
+        .hidden(false)
+        .follow_links(false)
+        .build()
+    {
+        let Ok(dent) = dent else { continue };
+        walked += 1;
+        if walked > WALK_CAP {
+            truncated = true;
+            break;
+        }
+        if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(rel) = dent.path().strip_prefix(root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !q_lower.is_empty() {
+            let hay = rel_str.to_lowercase();
+            if !hay.contains(&q_lower) {
+                continue;
+            }
+            let basename = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let in_base = basename.to_lowercase().contains(&q_lower);
+            let depth = rel.components().count() as i32;
+            let score = if in_base { depth } else { depth + 100 };
+            hits.push(FsSearchHit {
+                rel_path: rel_str,
+                score,
+            });
+        } else {
+            hits.push(FsSearchHit {
+                rel_path: rel_str,
+                score: rel.components().count() as i32,
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| {
+        a.score
+            .cmp(&b.score)
+            .then_with(|| a.rel_path.len().cmp(&b.rel_path.len()))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+    let cap = limit as usize;
+    if hits.len() > cap {
+        hits.truncate(cap);
+        truncated = true;
+    }
+    Ok(FsSearchPathsResult { hits, truncated })
 }
 
 #[cfg(test)]

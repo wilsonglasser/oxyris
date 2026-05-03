@@ -125,6 +125,121 @@ pub async fn fs_write_file(
     })
 }
 
+// ────── file ops (create / rename / delete) ───────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct FsCreateInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub rel_path: String,
+    #[serde(default)]
+    pub contents: String,
+}
+
+#[tauri::command]
+pub async fn fs_create_file(
+    input: FsCreateInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    fs_infra::create_file(&env, &state.agent_pool, abs, input.contents).await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FsCreateDirInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub rel_path: String,
+}
+
+#[tauri::command]
+pub async fn fs_create_dir(
+    input: FsCreateDirInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    fs_infra::create_dir(&env, &state.agent_pool, abs).await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FsRenameInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub from_rel: String,
+    pub to_rel: String,
+}
+
+#[tauri::command]
+pub async fn fs_rename(
+    input: FsRenameInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let from = fs_infra::join_inside_worktree(&env, &root, &input.from_rel)?;
+    let to = fs_infra::join_inside_worktree(&env, &root, &input.to_rel)?;
+    fs_infra::rename(&env, &state.agent_pool, from, to).await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FsDeleteInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub rel_path: String,
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+#[tauri::command]
+pub async fn fs_delete(
+    input: FsDeleteInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    fs_infra::delete(&env, &state.agent_pool, abs, input.recursive).await?;
+    Ok(())
+}
+
+// ────── quick file search (Ctrl+P) ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct FsSearchInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub query: String,
+    #[serde(default = "default_search_limit")]
+    pub limit: u32,
+}
+
+fn default_search_limit() -> u32 {
+    50
+}
+
+#[derive(Debug, Serialize)]
+pub struct FsSearchOutput {
+    pub hits: Vec<oxyris_ipc::ops::FsSearchHit>,
+    pub truncated: bool,
+}
+
+#[tauri::command]
+pub async fn fs_search_paths(
+    input: FsSearchInput,
+    state: State<'_, AppState>,
+) -> Result<FsSearchOutput, TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let result =
+        fs_infra::search_paths(&env, &state.agent_pool, root, input.query, input.limit).await?;
+    Ok(FsSearchOutput {
+        hits: result.hits,
+        truncated: result.truncated,
+    })
+}
+
 // ────── binary read for previews (images, PDFs) ───────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -158,46 +273,25 @@ pub async fn fs_read_file_bytes(
     input: FsReadFileBytesInput,
     state: State<'_, AppState>,
 ) -> Result<FsReadFileBytesOutput, TauriFsError> {
-    use base64::Engine;
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
     let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
-    let cap = input.max_bytes.unwrap_or(PREVIEW_DEFAULT_CAP);
-    // Reuse the text read path with the cap, then re-encode the lossy UTF-8
-    // string back to bytes via the original file system. For binary fidelity
-    // we read bytes natively here (Windows) or via fs.read on the agent for
-    // WSL — agent returns lossy UTF-8 today, which is wrong for binary. As
-    // a stopgap we forbid WSL previews until a binary-safe agent op lands.
-    let (bytes, truncated) = match env {
-        oxyris_core::Environment::Windows => {
-            let abs_clone = abs.clone();
-            tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, bool), std::io::Error> {
-                use std::io::Read;
-                let mut f = std::fs::File::open(&abs_clone)?;
-                let total = f.metadata()?.len();
-                let take = cap.min(total);
-                let mut buf = Vec::with_capacity(take as usize);
-                f.by_ref().take(cap).read_to_end(&mut buf)?;
-                Ok((buf, total > take))
-            })
-            .await
-            .map_err(|e| TauriFsError::Backend(format!("join: {e}")))?
-            .map_err(|e| TauriFsError::Backend(e.to_string()))?
-        }
-        oxyris_core::Environment::Wsl { .. } => {
-            return Err(TauriFsError::Backend(
-                "binary preview in WSL projects not yet supported".into(),
-            ));
-        }
-    };
-    let bytes_read = bytes.len() as u64;
-    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    // Both branches go through the shared facade now (`fs_infra::read_bytes`):
+    // Windows reads via std::fs in spawn_blocking, WSL routes through the
+    // per-distro agent's binary-safe `fs.read_bytes` op.
+    let bytes_result = fs_infra::read_bytes(
+        &env,
+        &state.agent_pool,
+        abs.clone(),
+        Some(input.max_bytes.unwrap_or(PREVIEW_DEFAULT_CAP)),
+    )
+    .await?;
     let mime = mime_for_path(&input.rel_path);
     Ok(FsReadFileBytesOutput {
         abs_path: abs,
-        bytes_b64,
+        bytes_b64: bytes_result.bytes_b64,
         mime,
-        bytes_read,
-        truncated,
+        bytes_read: bytes_result.bytes_read,
+        truncated: bytes_result.truncated,
     })
 }
 

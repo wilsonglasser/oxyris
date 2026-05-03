@@ -375,10 +375,39 @@ pub async fn git_generate_commit_message(
                 .map_err(|e| TauriGitError::Backend(format!("claude not on PATH: {e}")))?;
             (diff_out, path)
         }
-        Environment::Wsl { .. } => {
-            return Err(TauriGitError::Backend(
-                "WSL claude generation not yet supported".into(),
-            ));
+        Environment::Wsl { distro } => {
+            // One-shot bash invocation: cd into the repo, pipe the staged
+            // diff through claude inside the distro. Uses the user's claude
+            // install + auth state inside WSL — no shimming through Windows.
+            let posix_repo = root.clone();
+            let escaped_prompt = prompt.replace('\'', "'\\''");
+            let script = format!(
+                "set -euo pipefail; cd '{posix_repo}'; \
+                 diff=\"$(git diff --cached)\"; \
+                 if [ -z \"$diff\" ]; then echo 'NOTHING_STAGED' >&2; exit 2; fi; \
+                 printf '%s' \"$diff\" | claude -p '{escaped_prompt}'"
+            );
+            let out = Command::new("wsl.exe")
+                .args(["-d", distro.as_str(), "--", "bash", "-lc", &script])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| TauriGitError::Backend(format!("spawn wsl: {e}")))?;
+            if !out.status.success() {
+                let stderr = crate::infra::decode_wsl_output_for_command(&out.stderr);
+                if stderr.contains("NOTHING_STAGED") {
+                    return Err(TauriGitError::Backend("nothing staged".into()));
+                }
+                return Err(TauriGitError::Backend(format!(
+                    "wsl claude failed: {}",
+                    stderr.trim()
+                )));
+            }
+            let message = crate::infra::decode_wsl_output_for_command(&out.stdout)
+                .trim()
+                .to_owned();
+            return Ok(GitGenerateCommitMsgOutput { message });
         }
     };
 

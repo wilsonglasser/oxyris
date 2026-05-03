@@ -4,8 +4,8 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 use oxyris_ipc::ops::{
-    FsListDirEntry, FsListDirResult, FsReadResult, FsStatResult, FsWalkArgs, FsWalkEvent,
-    FsWalkResult, FsWriteResult,
+    FsListDirEntry, FsListDirResult, FsReadBytesResult, FsReadResult, FsSearchHit,
+    FsSearchPathsResult, FsStatResult, FsWalkArgs, FsWalkEvent, FsWalkResult, FsWriteResult,
 };
 
 use crate::ops::OpError;
@@ -127,6 +127,150 @@ pub fn list_dir(path_str: &str, show_hidden: bool) -> Result<FsListDirResult, Op
         path: path_str.to_owned(),
         entries,
     })
+}
+
+pub fn create_file(path_str: &str, contents: &str) -> Result<(), OpError> {
+    let path = Path::new(path_str);
+    if path.exists() {
+        return Err(OpError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("already exists: {path_str}"),
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+pub fn create_dir(path_str: &str) -> Result<(), OpError> {
+    let path = Path::new(path_str);
+    fs::create_dir_all(path)?;
+    Ok(())
+}
+
+pub fn rename(from_str: &str, to_str: &str) -> Result<(), OpError> {
+    let from = Path::new(from_str);
+    let to = Path::new(to_str);
+    if !from.exists() {
+        return Err(OpError::NotFound(from_str.to_owned()));
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(from, to)?;
+    Ok(())
+}
+
+pub fn delete(path_str: &str, recursive: bool) -> Result<(), OpError> {
+    let path = Path::new(path_str);
+    if !path.exists() {
+        return Err(OpError::NotFound(path_str.to_owned()));
+    }
+    let md = fs::symlink_metadata(path)?;
+    if md.is_dir() {
+        if recursive {
+            fs::remove_dir_all(path)?;
+        } else {
+            fs::remove_dir(path)?;
+        }
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+pub fn read_bytes(path_str: &str, max_bytes: Option<u64>) -> Result<FsReadBytesResult, OpError> {
+    use base64::Engine;
+    use std::io::Read;
+    let path = Path::new(path_str);
+    if !path.exists() {
+        return Err(OpError::NotFound(path_str.to_owned()));
+    }
+    let cap = max_bytes.unwrap_or(16 * 1024 * 1024);
+    let mut file = fs::File::open(path)?;
+    let total = file.metadata()?.len();
+    let mut buf = Vec::with_capacity(cap.min(total) as usize);
+    (&mut file).take(cap).read_to_end(&mut buf)?;
+    let bytes_read = buf.len() as u64;
+    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+    Ok(FsReadBytesResult {
+        path: path_str.to_owned(),
+        bytes_b64,
+        bytes_read,
+        truncated: total > bytes_read,
+    })
+}
+
+pub fn search_paths(
+    root_str: &str,
+    query: &str,
+    limit: u32,
+) -> Result<FsSearchPathsResult, OpError> {
+    let root = Path::new(root_str);
+    if !root.exists() {
+        return Err(OpError::NotFound(root_str.to_owned()));
+    }
+    let q_lower = query.to_lowercase();
+    let mut hits: Vec<FsSearchHit> = Vec::new();
+    let mut walked = 0u32;
+    let mut truncated = false;
+    const WALK_CAP: u32 = 20_000;
+
+    for dent in WalkBuilder::new(root)
+        .standard_filters(true)
+        .hidden(false)
+        .follow_links(false)
+        .build()
+    {
+        let Ok(dent) = dent else { continue };
+        walked += 1;
+        if walked > WALK_CAP {
+            truncated = true;
+            break;
+        }
+        if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(rel) = dent.path().strip_prefix(root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if !q_lower.is_empty() {
+            let hay = rel_str.to_lowercase();
+            let Some(_idx) = hay.find(&q_lower) else {
+                continue;
+            };
+            // Score: prefer matches in the basename, then earlier matches.
+            let basename = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let in_base = basename.to_lowercase().contains(&q_lower);
+            let depth = rel.components().count() as i32;
+            let score = if in_base { depth } else { depth + 100 };
+            hits.push(FsSearchHit {
+                rel_path: rel_str,
+                score,
+            });
+        } else {
+            hits.push(FsSearchHit {
+                rel_path: rel_str,
+                score: rel.components().count() as i32,
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| {
+        a.score
+            .cmp(&b.score)
+            .then_with(|| a.rel_path.len().cmp(&b.rel_path.len()))
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+    let cap = limit as usize;
+    if hits.len() > cap {
+        hits.truncate(cap);
+        truncated = true;
+    }
+    Ok(FsSearchPathsResult { hits, truncated })
 }
 
 pub async fn walk(request_id: &str, args: FsWalkArgs) -> Result<FsWalkResult, OpError> {

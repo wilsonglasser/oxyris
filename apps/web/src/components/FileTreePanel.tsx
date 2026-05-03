@@ -4,9 +4,13 @@ import {
   ChevronDown,
   ChevronRight,
   File,
+  FilePlus,
   Folder,
   FolderOpen,
+  FolderPlus,
+  Pencil,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 import {
   PRIMARY_WORKTREE_ID,
@@ -48,6 +52,80 @@ export function FileTreePanel({
   const toggleExpand = useFileEditorStore((s) => s.toggleExpand);
   const openFile = useFileEditorStore((s) => s.openFile);
   const refreshDir = useFileEditorStore((s) => s.refreshDir);
+  const createFile = useFileEditorStore((s) => s.createFile);
+  const createDir = useFileEditorStore((s) => s.createDir);
+  const renameEntry = useFileEditorStore((s) => s.renameEntry);
+  const deleteEntry = useFileEditorStore((s) => s.deleteEntry);
+
+  const [menu, setMenu] = useState<
+    | { x: number; y: number; relPath: string; isDir: boolean }
+    | null
+  >(null);
+
+  // Dismiss context menu on outside click / escape.
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  const promptNewFile = async (parentRel: string) => {
+    setMenu(null);
+    const name = window.prompt(t("prompt_new_file"));
+    if (!name) return;
+    const target = parentRel ? `${parentRel}/${name}` : name;
+    try {
+      await createFile(projectId, worktreeId, target);
+      await openFile(projectId, worktreeId, target);
+    } catch (e) {
+      window.alert(`${t("op_failed")}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const promptNewFolder = async (parentRel: string) => {
+    setMenu(null);
+    const name = window.prompt(t("prompt_new_folder"));
+    if (!name) return;
+    const target = parentRel ? `${parentRel}/${name}` : name;
+    try {
+      await createDir(projectId, worktreeId, target);
+    } catch (e) {
+      window.alert(`${t("op_failed")}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const promptRename = async (relPath: string) => {
+    setMenu(null);
+    const idx = relPath.lastIndexOf("/");
+    const oldName = idx >= 0 ? relPath.slice(idx + 1) : relPath;
+    const parent = idx >= 0 ? relPath.slice(0, idx) : "";
+    const newName = window.prompt(t("prompt_rename"), oldName);
+    if (!newName || newName === oldName) return;
+    const target = parent ? `${parent}/${newName}` : newName;
+    try {
+      await renameEntry(projectId, worktreeId, relPath, target);
+    } catch (e) {
+      window.alert(`${t("op_failed")}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  const confirmDelete = async (relPath: string, isDir: boolean) => {
+    setMenu(null);
+    if (!window.confirm(t("confirm_delete", { path: relPath }))) return;
+    try {
+      await deleteEntry(projectId, worktreeId, relPath, isDir);
+    } catch (e) {
+      window.alert(`${t("op_failed")}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
 
   // Refresh worktrees when project changes.
   useEffect(() => {
@@ -98,7 +176,17 @@ export function FileTreePanel({
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto py-1">
+      <div
+        className="min-h-0 flex-1 overflow-auto py-1"
+        onContextMenu={(e) => {
+          // Right-click on the empty area opens a root-scoped menu so the
+          // user can create a new file/folder at the worktree root.
+          if (e.target === e.currentTarget) {
+            e.preventDefault();
+            setMenu({ x: e.clientX, y: e.clientY, relPath: "", isDir: true });
+          }
+        }}
+      >
         {rootLoading && !rootChildren && (
           <div className="px-3 py-2 text-neutral-500">{t("loading")}</div>
         )}
@@ -122,10 +210,81 @@ export function FileTreePanel({
             expanded={expanded}
             onToggle={toggleExpand}
             onOpen={openFile}
+            onContextMenu={(x, y, relPath, isDir) =>
+              setMenu({ x, y, relPath, isDir })
+            }
           />
         ))}
       </div>
+
+      {menu && (
+        <div
+          style={{ left: menu.x, top: menu.y }}
+          className="fixed z-50 min-w-[160px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-lg"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {menu.isDir && (
+            <>
+              <MenuItem
+                icon={<FilePlus size={11} />}
+                label={t("ctx_new_file")}
+                onClick={() => void promptNewFile(menu.relPath)}
+              />
+              <MenuItem
+                icon={<FolderPlus size={11} />}
+                label={t("ctx_new_folder")}
+                onClick={() => void promptNewFolder(menu.relPath)}
+              />
+            </>
+          )}
+          {menu.relPath !== "" && (
+            <>
+              {menu.isDir && (
+                <div className="my-1 border-t border-neutral-800" />
+              )}
+              <MenuItem
+                icon={<Pencil size={11} />}
+                label={t("ctx_rename")}
+                onClick={() => void promptRename(menu.relPath)}
+              />
+              <MenuItem
+                icon={<Trash2 size={11} />}
+                label={t("ctx_delete")}
+                danger
+                onClick={() => void confirmDelete(menu.relPath, menu.isDir)}
+              />
+            </>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+function MenuItem({
+  icon,
+  label,
+  onClick,
+  danger,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full items-center gap-2 px-3 py-1 text-left ${
+        danger
+          ? "text-red-300 hover:bg-red-900/30"
+          : "text-neutral-200 hover:bg-neutral-900"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
 
@@ -155,6 +314,7 @@ interface NodeProps {
     worktreeId: string,
     relPath: string,
   ) => Promise<void>;
+  onContextMenu: (x: number, y: number, relPath: string, isDir: boolean) => void;
 }
 
 function TreeNode({
@@ -167,6 +327,7 @@ function TreeNode({
   expanded,
   onToggle,
   onOpen,
+  onContextMenu,
 }: NodeProps) {
   const isOpen = !!expanded[relPath];
   const dirNode = tree[relPath];
@@ -177,6 +338,11 @@ function TreeNode({
       <button
         type="button"
         onClick={() => void onOpen(projectId, worktreeId, relPath)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onContextMenu(e.clientX, e.clientY, relPath, false);
+        }}
         className="flex w-full items-center gap-1 px-2 py-0.5 text-left text-neutral-300 hover:bg-neutral-900"
         style={padding}
       >
@@ -191,6 +357,11 @@ function TreeNode({
       <button
         type="button"
         onClick={() => void onToggle(projectId, worktreeId, relPath)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onContextMenu(e.clientX, e.clientY, relPath, true);
+        }}
         className="flex w-full items-center gap-1 px-2 py-0.5 text-left text-neutral-200 hover:bg-neutral-900"
         style={padding}
       >
@@ -236,6 +407,7 @@ function TreeNode({
               expanded={expanded}
               onToggle={onToggle}
               onOpen={onOpen}
+              onContextMenu={onContextMenu}
             />
           ))}
         </div>

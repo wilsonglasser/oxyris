@@ -19,5 +19,17 @@
   "ctx_close_all": "Fechar todas",
   "view_raw": "Raw",
   "view_preview": "Preview",
-  "preview_unsupported": "Preview não suportado para este tipo de arquivo."
+  "preview_unsupported": "Preview não suportado para este tipo de arquivo.",
+  "ctx_new_file": "Novo arquivo",
+  "ctx_new_folder": "Nova pasta",
+  "ctx_rename": "Renomear",
+  "ctx_delete": "Deletar",
+  "prompt_new_file": "Nome do novo arquivo (pode conter barras):",
+  "prompt_new_folder": "Nome da nova pasta:",
+  "prompt_rename": "Renomear para:",
+  "confirm_delete": "Deletar \"{{path}}\"? Não há como desfazer.",
+  "op_failed": "Operação falhou",
+  "quick_open_placeholder": "Buscar arquivos…",
+  "quick_open_no_results": "Nenhum resultado.",
+  "quick_open_hint": "Digite para buscar arquivos na worktree."
 }

@@ -112,6 +112,94 @@ export function fsExternalEditors(): Promise<ExternalEditorInfo[]> {
   return invoke<ExternalEditorInfo[]>("fs_external_editors");
 }
 
+export function fsCreateFile(args: {
+  projectId: string;
+  worktreeId: string;
+  relPath: string;
+  contents?: string;
+}): Promise<void> {
+  return invoke<void>("fs_create_file", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      rel_path: args.relPath,
+      contents: args.contents ?? "",
+    },
+  });
+}
+
+export function fsCreateDir(args: {
+  projectId: string;
+  worktreeId: string;
+  relPath: string;
+}): Promise<void> {
+  return invoke<void>("fs_create_dir", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      rel_path: args.relPath,
+    },
+  });
+}
+
+export function fsRename(args: {
+  projectId: string;
+  worktreeId: string;
+  fromRel: string;
+  toRel: string;
+}): Promise<void> {
+  return invoke<void>("fs_rename", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      from_rel: args.fromRel,
+      to_rel: args.toRel,
+    },
+  });
+}
+
+export function fsDelete(args: {
+  projectId: string;
+  worktreeId: string;
+  relPath: string;
+  recursive?: boolean;
+}): Promise<void> {
+  return invoke<void>("fs_delete", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      rel_path: args.relPath,
+      recursive: args.recursive ?? false,
+    },
+  });
+}
+
+export type FsSearchHit = {
+  rel_path: string;
+  score: number;
+};
+
+export type FsSearchOutput = {
+  hits: FsSearchHit[];
+  truncated: boolean;
+};
+
+export function fsSearchPaths(args: {
+  projectId: string;
+  worktreeId: string;
+  query: string;
+  limit?: number;
+}): Promise<FsSearchOutput> {
+  return invoke<FsSearchOutput>("fs_search_paths", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      query: args.query,
+      limit: args.limit ?? 50,
+    },
+  });
+}
+
 export function fsReadFileBytes(args: {
   projectId: string;
   worktreeId: string;

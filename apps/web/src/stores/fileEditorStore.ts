@@ -1,8 +1,12 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import {
+  fsCreateDir,
+  fsCreateFile,
+  fsDelete,
   fsListDir,
   fsReadFile,
+  fsRename,
   fsWriteFile,
   previewKindFor,
   type FsEntry,
@@ -84,6 +88,28 @@ interface FileEditorState {
     projectId: string,
     worktreeId: string,
     relPath: string,
+  ) => Promise<void>;
+  createFile: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+  ) => Promise<void>;
+  createDir: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+  ) => Promise<void>;
+  renameEntry: (
+    projectId: string,
+    worktreeId: string,
+    fromRel: string,
+    toRel: string,
+  ) => Promise<void>;
+  deleteEntry: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+    recursive: boolean,
   ) => Promise<void>;
 }
 
@@ -324,6 +350,55 @@ export const useFileEditorStore = create<FileEditorState>()(
   refreshDir: async (projectId, worktreeId, relPath) => {
     await get().loadDir(projectId, worktreeId, relPath);
   },
+
+  createFile: async (projectId, worktreeId, relPath) => {
+    await fsCreateFile({ projectId, worktreeId, relPath });
+    await get().loadDir(projectId, worktreeId, parentDir(relPath));
+  },
+
+  createDir: async (projectId, worktreeId, relPath) => {
+    await fsCreateDir({ projectId, worktreeId, relPath });
+    await get().loadDir(projectId, worktreeId, parentDir(relPath));
+  },
+
+  renameEntry: async (projectId, worktreeId, fromRel, toRel) => {
+    await fsRename({ projectId, worktreeId, fromRel, toRel });
+    // Refresh both parent dirs (they may differ when moving across folders).
+    const fromParent = parentDir(fromRel);
+    const toParent = parentDir(toRel);
+    await get().loadDir(projectId, worktreeId, fromParent);
+    if (toParent !== fromParent) {
+      await get().loadDir(projectId, worktreeId, toParent);
+    }
+    // If the renamed file was open, swap its tab key.
+    set((state) => {
+      const order = state.openOrder[worktreeId] ?? [];
+      if (!order.includes(fromRel)) return state;
+      const newOrder = order.map((p) => (p === fromRel ? toRel : p));
+      const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+      const oldTab = tabs[fromRel];
+      if (oldTab) {
+        tabs[toRel] = { ...oldTab, relPath: toRel };
+        delete tabs[fromRel];
+      }
+      const active = state.active[worktreeId] === fromRel ? toRel : state.active[worktreeId];
+      return {
+        openOrder: { ...state.openOrder, [worktreeId]: newOrder },
+        tabs: { ...state.tabs, [worktreeId]: tabs },
+        active: { ...state.active, [worktreeId]: active ?? null },
+      };
+    });
+  },
+
+  deleteEntry: async (projectId, worktreeId, relPath, recursive) => {
+    await fsDelete({ projectId, worktreeId, relPath, recursive });
+    await get().loadDir(projectId, worktreeId, parentDir(relPath));
+    // If the deleted file was open, drop its tab.
+    const order = get().openOrder[worktreeId] ?? [];
+    if (order.includes(relPath)) {
+      get().closeTab(worktreeId, relPath);
+    }
+  },
     }),
     {
       name: "oxyris-file-editor",
@@ -344,4 +419,9 @@ export const useFileEditorStore = create<FileEditorState>()(
 export function joinPath(parent: string, name: string): string {
   if (!parent) return name;
   return `${parent}/${name}`;
+}
+
+function parentDir(relPath: string): string {
+  const idx = relPath.lastIndexOf("/");
+  return idx >= 0 ? relPath.slice(0, idx) : "";
 }

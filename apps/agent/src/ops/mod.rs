@@ -69,6 +69,36 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
             let result = fs::list_dir(&args.path, args.show_hidden)?;
             Ok(serde_json::to_value(result)?)
         }
+        op_name::FS_CREATE_FILE => {
+            let args: oxyris_ipc::ops::FsCreateFileArgs = from_args(args)?;
+            fs::create_file(&args.path, &args.contents)?;
+            Ok(serde_json::Value::Null)
+        }
+        op_name::FS_CREATE_DIR => {
+            let args: oxyris_ipc::ops::FsPathArgs = from_args(args)?;
+            fs::create_dir(&args.path)?;
+            Ok(serde_json::Value::Null)
+        }
+        op_name::FS_RENAME => {
+            let args: oxyris_ipc::ops::FsRenameArgs = from_args(args)?;
+            fs::rename(&args.from, &args.to)?;
+            Ok(serde_json::Value::Null)
+        }
+        op_name::FS_DELETE => {
+            let args: oxyris_ipc::ops::FsDeleteArgs = from_args(args)?;
+            fs::delete(&args.path, args.recursive)?;
+            Ok(serde_json::Value::Null)
+        }
+        op_name::FS_READ_BYTES => {
+            let args: oxyris_ipc::ops::FsReadBytesArgs = from_args(args)?;
+            let result = fs::read_bytes(&args.path, args.max_bytes)?;
+            Ok(serde_json::to_value(result)?)
+        }
+        op_name::FS_SEARCH_PATHS => {
+            let args: oxyris_ipc::ops::FsSearchPathsArgs = from_args(args)?;
+            let result = fs::search_paths(&args.root, &args.query, args.limit)?;
+            Ok(serde_json::to_value(result)?)
+        }
         op_name::GIT_LIST_BRANCHES => git::list_branches(from_args(args)?),
         op_name::GIT_LIST_WORKTREES => git::list_worktrees(from_args(args)?),
         op_name::GIT_CREATE_WORKTREE => git::create_worktree(from_args(args)?),
