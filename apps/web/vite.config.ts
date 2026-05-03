@@ -15,6 +15,39 @@ export default defineConfig({
   build: {
     target: "esnext",
     sourcemap: true,
+    // Manual chunk splits keep the initial JS small. Monaco is already lazy-
+    // loaded via dynamic import; these splits move the rest of the heavy
+    // libs into their own files so first paint isn't blocked on them.
+    rollupOptions: {
+      output: {
+        // Rolldown-flavored Vite expects a function here. Map id → chunk
+        // name; return undefined to let the bundler decide.
+        manualChunks(id: string): string | undefined {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("monaco-editor")) return "vendor-monaco";
+          if (
+            id.includes("@codemirror") ||
+            id.includes("codemirror") ||
+            id.includes("@lezer")
+          ) {
+            return "vendor-codemirror";
+          }
+          if (id.includes("react-markdown") || id.includes("remark-")) {
+            return "vendor-markdown";
+          }
+          if (id.includes("shiki")) return "vendor-shiki";
+          if (id.includes("@xterm")) return "vendor-xterm";
+          if (
+            /[\\/]node_modules[\\/](react|react-dom|react-i18next|i18next|i18next-browser-languagedetector|scheduler)[\\/]/
+              .test(id)
+          ) {
+            return "vendor-react";
+          }
+          if (id.includes("@tauri-apps")) return "vendor-tauri";
+          return undefined;
+        },
+      },
+    },
   },
   clearScreen: false,
   server: {

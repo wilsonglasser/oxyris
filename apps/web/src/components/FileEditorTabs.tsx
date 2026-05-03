@@ -34,8 +34,19 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
   const closeTab = useFileEditorStore((s) => s.closeTab);
   const closeOthers = useFileEditorStore((s) => s.closeOthers);
   const closeAll = useFileEditorStore((s) => s.closeAll);
+  const openFile = useFileEditorStore((s) => s.openFile);
 
   const activeTab = active ? tabs[active] : null;
+
+  // After persist rehydrate, `openOrder` + `active` come back but the `tabs`
+  // map (which holds buffers) is intentionally dropped to avoid stale data.
+  // Re-load whichever tab the user had focused; the rest stay as ghost tabs
+  // until clicked.
+  useEffect(() => {
+    if (active && !tabs[active]) {
+      void openFile(projectId, worktreeId, active);
+    }
+  }, [active, tabs, projectId, worktreeId, openFile]);
 
   const tabStripRef = useRef<HTMLDivElement | null>(null);
   const [overflow, setOverflow] = useState(false);
@@ -111,9 +122,12 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           className="flex min-w-0 flex-1 items-stretch overflow-x-auto"
         >
           {order.map((relPath) => {
+            // After a persist-restored boot, `tab` may be undefined for
+            // not-yet-clicked entries — render a ghost label so the strip
+            // still reflects the saved layout. Clicking promotes it via
+            // `openFile`.
             const tab = tabs[relPath];
-            if (!tab) return null;
-            const dirty = tab.buffer !== tab.baseContent;
+            const dirty = !!tab && tab.buffer !== tab.baseContent;
             const isActive = active === relPath;
             return (
               <div
@@ -128,12 +142,19 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
                 className={`flex shrink-0 items-center gap-1 border-r border-neutral-800 pl-3 pr-1 text-[11px] ${
                   isActive
                     ? "bg-neutral-900 text-neutral-100"
-                    : "text-neutral-400 hover:bg-neutral-900/50 hover:text-neutral-200"
+                    : tab
+                      ? "text-neutral-400 hover:bg-neutral-900/50 hover:text-neutral-200"
+                      : "text-neutral-500 italic hover:bg-neutral-900/50 hover:text-neutral-300"
                 }`}
               >
                 <button
                   type="button"
-                  onClick={() => setActive(worktreeId, relPath)}
+                  onClick={() => {
+                    setActive(worktreeId, relPath);
+                    if (!tab) {
+                      void openFile(projectId, worktreeId, relPath);
+                    }
+                  }}
                   className="max-w-[180px] truncate text-left"
                   title={relPath}
                 >

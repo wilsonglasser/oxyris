@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
 import {
   fsListDir,
   fsReadFile,
@@ -86,7 +87,9 @@ interface FileEditorState {
   ) => Promise<void>;
 }
 
-export const useFileEditorStore = create<FileEditorState>((set, get) => ({
+export const useFileEditorStore = create<FileEditorState>()(
+  persist(
+    (set, get) => ({
   trees: {},
   expanded: {},
   openOrder: {},
@@ -321,7 +324,22 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
   refreshDir: async (projectId, worktreeId, relPath) => {
     await get().loadDir(projectId, worktreeId, relPath);
   },
-}));
+    }),
+    {
+      name: "oxyris-file-editor",
+      storage: createJSONStorage(() => localStorage),
+      // Only persist the lightweight, non-stale-prone slices: which tabs were
+      // open and which folders were expanded. Buffers/contents/loading flags
+      // are re-fetched on demand so we never resurrect a stale or in-flight
+      // file from disk.
+      partialize: (state) => ({
+        openOrder: state.openOrder,
+        active: state.active,
+        expanded: state.expanded,
+      }),
+    },
+  ),
+);
 
 export function joinPath(parent: string, name: string): string {
   if (!parent) return name;
