@@ -1,42 +1,19 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  Box,
-  GitBranch,
-  Github,
-  Hammer,
-  Play,
-  Rocket,
-  Save,
-  Search,
-  Send,
-  Terminal,
-  TestTube,
-  Trash2,
-  Wrench,
-  Zap,
-} from "lucide-react";
+import * as LucideIcons from "lucide-react";
+import { Save, Terminal, Trash2 } from "lucide-react";
 import {
   actionDelete,
   actionUpsert,
   type ActionKind,
   type ActionRow,
 } from "~/ipc/actions.ts";
+import { IconPicker } from "~/components/IconPicker.tsx";
 
-const ICON_CHOICES = [
-  { name: "Terminal", icon: Terminal },
-  { name: "Play", icon: Play },
-  { name: "Hammer", icon: Hammer },
-  { name: "Wrench", icon: Wrench },
-  { name: "Rocket", icon: Rocket },
-  { name: "TestTube", icon: TestTube },
-  { name: "Box", icon: Box },
-  { name: "Search", icon: Search },
-  { name: "Send", icon: Send },
-  { name: "Zap", icon: Zap },
-  { name: "GitBranch", icon: GitBranch },
-  { name: "Github", icon: Github },
-] as const;
+function lookupIcon(name: string): typeof Terminal {
+  const map = LucideIcons as unknown as Record<string, typeof Terminal>;
+  return map[name] ?? Terminal;
+}
 
 interface Props {
   projectId: string;
@@ -52,6 +29,8 @@ export function ActionEditModal({ projectId, row, onClose }: Props) {
   const [kind, setKind] = useState<ActionKind>(row?.kind ?? "terminal_command");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const SelectedIcon = lookupIcon(icon);
 
   const save = async () => {
     setError(null);
@@ -150,23 +129,24 @@ export function ActionEditModal({ projectId, row, onClose }: Props) {
         <label className="mt-3 block text-[11px] text-neutral-400">
           {t("icon")}
         </label>
-        <div className="mt-1 grid grid-cols-6 gap-1">
-          {ICON_CHOICES.map(({ name: iconName, icon: Icon }) => (
-            <button
-              key={iconName}
-              type="button"
-              onClick={() => setIcon(iconName)}
-              className={`flex h-8 items-center justify-center rounded border ${
-                icon === iconName
-                  ? "border-emerald-700 bg-emerald-900/30 text-emerald-300"
-                  : "border-neutral-800 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
-              }`}
-              title={iconName}
-            >
-              <Icon size={14} />
-            </button>
-          ))}
-        </div>
+        <button
+          type="button"
+          onClick={() => setPickerOpen(true)}
+          className="mt-1 flex w-full items-center gap-2 rounded border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-[12px] text-neutral-200 hover:border-neutral-700 hover:bg-neutral-800"
+        >
+          <SelectedIcon size={14} className="text-emerald-300" />
+          <span className="truncate">{icon}</span>
+          <span className="ml-auto text-[10px] text-neutral-500">
+            {t("icon_change")}
+          </span>
+        </button>
+        {pickerOpen && (
+          <IconPicker
+            value={icon}
+            onPick={setIcon}
+            onClose={() => setPickerOpen(false)}
+          />
+        )}
 
         {error && (
           <div className="mt-3 text-[11px] text-red-400" role="alert">

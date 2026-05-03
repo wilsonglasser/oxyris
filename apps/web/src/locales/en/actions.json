@@ -20,5 +20,13 @@
   "running": "Running…",
   "waiting": "Waiting for output…",
   "exit_code": "Exit {{code}}",
-  "close": "Close"
+  "close": "Close",
+  "ctx_new_run": "New run",
+  "ctx_edit": "Edit",
+  "ctx_delete": "Delete",
+  "minimize": "Minimize",
+  "kill": "Kill (close)",
+  "icon_change": "change",
+  "icon_picker_search": "Search icons…",
+  "icon_picker_empty": "No icons match."
 }

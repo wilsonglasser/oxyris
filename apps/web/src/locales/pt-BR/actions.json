@@ -20,5 +20,13 @@
   "running": "Rodando…",
   "waiting": "Aguardando saída…",
   "exit_code": "Exit {{code}}",
-  "close": "Fechar"
+  "close": "Fechar",
+  "ctx_new_run": "Nova execução",
+  "ctx_edit": "Editar",
+  "ctx_delete": "Remover",
+  "minimize": "Minimizar",
+  "kill": "Matar (fechar)",
+  "icon_change": "trocar",
+  "icon_picker_search": "Buscar ícones…",
+  "icon_picker_empty": "Nenhum ícone encontrado."
 }
