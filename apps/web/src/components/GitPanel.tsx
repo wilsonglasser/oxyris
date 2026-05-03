@@ -8,11 +8,15 @@ import {
   ChevronRight,
   Download,
   GitBranch,
+  GitCommit,
   History,
+  Inbox,
   Minus,
   Plus,
   RefreshCw,
   Sparkles,
+  Tag,
+  Undo2,
 } from "lucide-react";
 import {
   PRIMARY_WORKTREE_ID,
@@ -43,6 +47,8 @@ const EMPTY_BRANCHES: { name: string; is_current: boolean; is_remote: boolean }[
 const EMPTY_LOG: never[] = [];
 const EMPTY_DIFFS: Record<string, never> = {};
 const EMPTY_DIFF_LOADING: Record<string, boolean> = {};
+const EMPTY_STASHES: never[] = [];
+const EMPTY_TAGS: never[] = [];
 
 export function GitPanel({ projectId }: Props) {
   const { t } = useTranslation("git");
@@ -195,6 +201,7 @@ function BranchToolbar({
           >
             <ArrowUpToLine size={11} />
           </button>
+          <StashButton projectId={projectId} worktreeId={worktreeId} />
         </div>
       </div>
       {remote?.error && (
@@ -210,6 +217,104 @@ function BranchToolbar({
           <pre className="max-h-20 overflow-auto whitespace-pre-wrap font-mono">
             {remote.lastOutput.trim()}
           </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StashButton({
+  projectId,
+  worktreeId,
+}: {
+  projectId: string;
+  worktreeId: string;
+}) {
+  const { t, i18n } = useTranslation("git");
+  const stashes = useGitStore((s) => s.stashes[worktreeId] ?? EMPTY_STASHES);
+  const refreshStashes = useGitStore((s) => s.refreshStashes);
+  const saveStash = useGitStore((s) => s.saveStash);
+  const applyStash = useGitStore((s) => s.applyStash);
+  const dropStash = useGitStore((s) => s.dropStash);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (open) void refreshStashes(projectId, worktreeId);
+  }, [open, projectId, worktreeId, refreshStashes]);
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+        title={t("stash")}
+        aria-label={t("stash")}
+      >
+        <Inbox size={11} />
+        {stashes.length > 0 && (
+          <span className="text-[9px] text-neutral-500">{stashes.length}</span>
+        )}
+      </button>
+      {open && (
+        <div
+          onMouseLeave={() => setOpen(false)}
+          className="absolute right-0 top-full z-20 mt-1 w-72 rounded border border-neutral-800 bg-neutral-950 p-1 shadow-lg"
+        >
+          <div className="border-b border-neutral-800 p-1">
+            <input
+              type="text"
+              placeholder={t("stash_placeholder")}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const v = (e.target as HTMLInputElement).value.trim();
+                  if (v) {
+                    void saveStash(projectId, worktreeId, v, true).then(() =>
+                      ((e.target as HTMLInputElement).value = ""),
+                    );
+                  }
+                }
+              }}
+              className="w-full rounded bg-neutral-900 px-2 py-0.5 text-[11px] text-neutral-200 outline-none focus:ring-1 focus:ring-neutral-700"
+            />
+          </div>
+          {stashes.length === 0 && (
+            <div className="px-2 py-2 text-[11px] text-neutral-500">
+              {t("no_stashes")}
+            </div>
+          )}
+          {stashes.map((s) => (
+            <div
+              key={s.index}
+              className="group flex items-center gap-1 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-900"
+            >
+              <code className="text-neutral-500">{s.short_id}</code>
+              <span className="min-w-0 flex-1 truncate">{s.message}</span>
+              <span className="text-[9px] text-neutral-500">
+                {new Date(s.time * 1000).toLocaleDateString(i18n.language)}
+              </span>
+              <button
+                type="button"
+                onClick={() => void applyStash(projectId, worktreeId, s.index, false)}
+                className="opacity-0 group-hover:opacity-100 rounded px-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+                title={t("stash_apply")}
+              >
+                <Check size={11} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm(t("stash_drop_confirm", { id: s.short_id }))) {
+                    void dropStash(projectId, worktreeId, s.index);
+                  }
+                }}
+                className="opacity-0 group-hover:opacity-100 rounded px-1 text-red-300 hover:bg-red-900/30"
+                title={t("stash_drop")}
+              >
+                <Minus size={11} />
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -308,13 +413,38 @@ function LogSection({
   const { t, i18n } = useTranslation("git");
   const log = useGitStore((s) => s.log[worktreeId] ?? EMPTY_LOG);
   const refreshLog = useGitStore((s) => s.refreshLog);
+  const tags = useGitStore((s) => s.tags[worktreeId] ?? EMPTY_TAGS);
+  const refreshTags = useGitStore((s) => s.refreshTags);
+  const cherryPick = useGitStore((s) => s.cherryPick);
+  const revertCommit = useGitStore((s) => s.revertCommit);
+  const createTag = useGitStore((s) => s.createTag);
   const [open, setOpen] = useState(false);
+  const [menu, setMenu] = useState<
+    { x: number; y: number; oid: string; short: string } | null
+  >(null);
 
   useEffect(() => {
-    if (open && log.length === 0) {
-      void refreshLog(projectId, worktreeId, 50);
+    if (open) {
+      if (log.length === 0) void refreshLog(projectId, worktreeId, 50);
+      void refreshTags(projectId, worktreeId);
     }
-  }, [open, log.length, projectId, worktreeId, refreshLog]);
+  }, [open, log.length, projectId, worktreeId, refreshLog, refreshTags]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = () => setMenu(null);
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [menu]);
+
+  // Index tags by commit OID so each row can show its tag chips.
+  const tagsByOid = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const tg of tags) {
+      (out[tg.oid] ??= []).push(tg.name);
+    }
+    return out;
+  }, [tags]);
 
   return (
     <div className="border-t border-neutral-800 bg-neutral-950">
@@ -333,9 +463,30 @@ function LogSection({
             <div className="text-neutral-500">{t("no_commits")}</div>
           )}
           {log.map((c) => (
-            <div key={c.oid} className="border-b border-neutral-900/50 py-1">
+            <div
+              key={c.oid}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  oid: c.oid,
+                  short: c.short_oid,
+                });
+              }}
+              className="border-b border-neutral-900/50 py-1 hover:bg-neutral-900/40"
+            >
               <div className="flex items-baseline gap-2">
                 <code className="text-neutral-500">{c.short_oid}</code>
+                {(tagsByOid[c.oid] ?? []).map((name) => (
+                  <span
+                    key={name}
+                    className="rounded bg-emerald-900/40 px-1 text-[9px] text-emerald-300"
+                  >
+                    <Tag size={8} className="mr-0.5 inline" />
+                    {name}
+                  </span>
+                ))}
                 <span className="truncate text-neutral-200">{c.summary}</span>
               </div>
               <div className="text-[10px] text-neutral-500">
@@ -344,6 +495,58 @@ function LogSection({
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {menu && (
+        <div
+          style={{ left: menu.x, top: menu.y }}
+          className="fixed z-50 min-w-[180px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-lg"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={async () => {
+              setMenu(null);
+              const oid = await cherryPick(projectId, worktreeId, menu.oid);
+              if (oid === null) {
+                window.alert(t("cherry_conflict"));
+              }
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
+          >
+            <GitCommit size={11} />
+            {t("cherry_pick", { id: menu.short })}
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setMenu(null);
+              const oid = await revertCommit(projectId, worktreeId, menu.oid);
+              if (oid === null) {
+                window.alert(t("revert_conflict"));
+              }
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
+          >
+            <Undo2 size={11} />
+            {t("revert", { id: menu.short })}
+          </button>
+          <div className="my-1 border-t border-neutral-800" />
+          <button
+            type="button"
+            onClick={() => {
+              const oid = menu.oid;
+              setMenu(null);
+              const name = window.prompt(t("tag_name_prompt"));
+              if (!name) return;
+              const message = window.prompt(t("tag_message_prompt")) ?? undefined;
+              void createTag(projectId, worktreeId, name, oid, message);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
+          >
+            <Tag size={11} />
+            {t("tag_here")}
+          </button>
         </div>
       )}
     </div>

@@ -46,5 +46,18 @@
   "hunks": "{{count}} hunks",
   "stage_hunk": "Stage",
   "unstage_hunk": "Tirar do stage",
-  "hunk_apply_failed": "Falha ao aplicar hunk"
+  "hunk_apply_failed": "Falha ao aplicar hunk",
+  "stash": "Stash",
+  "stash_placeholder": "Mensagem (Enter p/ salvar c/ untracked)",
+  "no_stashes": "Sem stashes.",
+  "stash_apply": "Aplicar",
+  "stash_drop": "Descartar",
+  "stash_drop_confirm": "Descartar {{id}}? Não pode ser desfeito.",
+  "cherry_pick": "Cherry-pick {{id}}",
+  "revert": "Reverter {{id}}",
+  "cherry_conflict": "Cherry-pick gerou conflitos — resolva na lista de mudanças e commite.",
+  "revert_conflict": "Revert gerou conflitos — resolva na lista de mudanças e commite.",
+  "tag_here": "Criar tag aqui",
+  "tag_name_prompt": "Nome da tag:",
+  "tag_message_prompt": "Mensagem de anotação (vazio = lightweight):"
 }

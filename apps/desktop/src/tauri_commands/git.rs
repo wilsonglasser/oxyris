@@ -12,7 +12,7 @@ use crate::app_state::AppState;
 use crate::infra::fs::{self as fs_infra, FsError};
 use crate::infra::git::{
     self, CommitInfo, CommitResult, ConflictContents, DiffMode, FileDiff, GitError, RemoteOpResult,
-    StatusReport,
+    StashEntry, StatusReport, TagInfo,
 };
 
 #[derive(Debug, Serialize, thiserror::Error)]
@@ -499,6 +499,177 @@ pub async fn git_generate_commit_message(
     }
     let message = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     Ok(GitGenerateCommitMsgOutput { message })
+}
+
+// ────── stash / tag / cherry-pick / revert ─────────────────────────────────
+
+#[tauri::command]
+pub async fn git_stash_list(
+    input: GitScopeInput,
+    state: State<'_, AppState>,
+) -> Result<Vec<StashEntry>, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::stash_list(&env, &state.agent_pool, &root).await?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitStashSaveInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub message: String,
+    #[serde(default)]
+    pub include_untracked: bool,
+}
+
+#[tauri::command]
+pub async fn git_stash_save(
+    input: GitStashSaveInput,
+    state: State<'_, AppState>,
+) -> Result<String, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::stash_save(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.message,
+        input.include_untracked,
+    )
+    .await?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitStashApplyInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub index: u32,
+    #[serde(default)]
+    pub drop_after: bool,
+}
+
+#[tauri::command]
+pub async fn git_stash_apply(
+    input: GitStashApplyInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::stash_apply(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.index,
+        input.drop_after,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitStashIndexInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub index: u32,
+}
+
+#[tauri::command]
+pub async fn git_stash_drop(
+    input: GitStashIndexInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::stash_drop(&env, &state.agent_pool, &root, input.index).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn git_tag_list(
+    input: GitScopeInput,
+    state: State<'_, AppState>,
+) -> Result<Vec<TagInfo>, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::tag_list(&env, &state.agent_pool, &root).await?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitTagCreateInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub name: String,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[tauri::command]
+pub async fn git_tag_create(
+    input: GitTagCreateInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::tag_create(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.name,
+        input.target,
+        input.message,
+        input.force,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitTagNameInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub name: String,
+}
+
+#[tauri::command]
+pub async fn git_tag_delete(
+    input: GitTagNameInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::tag_delete(&env, &state.agent_pool, &root, input.name).await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitCommitOidInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub oid: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitCommitOidOutput {
+    /// `None` when the operation produced conflicts (left in the index for
+    /// the user to resolve before re-committing).
+    pub oid: Option<String>,
+}
+
+#[tauri::command]
+pub async fn git_cherry_pick(
+    input: GitCommitOidInput,
+    state: State<'_, AppState>,
+) -> Result<GitCommitOidOutput, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let oid = git::cherry_pick(&env, &state.agent_pool, &root, input.oid).await?;
+    Ok(GitCommitOidOutput { oid })
+}
+
+#[tauri::command]
+pub async fn git_revert(
+    input: GitCommitOidInput,
+    state: State<'_, AppState>,
+) -> Result<GitCommitOidOutput, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let oid = git::revert(&env, &state.agent_pool, &root, input.oid).await?;
+    Ok(GitCommitOidOutput { oid })
 }
 
 fn parse_mode(s: &str) -> Result<DiffMode, TauriGitError> {

@@ -40,6 +40,15 @@ pub mod op_name {
     pub const GIT_GET_CONFLICT: &str = "git.get_conflict";
     pub const GIT_RESOLVE: &str = "git.resolve";
     pub const GIT_APPLY_PATCH: &str = "git.apply_patch";
+    pub const GIT_STASH_LIST: &str = "git.stash_list";
+    pub const GIT_STASH_SAVE: &str = "git.stash_save";
+    pub const GIT_STASH_APPLY: &str = "git.stash_apply";
+    pub const GIT_STASH_DROP: &str = "git.stash_drop";
+    pub const GIT_TAG_LIST: &str = "git.tag_list";
+    pub const GIT_TAG_CREATE: &str = "git.tag_create";
+    pub const GIT_TAG_DELETE: &str = "git.tag_delete";
+    pub const GIT_CHERRY_PICK: &str = "git.cherry_pick";
+    pub const GIT_REVERT: &str = "git.revert";
 }
 
 // ────── system.info ────────────────────────────────────────────────────────
@@ -423,4 +432,58 @@ pub struct GitApplyPatchArgs {
     pub reverse: bool,
     #[serde(default)]
     pub cached: bool,
+}
+
+// ────── git.stash_* ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitStashSaveArgs {
+    pub repo_path: String,
+    pub message: String,
+    #[serde(default)]
+    pub include_untracked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitStashApplyArgs {
+    pub repo_path: String,
+    pub index: u32,
+    #[serde(default)]
+    pub drop_after: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitStashIndexArgs {
+    pub repo_path: String,
+    pub index: u32,
+}
+
+// ────── git.tag_* ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitTagCreateArgs {
+    pub repo_path: String,
+    pub name: String,
+    /// Revision (commit SHA, branch name, or `None` for HEAD).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Annotation message; lightweight tag when empty / missing.
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitTagNameArgs {
+    pub repo_path: String,
+    pub name: String,
+}
+
+// ────── git.cherry_pick / revert ───────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitOidArgs {
+    pub repo_path: String,
+    pub oid: String,
 }

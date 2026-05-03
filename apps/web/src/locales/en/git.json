@@ -46,5 +46,18 @@
   "hunks": "{{count}} hunks",
   "stage_hunk": "Stage",
   "unstage_hunk": "Unstage",
-  "hunk_apply_failed": "Hunk apply failed"
+  "hunk_apply_failed": "Hunk apply failed",
+  "stash": "Stash",
+  "stash_placeholder": "Stash message (Enter to save w/ untracked)",
+  "no_stashes": "No stashes.",
+  "stash_apply": "Apply",
+  "stash_drop": "Drop",
+  "stash_drop_confirm": "Drop {{id}}? This cannot be undone.",
+  "cherry_pick": "Cherry-pick {{id}}",
+  "revert": "Revert {{id}}",
+  "cherry_conflict": "Cherry-pick produced conflicts — resolve in the changes list, then commit.",
+  "revert_conflict": "Revert produced conflicts — resolve in the changes list, then commit.",
+  "tag_here": "Tag this commit",
+  "tag_name_prompt": "Tag name:",
+  "tag_message_prompt": "Annotation message (blank = lightweight):"
 }

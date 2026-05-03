@@ -8,17 +8,19 @@
 use oxyris_core::Environment;
 pub use oxyris_git::{
     BranchInfo, CommitInfo, CommitResult, ConflictContents, DiffMode, FileDiff, RemoteOpResult,
-    StatusReport, WorktreeRef,
+    StashEntry, StatusReport, TagInfo, WorktreeRef,
 };
 use oxyris_git::{
-    GitError as InnerGitError, branch as git_branch, conflict as git_conflict, log as git_log,
-    remote as git_remote, status as git_status, worktree as wt,
+    GitError as InnerGitError, branch as git_branch, cherry as git_cherry,
+    conflict as git_conflict, log as git_log, remote as git_remote, stash as git_stash,
+    status as git_status, tag as git_tag, worktree as wt,
 };
 use oxyris_ipc::ops::{
     GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCommitArgs,
-    GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs, GitLogArgs,
-    GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs,
-    op_name,
+    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs,
+    GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs,
+    GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs, GitTagCreateArgs,
+    GitTagNameArgs, op_name,
 };
 use thiserror::Error;
 
@@ -587,6 +589,296 @@ pub async fn get_conflict(
                     serde_json::to_value(GitConflictPathArgs {
                         repo_path: repo_path.to_owned(),
                         path,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn stash_list(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+) -> Result<Vec<StashEntry>, GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_stash::list(&p))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_STASH_LIST,
+                    serde_json::to_value(GitRepoPathArgs {
+                        repo_path: repo_path.to_owned(),
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn stash_save(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    message: String,
+    include_untracked: bool,
+) -> Result<String, GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_stash::save(&p, &message, include_untracked))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_STASH_SAVE,
+                    serde_json::to_value(GitStashSaveArgs {
+                        repo_path: repo_path.to_owned(),
+                        message,
+                        include_untracked,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn stash_apply(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    index: u32,
+    drop_after: bool,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_stash::apply(&p, index, drop_after))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_STASH_APPLY,
+                    serde_json::to_value(GitStashApplyArgs {
+                        repo_path: repo_path.to_owned(),
+                        index,
+                        drop_after,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn stash_drop(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    index: u32,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_stash::drop(&p, index))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_STASH_DROP,
+                    serde_json::to_value(GitStashIndexArgs {
+                        repo_path: repo_path.to_owned(),
+                        index,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn tag_list(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+) -> Result<Vec<TagInfo>, GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_tag::list(&p))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_TAG_LIST,
+                    serde_json::to_value(GitRepoPathArgs {
+                        repo_path: repo_path.to_owned(),
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn tag_create(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    name: String,
+    target: Option<String>,
+    message: Option<String>,
+    force: bool,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            let n = name.clone();
+            let t = target.clone();
+            let m = message.clone();
+            tokio::task::spawn_blocking(move || {
+                git_tag::create(&p, &n, t.as_deref(), m.as_deref(), force)
+            })
+            .await
+            .map_err(|e| GitError::Git(format!("join: {e}")))?
+            .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_TAG_CREATE,
+                    serde_json::to_value(GitTagCreateArgs {
+                        repo_path: repo_path.to_owned(),
+                        name,
+                        target,
+                        message,
+                        force,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn tag_delete(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    name: String,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_tag::delete(&p, &name))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_TAG_DELETE,
+                    serde_json::to_value(GitTagNameArgs {
+                        repo_path: repo_path.to_owned(),
+                        name,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn cherry_pick(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    oid: String,
+) -> Result<Option<String>, GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_cherry::cherry_pick(&p, &oid))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_CHERRY_PICK,
+                    serde_json::to_value(GitCommitOidArgs {
+                        repo_path: repo_path.to_owned(),
+                        oid,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn revert(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    oid: String,
+) -> Result<Option<String>, GitError> {
+    match env {
+        Environment::Windows => {
+            let p = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_cherry::revert(&p, &oid))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_REVERT,
+                    serde_json::to_value(GitCommitOidArgs {
+                        repo_path: repo_path.to_owned(),
+                        oid,
                     })
                     .map_err(|e| GitError::Agent(e.to_string()))?,
                 )

@@ -2,17 +2,22 @@
 
 use oxyris_git::branch as git_branch;
 use oxyris_git::checkpoint;
+use oxyris_git::cherry as git_cherry;
 use oxyris_git::conflict as git_conflict;
 use oxyris_git::log as git_log;
 use oxyris_git::remote;
+use oxyris_git::stash as git_stash;
 use oxyris_git::status as git_status;
+use oxyris_git::tag as git_tag;
 use oxyris_git::types::{CheckpointPhase, DiffMode};
 use oxyris_git::worktree;
 use oxyris_ipc::ops::{
     GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs,
     GitCheckpointCaptureArgs, GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCommitArgs,
-    GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs, GitLogArgs,
-    GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs,
+    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs,
+    GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs,
+    GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs, GitTagCreateArgs,
+    GitTagNameArgs,
 };
 
 use super::OpError;
@@ -159,6 +164,57 @@ pub fn resolve(args: GitResolveArgs) -> Result<serde_json::Value, OpError> {
 pub fn apply_patch(args: GitApplyPatchArgs) -> Result<serde_json::Value, OpError> {
     git_status::apply_patch(&args.repo_path, &args.patch, args.reverse, args.cached)?;
     Ok(serde_json::Value::Null)
+}
+
+pub fn stash_list(args: GitRepoPathArgs) -> Result<serde_json::Value, OpError> {
+    let entries = git_stash::list(&args.repo_path)?;
+    Ok(serde_json::to_value(entries)?)
+}
+
+pub fn stash_save(args: GitStashSaveArgs) -> Result<serde_json::Value, OpError> {
+    let oid = git_stash::save(&args.repo_path, &args.message, args.include_untracked)?;
+    Ok(serde_json::Value::String(oid))
+}
+
+pub fn stash_apply(args: GitStashApplyArgs) -> Result<serde_json::Value, OpError> {
+    git_stash::apply(&args.repo_path, args.index, args.drop_after)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn stash_drop(args: GitStashIndexArgs) -> Result<serde_json::Value, OpError> {
+    git_stash::drop(&args.repo_path, args.index)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn tag_list(args: GitRepoPathArgs) -> Result<serde_json::Value, OpError> {
+    let entries = git_tag::list(&args.repo_path)?;
+    Ok(serde_json::to_value(entries)?)
+}
+
+pub fn tag_create(args: GitTagCreateArgs) -> Result<serde_json::Value, OpError> {
+    git_tag::create(
+        &args.repo_path,
+        &args.name,
+        args.target.as_deref(),
+        args.message.as_deref(),
+        args.force,
+    )?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn tag_delete(args: GitTagNameArgs) -> Result<serde_json::Value, OpError> {
+    git_tag::delete(&args.repo_path, &args.name)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn cherry_pick(args: GitCommitOidArgs) -> Result<serde_json::Value, OpError> {
+    let oid = git_cherry::cherry_pick(&args.repo_path, &args.oid)?;
+    Ok(serde_json::to_value(oid)?)
+}
+
+pub fn revert(args: GitCommitOidArgs) -> Result<serde_json::Value, OpError> {
+    let oid = git_cherry::revert(&args.repo_path, &args.oid)?;
+    Ok(serde_json::to_value(oid)?)
 }
 
 fn parse_mode(s: &str) -> Result<DiffMode, OpError> {

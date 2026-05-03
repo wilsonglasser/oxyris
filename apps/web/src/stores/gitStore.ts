@@ -4,6 +4,7 @@ import {
   gitBranchCreate,
   gitBranchDelete,
   gitCheckout,
+  gitCherryPick,
   gitCommit,
   gitDiffFile,
   gitFetch,
@@ -11,14 +12,24 @@ import {
   gitLog,
   gitPull,
   gitPush,
+  gitRevert,
   gitStage,
+  gitStashApply,
+  gitStashDrop,
+  gitStashList,
+  gitStashSave,
   gitStatus,
+  gitTagCreate,
+  gitTagDelete,
+  gitTagList,
   gitUnstage,
   type CommitInfo,
   type DiffMode,
   type FileDiff,
+  type StashEntry,
   type StatusEntry,
   type StatusReport,
+  type TagInfo,
 } from "~/ipc/git.ts";
 import { gitListBranches, type BranchInfo } from "~/ipc/worktree.ts";
 
@@ -126,6 +137,44 @@ interface GitState {
     patch: string,
     reverse: boolean,
   ) => Promise<void>;
+
+  stashes: Record<string, StashEntry[]>;
+  refreshStashes: (projectId: string, worktreeId: string) => Promise<void>;
+  saveStash: (
+    projectId: string,
+    worktreeId: string,
+    message: string,
+    includeUntracked: boolean,
+  ) => Promise<void>;
+  applyStash: (
+    projectId: string,
+    worktreeId: string,
+    index: number,
+    dropAfter: boolean,
+  ) => Promise<void>;
+  dropStash: (projectId: string, worktreeId: string, index: number) => Promise<void>;
+
+  tags: Record<string, TagInfo[]>;
+  refreshTags: (projectId: string, worktreeId: string) => Promise<void>;
+  createTag: (
+    projectId: string,
+    worktreeId: string,
+    name: string,
+    target?: string,
+    message?: string,
+  ) => Promise<void>;
+  deleteTag: (projectId: string, worktreeId: string, name: string) => Promise<void>;
+
+  cherryPick: (
+    projectId: string,
+    worktreeId: string,
+    oid: string,
+  ) => Promise<string | null>;
+  revertCommit: (
+    projectId: string,
+    worktreeId: string,
+    oid: string,
+  ) => Promise<string | null>;
 }
 
 export const useGitStore = create<GitState>((set, get) => ({
@@ -142,6 +191,8 @@ export const useGitStore = create<GitState>((set, get) => ({
   log: {},
   remote: {},
   generatingCommitMsg: {},
+  stashes: {},
+  tags: {},
 
   refreshStatus: async (projectId, worktreeId) => {
     set((state) => ({
@@ -336,6 +387,69 @@ export const useGitStore = create<GitState>((set, get) => ({
   deleteBranch: async (projectId, worktreeId, name) => {
     await gitBranchDelete({ projectId, worktreeId, name });
     await get().refreshBranches(projectId, worktreeId);
+  },
+
+  refreshStashes: async (projectId, worktreeId) => {
+    try {
+      const list = await gitStashList({ projectId, worktreeId });
+      set((state) => ({ stashes: { ...state.stashes, [worktreeId]: list } }));
+    } catch (e) {
+      console.warn(e);
+    }
+  },
+
+  saveStash: async (projectId, worktreeId, message, includeUntracked) => {
+    await gitStashSave({ projectId, worktreeId, message, includeUntracked });
+    await get().refreshStatus(projectId, worktreeId);
+    await get().refreshStashes(projectId, worktreeId);
+  },
+
+  applyStash: async (projectId, worktreeId, index, dropAfter) => {
+    await gitStashApply({ projectId, worktreeId, index, dropAfter });
+    await get().refreshStatus(projectId, worktreeId);
+    await get().refreshStashes(projectId, worktreeId);
+  },
+
+  dropStash: async (projectId, worktreeId, index) => {
+    await gitStashDrop({ projectId, worktreeId, index });
+    await get().refreshStashes(projectId, worktreeId);
+  },
+
+  refreshTags: async (projectId, worktreeId) => {
+    try {
+      const list = await gitTagList({ projectId, worktreeId });
+      set((state) => ({ tags: { ...state.tags, [worktreeId]: list } }));
+    } catch (e) {
+      console.warn(e);
+    }
+  },
+
+  createTag: async (projectId, worktreeId, name, target, message) => {
+    await gitTagCreate({
+      projectId,
+      worktreeId,
+      name,
+      ...(target !== undefined ? { target } : {}),
+      ...(message !== undefined ? { message } : {}),
+    });
+    await get().refreshTags(projectId, worktreeId);
+  },
+
+  deleteTag: async (projectId, worktreeId, name) => {
+    await gitTagDelete({ projectId, worktreeId, name });
+    await get().refreshTags(projectId, worktreeId);
+  },
+
+  cherryPick: async (projectId, worktreeId, oid) => {
+    const result = await gitCherryPick({ projectId, worktreeId, oid });
+    await get().refreshStatus(projectId, worktreeId);
+    return result.oid;
+  },
+
+  revertCommit: async (projectId, worktreeId, oid) => {
+    const result = await gitRevert({ projectId, worktreeId, oid });
+    await get().refreshStatus(projectId, worktreeId);
+    return result.oid;
   },
 
   applyHunk: async (projectId, worktreeId, patch, reverse) => {

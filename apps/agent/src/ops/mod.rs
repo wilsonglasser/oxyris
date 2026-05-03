@@ -121,6 +121,15 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         op_name::GIT_GET_CONFLICT => git::get_conflict(from_args(args)?),
         op_name::GIT_RESOLVE => git::resolve(from_args(args)?),
         op_name::GIT_APPLY_PATCH => git::apply_patch(from_args(args)?),
+        op_name::GIT_STASH_LIST => git::stash_list(from_args(args)?),
+        op_name::GIT_STASH_SAVE => git::stash_save(from_args(args)?),
+        op_name::GIT_STASH_APPLY => git::stash_apply(from_args(args)?),
+        op_name::GIT_STASH_DROP => git::stash_drop(from_args(args)?),
+        op_name::GIT_TAG_LIST => git::tag_list(from_args(args)?),
+        op_name::GIT_TAG_CREATE => git::tag_create(from_args(args)?),
+        op_name::GIT_TAG_DELETE => git::tag_delete(from_args(args)?),
+        op_name::GIT_CHERRY_PICK => git::cherry_pick(from_args(args)?),
+        op_name::GIT_REVERT => git::revert(from_args(args)?),
         other => Err(OpError::UnknownOp(other.to_owned())),
     }
 }

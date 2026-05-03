@@ -9,12 +9,15 @@
 
 pub mod branch;
 pub mod checkpoint;
+pub mod cherry;
 pub mod conflict;
 pub mod dotenv;
 pub mod error;
 pub mod log;
 pub mod remote;
+pub mod stash;
 pub mod status;
+pub mod tag;
 pub mod types;
 pub mod worktree;
 
@@ -22,6 +25,8 @@ pub use conflict::ConflictContents;
 pub use error::GitError;
 pub use log::CommitInfo;
 pub use remote::RemoteOpResult;
+pub use stash::StashEntry;
+pub use tag::TagInfo;
 pub use types::{
     AheadBehind, BranchInfo, CommitResult, DiffMode, FileDiff, FileStatus, StatusBucket,
     StatusEntry, StatusReport, TurnDiff, WorktreeRef,

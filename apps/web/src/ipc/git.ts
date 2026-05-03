@@ -286,6 +286,147 @@ export function gitResolve(args: {
   });
 }
 
+export type StashEntry = {
+  index: number;
+  short_id: string;
+  oid: string;
+  message: string;
+  time: number;
+};
+
+export type TagInfo = {
+  name: string;
+  oid: string;
+  message: string | null;
+  annotated: boolean;
+};
+
+export function gitStashList(args: {
+  projectId: string;
+  worktreeId: string;
+}): Promise<StashEntry[]> {
+  return invoke<StashEntry[]>("git_stash_list", {
+    input: { project_id: args.projectId, worktree_id: args.worktreeId },
+  });
+}
+
+export function gitStashSave(args: {
+  projectId: string;
+  worktreeId: string;
+  message: string;
+  includeUntracked?: boolean;
+}): Promise<string> {
+  return invoke<string>("git_stash_save", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      message: args.message,
+      include_untracked: args.includeUntracked ?? false,
+    },
+  });
+}
+
+export function gitStashApply(args: {
+  projectId: string;
+  worktreeId: string;
+  index: number;
+  dropAfter?: boolean;
+}): Promise<void> {
+  return invoke<void>("git_stash_apply", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      index: args.index,
+      drop_after: args.dropAfter ?? false,
+    },
+  });
+}
+
+export function gitStashDrop(args: {
+  projectId: string;
+  worktreeId: string;
+  index: number;
+}): Promise<void> {
+  return invoke<void>("git_stash_drop", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      index: args.index,
+    },
+  });
+}
+
+export function gitTagList(args: {
+  projectId: string;
+  worktreeId: string;
+}): Promise<TagInfo[]> {
+  return invoke<TagInfo[]>("git_tag_list", {
+    input: { project_id: args.projectId, worktree_id: args.worktreeId },
+  });
+}
+
+export function gitTagCreate(args: {
+  projectId: string;
+  worktreeId: string;
+  name: string;
+  target?: string;
+  message?: string;
+  force?: boolean;
+}): Promise<void> {
+  return invoke<void>("git_tag_create", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      name: args.name,
+      target: args.target,
+      message: args.message,
+      force: args.force ?? false,
+    },
+  });
+}
+
+export function gitTagDelete(args: {
+  projectId: string;
+  worktreeId: string;
+  name: string;
+}): Promise<void> {
+  return invoke<void>("git_tag_delete", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      name: args.name,
+    },
+  });
+}
+
+export function gitCherryPick(args: {
+  projectId: string;
+  worktreeId: string;
+  oid: string;
+}): Promise<{ oid: string | null }> {
+  return invoke<{ oid: string | null }>("git_cherry_pick", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      oid: args.oid,
+    },
+  });
+}
+
+export function gitRevert(args: {
+  projectId: string;
+  worktreeId: string;
+  oid: string;
+}): Promise<{ oid: string | null }> {
+  return invoke<{ oid: string | null }>("git_revert", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      oid: args.oid,
+    },
+  });
+}
+
 export function gitApplyPatch(args: {
   projectId: string;
   worktreeId: string;
