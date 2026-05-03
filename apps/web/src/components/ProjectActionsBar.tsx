@@ -227,6 +227,8 @@ function ActionsManager({ projectId }: { projectId: string }) {
                 command: draft.command,
                 keybinding: draft.keybinding || null,
                 auto_run_on_worktree_create: draft.autoRun,
+                icon: "Terminal",
+                kind: "terminal_command",
               });
               setEditing(null);
             } catch (e) {

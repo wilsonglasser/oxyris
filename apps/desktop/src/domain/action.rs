@@ -25,9 +25,27 @@ pub struct ActionData {
     pub command: String,
     pub keybinding: Option<String>,
     pub auto_run_on_worktree_create: bool,
+    /// Lucide icon name (e.g. "Terminal", "Play", "GitBranch"). Frontend
+    /// renders the matching icon component; unknown names fall back to a
+    /// generic placeholder.
+    #[serde(default = "default_icon")]
+    pub icon: String,
+    /// Execution mode — `terminal_command` (sends to a terminal pane),
+    /// `one_shot` (captures stdout / stderr in a modal), or
+    /// `github_workflow` (shells out to `gh workflow run`).
+    #[serde(default = "default_kind")]
+    pub kind: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub removed_at: Option<DateTime<Utc>>,
+}
+
+fn default_icon() -> String {
+    "Terminal".into()
+}
+
+fn default_kind() -> String {
+    "terminal_command".into()
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +57,8 @@ pub enum ActionCommand {
         command: String,
         keybinding: Option<String>,
         auto_run_on_worktree_create: bool,
+        icon: String,
+        kind: String,
         now: DateTime<Utc>,
     },
     Update {
@@ -46,6 +66,8 @@ pub enum ActionCommand {
         command: String,
         keybinding: Option<String>,
         auto_run_on_worktree_create: bool,
+        icon: String,
+        kind: String,
         now: DateTime<Utc>,
     },
     Remove {
@@ -64,6 +86,14 @@ pub enum ActionEvent {
         command: String,
         keybinding: Option<String>,
         auto_run_on_worktree_create: bool,
+        #[serde(default = "default_icon")]
+        icon: String,
+        // Renamed-on-the-wire: the variant tag is `kind`, so the column
+        // name on the event has to be different. `action_kind` keeps it
+        // parseable in either direction with serde default for old
+        // events.
+        #[serde(default = "default_kind", rename = "action_kind")]
+        kind: String,
         created_at: DateTime<Utc>,
     },
     ActionUpdated {
@@ -71,6 +101,10 @@ pub enum ActionEvent {
         command: String,
         keybinding: Option<String>,
         auto_run_on_worktree_create: bool,
+        #[serde(default = "default_icon")]
+        icon: String,
+        #[serde(default = "default_kind", rename = "action_kind")]
+        kind: String,
         updated_at: DateTime<Utc>,
     },
     ActionRemoved {
@@ -116,6 +150,8 @@ impl Aggregate for Action {
                 command,
                 keybinding,
                 auto_run_on_worktree_create,
+                icon,
+                kind,
                 now,
             } => {
                 if state.inner.is_some() {
@@ -131,6 +167,8 @@ impl Aggregate for Action {
                     command,
                     keybinding,
                     auto_run_on_worktree_create,
+                    icon,
+                    kind,
                     created_at: now,
                 }])
             }
@@ -139,6 +177,8 @@ impl Aggregate for Action {
                 command,
                 keybinding,
                 auto_run_on_worktree_create,
+                icon,
+                kind,
                 now,
             } => {
                 let data = state.inner.as_ref().ok_or(ActionError::NotFound)?;
@@ -153,6 +193,8 @@ impl Aggregate for Action {
                     command,
                     keybinding,
                     auto_run_on_worktree_create,
+                    icon,
+                    kind,
                     updated_at: now,
                 }])
             }
@@ -175,6 +217,8 @@ impl Aggregate for Action {
                 command,
                 keybinding,
                 auto_run_on_worktree_create,
+                icon,
+                kind,
                 created_at,
             } => {
                 state.inner = Some(ActionData {
@@ -184,6 +228,8 @@ impl Aggregate for Action {
                     command: command.clone(),
                     keybinding: keybinding.clone(),
                     auto_run_on_worktree_create: *auto_run_on_worktree_create,
+                    icon: icon.clone(),
+                    kind: kind.clone(),
                     created_at: *created_at,
                     updated_at: *created_at,
                     removed_at: None,
@@ -194,6 +240,8 @@ impl Aggregate for Action {
                 command,
                 keybinding,
                 auto_run_on_worktree_create,
+                icon,
+                kind,
                 updated_at,
             } => {
                 if let Some(data) = state.inner.as_mut() {
@@ -201,6 +249,8 @@ impl Aggregate for Action {
                     data.command = command.clone();
                     data.keybinding = keybinding.clone();
                     data.auto_run_on_worktree_create = *auto_run_on_worktree_create;
+                    data.icon = icon.clone();
+                    data.kind = kind.clone();
                     data.updated_at = *updated_at;
                 }
             }
@@ -229,6 +279,8 @@ mod tests {
             command: "bun run build".into(),
             keybinding: Some("Ctrl+Shift+B".into()),
             auto_run_on_worktree_create: true,
+            icon: "Hammer".into(),
+            kind: "terminal_command".into(),
             now: now(),
         }
     }
@@ -248,6 +300,8 @@ mod tests {
             command: "x".into(),
             keybinding: None,
             auto_run_on_worktree_create: false,
+            icon: "Terminal".into(),
+            kind: "terminal_command".into(),
             now: now(),
         };
         assert_eq!(
@@ -279,6 +333,8 @@ mod tests {
             command: "bun test".into(),
             keybinding: None,
             auto_run_on_worktree_create: false,
+            icon: "TestTube".into(),
+            kind: "terminal_command".into(),
             now: now(),
         };
         for e in Action::decide(&s, update).unwrap() {

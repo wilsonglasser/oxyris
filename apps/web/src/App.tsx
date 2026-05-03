@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ActionSidebar } from "~/components/ActionSidebar.tsx";
 import { ChatPanel } from "~/components/ChatPanel.tsx";
 import { FilesPanel } from "~/components/FilesPanel.tsx";
 import { GitPanel } from "~/components/GitPanel.tsx";
@@ -268,6 +269,12 @@ export function App() {
               <SettingsPanel />
             </div>
           </main>
+        )}
+        {tab !== "settings" && (
+          <ActionSidebar
+            projectId={activeId}
+            worktreeId={sessionSnapshot?.worktree_id ?? null}
+          />
         )}
       </div>
 

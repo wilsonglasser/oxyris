@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  type ActionKind,
   type ActionRow,
   actionDelete,
   actionList,
@@ -17,6 +18,8 @@ interface State {
     command: string;
     keybinding?: string | null;
     auto_run_on_worktree_create: boolean;
+    icon: string;
+    kind: ActionKind;
   }) => Promise<ActionRow>;
   remove: (projectId: string, id: string) => Promise<void>;
 }

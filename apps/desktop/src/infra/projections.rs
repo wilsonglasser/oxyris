@@ -132,6 +132,8 @@ impl Projections {
         for alter in [
             "ALTER TABLE projections_sessions ADD COLUMN title TEXT",
             "ALTER TABLE projections_sessions ADD COLUMN pinned_at TEXT",
+            "ALTER TABLE projections_actions ADD COLUMN icon TEXT",
+            "ALTER TABLE projections_actions ADD COLUMN action_kind TEXT",
         ] {
             if let Err(e) = conn.execute(alter, []) {
                 let msg = e.to_string().to_ascii_lowercase();
@@ -492,13 +494,16 @@ impl Projections {
                 command,
                 keybinding,
                 auto_run_on_worktree_create,
+                icon,
+                kind,
                 created_at,
             } => {
                 conn.execute(
                     "INSERT OR REPLACE INTO projections_actions
                         (id, project_id, name, command, keybinding,
-                         auto_run_on_worktree_create, created_at, updated_at, removed_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL)",
+                         auto_run_on_worktree_create, icon, action_kind,
+                         created_at, updated_at, removed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, NULL)",
                     params![
                         id.to_string(),
                         project_id.to_string(),
@@ -506,6 +511,8 @@ impl Projections {
                         command,
                         keybinding,
                         if *auto_run_on_worktree_create { 1 } else { 0 },
+                        icon,
+                        kind,
                         created_at.to_rfc3339(),
                     ],
                 )?;
@@ -515,6 +522,8 @@ impl Projections {
                 command,
                 keybinding,
                 auto_run_on_worktree_create,
+                icon,
+                kind,
                 updated_at,
             } => {
                 conn.execute(
@@ -523,13 +532,17 @@ impl Projections {
                             command = ?2,
                             keybinding = ?3,
                             auto_run_on_worktree_create = ?4,
-                            updated_at = ?5
-                      WHERE id = ?6",
+                            icon = ?5,
+                            action_kind = ?6,
+                            updated_at = ?7
+                      WHERE id = ?8",
                     params![
                         name,
                         command,
                         keybinding,
                         if *auto_run_on_worktree_create { 1 } else { 0 },
+                        icon,
+                        kind,
                         updated_at.to_rfc3339(),
                         stored.aggregate_id.to_string(),
                     ],
@@ -551,7 +564,10 @@ impl Projections {
         let conn = self.conn.lock().expect("projections mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, project_id, name, command, keybinding,
-                    auto_run_on_worktree_create, created_at, updated_at
+                    auto_run_on_worktree_create,
+                    COALESCE(icon, 'Terminal') AS icon,
+                    COALESCE(action_kind, 'terminal_command') AS action_kind,
+                    created_at, updated_at
                FROM projections_actions
               WHERE project_id = ?1 AND removed_at IS NULL
               ORDER BY created_at ASC",
@@ -569,6 +585,8 @@ pub struct ActionRow {
     pub command: String,
     pub keybinding: Option<String>,
     pub auto_run_on_worktree_create: bool,
+    pub icon: String,
+    pub kind: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -591,9 +609,11 @@ fn row_to_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRow> {
                 )
             })
     };
-    let created_text: String = row.get(6)?;
-    let updated_text: String = row.get(7)?;
     let auto_run_flag: i64 = row.get(5)?;
+    let icon: String = row.get(6)?;
+    let kind: String = row.get(7)?;
+    let created_text: String = row.get(8)?;
+    let updated_text: String = row.get(9)?;
     Ok(ActionRow {
         id: parse_id(0)?,
         project_id: parse_id(1)?,
@@ -601,8 +621,10 @@ fn row_to_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRow> {
         command: row.get(3)?,
         keybinding: row.get(4)?,
         auto_run_on_worktree_create: auto_run_flag != 0,
-        created_at: parse_ts(6, &created_text)?,
-        updated_at: parse_ts(7, &updated_text)?,
+        icon,
+        kind,
+        created_at: parse_ts(8, &created_text)?,
+        updated_at: parse_ts(9, &updated_text)?,
     })
 }
 

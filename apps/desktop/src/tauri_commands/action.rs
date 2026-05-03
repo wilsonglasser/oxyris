@@ -3,9 +3,9 @@
 //! (it listens for worktree-created events and spawns actions that opt in).
 
 use chrono::Utc;
-use oxyris_core::{Aggregate, AggregateId};
+use oxyris_core::{Aggregate, AggregateId, Environment};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::app_state::AppState;
 use crate::domain::action::{Action, ActionCommand, ActionEvent, ActionState};
@@ -48,6 +48,18 @@ pub struct ActionUpsertInput {
     pub keybinding: Option<String>,
     #[serde(default)]
     pub auto_run_on_worktree_create: bool,
+    #[serde(default = "default_icon")]
+    pub icon: String,
+    #[serde(default = "default_kind")]
+    pub kind: String,
+}
+
+fn default_icon() -> String {
+    "Terminal".into()
+}
+
+fn default_kind() -> String {
+    "terminal_command".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +98,8 @@ pub fn action_upsert(
                     command: input.command,
                     keybinding: input.keybinding,
                     auto_run_on_worktree_create: input.auto_run_on_worktree_create,
+                    icon: input.icon,
+                    kind: input.kind,
                     now,
                 },
             )
@@ -101,6 +115,8 @@ pub fn action_upsert(
                     command: input.command,
                     keybinding: input.keybinding,
                     auto_run_on_worktree_create: input.auto_run_on_worktree_create,
+                    icon: input.icon,
+                    kind: input.kind,
                     now,
                 },
             )
@@ -142,6 +158,159 @@ pub fn action_delete(
         state.projections.apply(s)?;
     }
     Ok(())
+}
+
+// ────── action_run (streaming output) ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ActionRunInput {
+    pub action_id: AggregateId,
+    pub project_id: AggregateId,
+    /// Optional worktree to run inside. `None` falls back to project root.
+    #[serde(default)]
+    pub worktree_id: Option<AggregateId>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActionRunOutput {
+    /// Stream id — frontend listens to `action:output:<run_id>` events.
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActionStreamLine {
+    Stdout { text: String },
+    Stderr { text: String },
+    Exit { code: i32, success: bool },
+    Error { message: String },
+}
+
+#[tauri::command]
+pub async fn action_run(
+    input: ActionRunInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ActionRunOutput, TauriActionError> {
+    let (action_state, _) = load_action(&state, input.action_id)?;
+    let action = action_state
+        .inner
+        .as_ref()
+        .ok_or(TauriActionError::NotFound)?;
+    let project = state
+        .projections
+        .list_projects()
+        .map_err(|e| TauriActionError::Projection(e.to_string()))?
+        .into_iter()
+        .find(|p| p.id == input.project_id)
+        .ok_or_else(|| TauriActionError::Domain("project not found".into()))?;
+
+    let cwd = if let Some(wt_id) = input.worktree_id {
+        state
+            .projections
+            .list_worktrees(input.project_id, false)
+            .map_err(|e| TauriActionError::Projection(e.to_string()))?
+            .into_iter()
+            .find(|w| w.id == wt_id)
+            .map(|w| w.path)
+            .unwrap_or(project.root_path.clone())
+    } else {
+        project.root_path.clone()
+    };
+
+    let mut command = action.command.clone();
+    if action.kind == "github_workflow" && !command.starts_with("gh ") {
+        command = format!("gh workflow run {command}");
+    }
+
+    let run_id = format!("run-{}", uuid::Uuid::now_v7());
+    spawn_streaming(app, project.environment, cwd, command, run_id.clone());
+
+    Ok(ActionRunOutput { run_id })
+}
+
+fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: String, run_id: String) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    tauri::async_runtime::spawn(async move {
+        let event_name = format!("action:output:{run_id}");
+        let spawn_result = match env {
+            Environment::Windows => Command::new("cmd.exe")
+                .args(["/C", &command])
+                .current_dir(&cwd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn(),
+            Environment::Wsl { ref distro } => Command::new("wsl.exe")
+                .args([
+                    "-d",
+                    distro.as_str(),
+                    "--cd",
+                    cwd.as_str(),
+                    "--",
+                    "bash",
+                    "-lc",
+                    &command,
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn(),
+        };
+        let mut child = match spawn_result {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = app.emit(
+                    &event_name,
+                    ActionStreamLine::Error {
+                        message: e.to_string(),
+                    },
+                );
+                return;
+            }
+        };
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_task = stdout.map(|s| {
+            let app = app.clone();
+            let event_name = event_name.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(s).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = app.emit(&event_name, ActionStreamLine::Stdout { text: line });
+                }
+            })
+        });
+        let stderr_task = stderr.map(|s| {
+            let app = app.clone();
+            let event_name = event_name.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(s).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = app.emit(&event_name, ActionStreamLine::Stderr { text: line });
+                }
+            })
+        });
+        let exit = child.wait().await;
+        if let Some(t) = stdout_task {
+            let _ = t.await;
+        }
+        if let Some(t) = stderr_task {
+            let _ = t.await;
+        }
+        let line = match exit {
+            Ok(status) => ActionStreamLine::Exit {
+                code: status.code().unwrap_or(-1),
+                success: status.success(),
+            },
+            Err(e) => ActionStreamLine::Error {
+                message: e.to_string(),
+            },
+        };
+        let _ = app.emit(&event_name, line);
+    });
 }
 
 fn load_action(state: &AppState, id: AggregateId) -> Result<(ActionState, u32), TauriActionError> {
