@@ -39,6 +39,7 @@ pub mod op_name {
     pub const GIT_LOG: &str = "git.log";
     pub const GIT_GET_CONFLICT: &str = "git.get_conflict";
     pub const GIT_RESOLVE: &str = "git.resolve";
+    pub const GIT_APPLY_PATCH: &str = "git.apply_patch";
 }
 
 // ────── system.info ────────────────────────────────────────────────────────
@@ -410,4 +411,16 @@ pub struct GitResolveArgs {
     pub repo_path: String,
     pub path: String,
     pub content: String,
+}
+
+// ────── git.apply_patch (hunk-level stage / unstage) ───────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitApplyPatchArgs {
+    pub repo_path: String,
+    pub patch: String,
+    #[serde(default)]
+    pub reverse: bool,
+    #[serde(default)]
+    pub cached: bool,
 }

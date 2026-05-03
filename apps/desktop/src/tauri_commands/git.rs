@@ -312,6 +312,43 @@ pub struct GitResolveInput {
     pub content: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GitApplyPatchInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub patch: String,
+    /// If true, applies the patch in reverse (used to unstage a hunk).
+    #[serde(default)]
+    pub reverse: bool,
+    /// If true, applies to the index (`git apply --cached`). Always true
+    /// for stage/unstage flows; available as a knob in case we ever apply
+    /// to the workdir.
+    #[serde(default = "default_true")]
+    pub cached: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[tauri::command]
+pub async fn git_apply_patch(
+    input: GitApplyPatchInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::apply_patch(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.patch,
+        input.reverse,
+        input.cached,
+    )
+    .await?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn git_resolve(
     input: GitResolveInput,

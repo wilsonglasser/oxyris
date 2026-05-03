@@ -98,6 +98,7 @@ pub fn run() {
             tauri_commands::git::git_log,
             tauri_commands::git::git_get_conflict,
             tauri_commands::git::git_resolve,
+            tauri_commands::git::git_apply_patch,
             tauri_commands::git::git_generate_commit_message,
             tauri_commands::indexing::index_rebuild,
             tauri_commands::indexing::index_query_symbol,

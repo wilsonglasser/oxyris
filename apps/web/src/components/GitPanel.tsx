@@ -27,6 +27,11 @@ import {
 import type { DiffMode, StatusEntry } from "~/ipc/git.ts";
 import { MonacoDiffViewer } from "~/components/MonacoDiffViewer.tsx";
 import { MergeEditor } from "~/components/MergeEditor.tsx";
+import {
+  buildSingleHunkPatch,
+  parseUnifiedDiff,
+  type Hunk,
+} from "~/lib/diff-hunks.ts";
 
 interface Props {
   projectId: string | null;
@@ -769,13 +774,74 @@ function GitDiffPane({
         {loading ? (
           <div className="p-2 text-[12px] text-neutral-500">{t("loading")}</div>
         ) : diff ? (
-          <MonacoDiffViewer
-            oldContent={diff.old_content}
-            newContent={diff.new_content}
-            path={diff.path}
-          />
+          <>
+            {selected.mode !== "working_vs_head" && (
+              <HunkBar
+                projectId={projectId}
+                worktreeId={worktreeId}
+                diff={diff}
+                reverse={selected.mode === "staged_vs_head"}
+              />
+            )}
+            <MonacoDiffViewer
+              oldContent={diff.old_content}
+              newContent={diff.new_content}
+              path={diff.path}
+            />
+          </>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function HunkBar({
+  projectId,
+  worktreeId,
+  diff,
+  reverse,
+}: {
+  projectId: string;
+  worktreeId: string;
+  diff: { unified: string; path: string };
+  reverse: boolean;
+}) {
+  const { t } = useTranslation("git");
+  const applyHunk = useGitStore((s) => s.applyHunk);
+  const parsed = useMemo(
+    () => parseUnifiedDiff(diff.unified, diff.path),
+    [diff.unified, diff.path],
+  );
+  if (parsed.hunks.length === 0) return null;
+  const onClick = async (h: Hunk) => {
+    const patch = buildSingleHunkPatch(parsed, h);
+    try {
+      await applyHunk(projectId, worktreeId, patch, reverse);
+    } catch (e) {
+      window.alert(`${t("hunk_apply_failed")}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+  return (
+    <div className="flex shrink-0 flex-wrap gap-1 border-b border-neutral-800/60 bg-neutral-900/30 px-2 py-1">
+      <span className="text-[10px] uppercase tracking-wide text-neutral-500">
+        {t("hunks", { count: parsed.hunks.length })}
+      </span>
+      {parsed.hunks.map((h, i) => (
+        <button
+          key={`${h.header}-${i}`}
+          type="button"
+          onClick={() => void onClick(h)}
+          className="flex items-center gap-1 rounded border border-neutral-800 bg-neutral-950 px-1.5 py-0.5 text-[10px] text-neutral-300 hover:border-neutral-700 hover:bg-neutral-900"
+          title={h.header}
+        >
+          <span className="text-neutral-500">@{h.newStart}</span>
+          <span className="text-emerald-400">+{h.added}</span>
+          <span className="text-red-400">-{h.removed}</span>
+          <span className="ml-1 text-neutral-400">
+            {reverse ? t("unstage_hunk") : t("stage_hunk")}
+          </span>
+        </button>
+      ))}
     </div>
   );
 }

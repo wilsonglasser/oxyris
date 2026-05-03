@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::domain::session::{Session, SessionCommand, SessionEvent};
 use crate::infra::agent_pool::AgentPool;
 use crate::infra::event_store::{EventStore, EventStoreError};
+use crate::infra::fs_watcher::FsWatchService;
 use crate::infra::indexing::IndexingService;
 use crate::infra::language_packs::LanguagePacksService;
 use crate::infra::lsp::LspManager;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub session_supervisor: SessionSupervisor,
     pub pty: PtySupervisor,
     pub indexing: Arc<IndexingService>,
+    pub fs_watcher: Arc<FsWatchService>,
     pub lsp: Arc<LspManager>,
     pub language_packs: Arc<LanguagePacksService>,
     /// TCP port the LSP bridge is listening on (`127.0.0.1:<port>`).
@@ -128,6 +130,7 @@ impl AppState {
         spawn_docker_cleanup(projections.clone(), app_for_cleanup);
 
         let indexing = Arc::new(IndexingService::new(data_dir.clone(), agent_pool.clone()));
+        let fs_watcher = Arc::new(FsWatchService::new());
         let app_for_packs = app_for_lsp.clone();
         let lsp = Arc::new(LspManager::new(app_for_lsp));
         let language_packs = Arc::new(LanguagePacksService::new(app_for_packs, data_dir.clone()));
@@ -172,6 +175,7 @@ impl AppState {
             session_supervisor,
             pty: PtySupervisor::new(),
             indexing,
+            fs_watcher,
             lsp,
             language_packs,
             lsp_bridge_port,

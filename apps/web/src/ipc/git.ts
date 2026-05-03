@@ -286,6 +286,24 @@ export function gitResolve(args: {
   });
 }
 
+export function gitApplyPatch(args: {
+  projectId: string;
+  worktreeId: string;
+  patch: string;
+  reverse?: boolean;
+  cached?: boolean;
+}): Promise<void> {
+  return invoke<void>("git_apply_patch", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      patch: args.patch,
+      reverse: args.reverse ?? false,
+      cached: args.cached ?? true,
+    },
+  });
+}
+
 export function gitGenerateCommitMessage(args: {
   projectId: string;
   worktreeId: string;

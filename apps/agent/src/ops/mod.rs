@@ -120,6 +120,7 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         op_name::GIT_LOG => git::log(from_args(args)?),
         op_name::GIT_GET_CONFLICT => git::get_conflict(from_args(args)?),
         op_name::GIT_RESOLVE => git::resolve(from_args(args)?),
+        op_name::GIT_APPLY_PATCH => git::apply_patch(from_args(args)?),
         other => Err(OpError::UnknownOp(other.to_owned())),
     }
 }

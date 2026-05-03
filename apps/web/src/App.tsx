@@ -23,6 +23,7 @@ import {
   type DockerCleanupReport,
   onDockerCleanup,
 } from "~/ipc/env.ts";
+import { useFileEditorStore } from "~/stores/fileEditorStore.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 
@@ -65,11 +66,13 @@ export function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh, loadBindings, backgroundCheckUpdate]);
 
-  // Subscribe once to the backend's `indexing:progress` and `lsp:status`
-  // streams so the chips live in any panel that wants them.
+  // Subscribe once to the backend's `indexing:progress`, `lsp:status`, and
+  // `fs:changed` streams so the chips + file tree react regardless of which
+  // tab is currently visible.
   useEffect(() => {
     let unlistenIndex: (() => void) | null = null;
     let unlistenLsp: (() => void) | null = null;
+    let unlistenFs: (() => void) | null = null;
     void useIndexingStore
       .getState()
       .subscribe()
@@ -82,9 +85,16 @@ export function App() {
       .then((fn) => {
         unlistenLsp = fn;
       });
+    void useFileEditorStore
+      .getState()
+      .subscribeFsChanged(() => useProjectStore.getState().activeId)
+      .then((fn) => {
+        unlistenFs = fn;
+      });
     return () => {
       if (unlistenIndex) unlistenIndex();
       if (unlistenLsp) unlistenLsp();
+      if (unlistenFs) unlistenFs();
     };
   }, []);
 

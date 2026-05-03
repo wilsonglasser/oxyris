@@ -338,6 +338,49 @@ pub fn commit(repo_path: &str, message: &str, amend: bool) -> Result<CommitResul
     })
 }
 
+// ────── apply patch (hunk-level stage / unstage) ───────────────────────────
+
+/// Apply a unified-diff patch to the index. Used for hunk-level staging.
+/// Shells out to the `git` binary because libgit2's apply API is surprisingly
+/// awkward and doesn't handle `--cached` cleanly.
+pub fn apply_patch(
+    repo_path: &str,
+    patch: &str,
+    reverse: bool,
+    cached: bool,
+) -> Result<(), GitError> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut args: Vec<&str> = vec!["-C", repo_path, "apply"];
+    if cached {
+        args.push("--cached");
+    }
+    if reverse {
+        args.push("--reverse");
+    }
+    args.push("--unidiff-zero");
+    args.push("--whitespace=nowarn");
+    args.push("-");
+
+    let mut child = Command::new("git")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(patch.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(GitError::NonZero(
+            String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 // ────── helpers ────────────────────────────────────────────────────────────
 
 fn open(repo_path: &str) -> Result<git2::Repository, GitError> {

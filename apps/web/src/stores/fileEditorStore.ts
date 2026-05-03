@@ -1,3 +1,4 @@
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import {
@@ -111,6 +112,8 @@ interface FileEditorState {
     relPath: string,
     recursive: boolean,
   ) => Promise<void>;
+  /** Subscribe to backend `fs:changed` events; returns the Tauri unlisten. */
+  subscribeFsChanged: (projectIdResolver: () => string | null) => Promise<UnlistenFn>;
 }
 
 export const useFileEditorStore = create<FileEditorState>()(
@@ -398,6 +401,31 @@ export const useFileEditorStore = create<FileEditorState>()(
     if (order.includes(relPath)) {
       get().closeTab(worktreeId, relPath);
     }
+  },
+
+  subscribeFsChanged: async (projectIdResolver) => {
+    return await listen<{ worktree_id: string; paths: string[] }>(
+      "fs:changed",
+      (e) => {
+        const { worktree_id, paths } = e.payload;
+        // Refresh each unique parent dir that we already have loaded —
+        // skip dirs the user never expanded so we don't fetch the whole
+        // tree on every save.
+        const trees = get().trees[worktree_id];
+        if (!trees) return;
+        const projectId = projectIdResolver();
+        if (!projectId) return;
+        const seen = new Set<string>();
+        for (const p of paths) {
+          const parent = parentDir(p);
+          if (seen.has(parent)) continue;
+          seen.add(parent);
+          if (trees[parent]) {
+            void get().loadDir(projectId, worktree_id, parent);
+          }
+        }
+      },
+    );
   },
     }),
     {

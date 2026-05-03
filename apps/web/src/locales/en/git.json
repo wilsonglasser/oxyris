@@ -42,5 +42,9 @@
   "show_base": "Base",
   "mark_resolved": "Mark resolved",
   "resolving": "Resolving…",
-  "generate_msg": "Generate commit message with Claude"
+  "generate_msg": "Generate commit message with Claude",
+  "hunks": "{{count}} hunks",
+  "stage_hunk": "Stage",
+  "unstage_hunk": "Unstage",
+  "hunk_apply_failed": "Hunk apply failed"
 }

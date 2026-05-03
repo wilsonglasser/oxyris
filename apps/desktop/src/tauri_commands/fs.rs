@@ -49,8 +49,16 @@ pub struct FsListDirOutput {
 pub async fn fs_list_dir(
     input: FsListDirInput,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<FsListDirOutput, TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    // Lazy-install the per-worktree fs watcher on first listing so the
+    // tree refreshes automatically when files change on disk. Idempotent
+    // and silently no-op'd for WSL projects.
+    state
+        .fs_watcher
+        .ensure(app.clone(), input.worktree_id, &env, root.clone())
+        .await;
     let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
     let result: FsListDirResult =
         fs_infra::list_dir(&env, &state.agent_pool, abs.clone(), input.show_hidden).await?;

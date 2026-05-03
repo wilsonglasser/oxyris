@@ -10,6 +10,7 @@ pub mod env_template;
 pub mod environments;
 pub mod event_store;
 pub mod fs;
+pub mod fs_watcher;
 pub mod git;
 pub mod indexing;
 pub mod language_packs;

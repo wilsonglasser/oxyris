@@ -9,10 +9,10 @@ use oxyris_git::status as git_status;
 use oxyris_git::types::{CheckpointPhase, DiffMode};
 use oxyris_git::worktree;
 use oxyris_ipc::ops::{
-    GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCheckpointCaptureArgs,
-    GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCommitArgs, GitConflictPathArgs,
-    GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs,
-    GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs,
+    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs,
+    GitCheckpointCaptureArgs, GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCommitArgs,
+    GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs, GitLogArgs,
+    GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs,
 };
 
 use super::OpError;
@@ -153,6 +153,11 @@ pub fn get_conflict(args: GitConflictPathArgs) -> Result<serde_json::Value, OpEr
 
 pub fn resolve(args: GitResolveArgs) -> Result<serde_json::Value, OpError> {
     git_conflict::resolve(&args.repo_path, &args.path, &args.content)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn apply_patch(args: GitApplyPatchArgs) -> Result<serde_json::Value, OpError> {
+    git_status::apply_patch(&args.repo_path, &args.patch, args.reverse, args.cached)?;
     Ok(serde_json::Value::Null)
 }
 

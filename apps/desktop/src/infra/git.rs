@@ -15,9 +15,10 @@ use oxyris_git::{
     remote as git_remote, status as git_status, worktree as wt,
 };
 use oxyris_ipc::ops::{
-    GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCommitArgs, GitConflictPathArgs,
-    GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs,
-    GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs, op_name,
+    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCommitArgs,
+    GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs, GitLogArgs,
+    GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs,
+    op_name,
 };
 use thiserror::Error;
 
@@ -591,6 +592,43 @@ pub async fn get_conflict(
                 )
                 .await?;
             serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn apply_patch(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    patch: String,
+    reverse: bool,
+    cached: bool,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Windows => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || {
+                git_status::apply_patch(&repo, &patch, reverse, cached)
+            })
+            .await
+            .map_err(|e| GitError::Git(format!("join: {e}")))?
+            .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_APPLY_PATCH,
+                    serde_json::to_value(GitApplyPatchArgs {
+                        repo_path: repo_path.to_owned(),
+                        patch,
+                        reverse,
+                        cached,
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
         }
     }
 }

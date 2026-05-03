@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  gitApplyPatch,
   gitBranchCreate,
   gitBranchDelete,
   gitCheckout,
@@ -118,6 +119,12 @@ interface GitState {
   generateCommitMessage: (
     projectId: string,
     worktreeId: string,
+  ) => Promise<void>;
+  applyHunk: (
+    projectId: string,
+    worktreeId: string,
+    patch: string,
+    reverse: boolean,
   ) => Promise<void>;
 }
 
@@ -329,6 +336,17 @@ export const useGitStore = create<GitState>((set, get) => ({
   deleteBranch: async (projectId, worktreeId, name) => {
     await gitBranchDelete({ projectId, worktreeId, name });
     await get().refreshBranches(projectId, worktreeId);
+  },
+
+  applyHunk: async (projectId, worktreeId, patch, reverse) => {
+    await gitApplyPatch({
+      projectId,
+      worktreeId,
+      patch,
+      reverse,
+      cached: true,
+    });
+    await get().refreshStatus(projectId, worktreeId);
   },
 
   generateCommitMessage: async (projectId, worktreeId) => {
