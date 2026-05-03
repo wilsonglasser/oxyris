@@ -15,6 +15,7 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import type { Environment } from "~/ipc/commands.ts";
 import { LanguageSwitcher } from "~/components/LanguageSwitcher.tsx";
+import { LanguagePacksPanel } from "~/components/LanguagePacksPanel.tsx";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import {
   type UpdateStatus,
@@ -41,7 +42,7 @@ async function settingsProviderDiscover(): Promise<DiscoveredInstall[]> {
   return invoke<DiscoveredInstall[]>("settings_provider_discover");
 }
 
-type Tab = "general" | "advanced";
+type Tab = "general" | "languages" | "advanced";
 type UpdateTrack = "stable" | "nightly";
 const UPDATE_TRACK_KEY = "oxyris.updateTrack";
 
@@ -62,7 +63,7 @@ export function SettingsPanel() {
           {t("heading")}
         </h2>
         <div className="flex gap-1">
-          {(["general", "advanced"] as const).map((k) => (
+          {(["general", "languages", "advanced"] as const).map((k) => (
             <button
               key={k}
               type="button"
@@ -80,7 +81,9 @@ export function SettingsPanel() {
       </header>
 
       <div className="px-5 py-5">
-        {tab === "general" ? <GeneralTab /> : <AdvancedTab />}
+        {tab === "general" && <GeneralTab />}
+        {tab === "languages" && <LanguagePacksPanel />}
+        {tab === "advanced" && <AdvancedTab />}
       </div>
     </section>
   );

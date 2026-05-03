@@ -2,7 +2,27 @@
   "heading": "Settings",
   "tabs": {
     "general": "General",
+    "languages": "Languages",
     "advanced": "Advanced"
+  },
+  "languages": {
+    "heading": "Language packs",
+    "description": "Each pack downloads or installs a language server (LSP) so semantic tools — find references, hover, diagnostics — work for that language.",
+    "loading": "Loading language packs…",
+    "install": "Install",
+    "uninstall": "Uninstall",
+    "uninstall_confirm": "Uninstall {{name}}? This removes the managed binary; PATH installs are not touched.",
+    "install_managed": "Install Oxyris-managed copy alongside the PATH version",
+    "install_managed_short": "Manage",
+    "wsl_install": "Install in WSL:",
+    "wsl_install_ok": "Installed in {{distro}}",
+    "wsl_install_failed": "Failed in {{distro}}",
+    "status": {
+      "managed": "Managed",
+      "path": "On PATH",
+      "installing": "{{progress}}%",
+      "failed": "Failed"
+    }
   },
   "section_language": "Language",
   "section_updates": "Updates",

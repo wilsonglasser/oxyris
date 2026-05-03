@@ -9,7 +9,7 @@ use oxyris_provider::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{StreamEvent, parse_stream_line};
 
@@ -56,6 +56,12 @@ impl Provider for ClaudeProvider {
 
         let (events_tx, events_rx) = mpsc::unbounded_channel::<ProviderEvent>();
         let (commands_tx, mut commands_rx) = mpsc::unbounded_channel::<ProviderCommand>();
+        // One-shot kill channel — fired by the writer task when it sees an
+        // Interrupt or Stop command. The reaper races this against the
+        // child's natural exit, so killing the process is non-blocking from
+        // the IPC handler's perspective.
+        let (kill_tx, kill_rx) = oneshot::channel::<()>();
+        let mut kill_tx = Some(kill_tx);
 
         // stderr logger — claude writes diagnostics here.
         tokio::spawn(async move {
@@ -82,6 +88,9 @@ impl Provider for ClaudeProvider {
 
         // Command writer — serializes ProviderCommands into Claude's
         // input stream-json shape and writes them to the child's stdin.
+        // Holds the kill_tx so Interrupt/Stop can ask the reaper to kill
+        // the child, which is the only reliable way to stop streaming —
+        // Claude CLI's stream-json input has no "cancel" frame.
         let turn_ref = active_turn.clone();
         tokio::spawn(async move {
             let mut stdin = stdin;
@@ -102,26 +111,39 @@ impl Provider for ClaudeProvider {
                             break;
                         }
                     }
-                    ProviderCommand::Interrupt => {
-                        // Claude CLI doesn't have an "interrupt" stream frame —
-                        // the supervisor kills the process when it wants to
-                        // truly interrupt. Ignore here so senders can wire to
-                        // whichever is appropriate.
+                    ProviderCommand::Interrupt | ProviderCommand::Stop => {
+                        // Fire the kill signal exactly once — subsequent
+                        // Interrupts on a dying session are no-ops.
+                        if let Some(tx) = kill_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        // Stop reading commands; the session is going down.
+                        break;
                     }
                     ProviderCommand::ApproveToolUse { .. }
                     | ProviderCommand::RejectToolUse { .. } => {
                         // Supervised-mode approvals. Wiring lands in Sprint 11
                         // when we surface approval prompts end-to-end.
                     }
-                    ProviderCommand::Stop => break,
                 }
             }
             let _ = stdin.shutdown().await;
         });
 
-        // Child reaper — best-effort.
+        // Reaper — races the child's natural exit against an external kill
+        // signal from the writer. Whichever fires first wins; either way the
+        // child is reaped so it doesn't zombie.
         tokio::spawn(async move {
-            let _ = child.wait().await;
+            tokio::select! {
+                _ = kill_rx => {
+                    tracing::debug!("claude: interrupt requested, killing child");
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                }
+                result = child.wait() => {
+                    tracing::debug!(?result, "claude: child exited naturally");
+                }
+            }
         });
 
         Ok(ProviderSession {

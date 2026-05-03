@@ -1,0 +1,24 @@
+[package]
+name = "oxyris-laravel"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Laravel project introspection for the Oxyris MCP layer — parses routes, configs, Eloquent models, and Blade components into structured tools Claude can query."
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ignore.workspace = true
+
+tree-sitter = "0.25"
+tree-sitter-php = "0.23"
+
+[dev-dependencies]
+tempfile = "3.16"

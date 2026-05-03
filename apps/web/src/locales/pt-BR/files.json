@@ -1,0 +1,23 @@
+{
+  "title": "Arquivos",
+  "loading": "Carregando…",
+  "saving": "Salvando…",
+  "save": "Salvar",
+  "open_external": "Abrir externamente",
+  "not_installed": "não instalado",
+  "close_tab": "Fechar aba",
+  "no_open_files": "Nenhum arquivo aberto. Escolha um na árvore.",
+  "empty_dir": "Diretório vazio",
+  "refresh": "Atualizar",
+  "worktree_picker_label": "Worktree",
+  "truncated": "truncado",
+  "pick_project": "Escolha um projeto para navegar pelos arquivos.",
+  "scroll_tabs_left": "Rolar abas p/ esquerda",
+  "scroll_tabs_right": "Rolar abas p/ direita",
+  "ctx_close": "Fechar",
+  "ctx_close_others": "Fechar outras",
+  "ctx_close_all": "Fechar todas",
+  "view_raw": "Raw",
+  "view_preview": "Preview",
+  "preview_unsupported": "Preview não suportado para este tipo de arquivo."
+}

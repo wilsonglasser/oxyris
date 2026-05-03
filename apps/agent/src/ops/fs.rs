@@ -4,7 +4,8 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 use oxyris_ipc::ops::{
-    FsReadResult, FsStatResult, FsWalkArgs, FsWalkEvent, FsWalkResult, FsWriteResult,
+    FsListDirEntry, FsListDirResult, FsReadResult, FsStatResult, FsWalkArgs, FsWalkEvent,
+    FsWalkResult, FsWriteResult,
 };
 
 use crate::ops::OpError;
@@ -80,6 +81,51 @@ pub fn write(path_str: &str, contents: &str) -> Result<FsWriteResult, OpError> {
     Ok(FsWriteResult {
         path: path_str.to_owned(),
         bytes_written: contents.len() as u64,
+    })
+}
+
+pub fn list_dir(path_str: &str, show_hidden: bool) -> Result<FsListDirResult, OpError> {
+    let path = Path::new(path_str);
+    if !path.exists() {
+        return Err(OpError::NotFound(path_str.to_owned()));
+    }
+    let mut entries = Vec::new();
+    for dent in fs::read_dir(path)? {
+        let dent = dent?;
+        let name = dent.file_name().to_string_lossy().into_owned();
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+        let ft = match dent.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let md = dent.metadata().ok();
+        entries.push(FsListDirEntry {
+            name,
+            is_dir: ft.is_dir(),
+            is_symlink: ft.is_symlink(),
+            size: md
+                .as_ref()
+                .and_then(|m| if m.is_file() { Some(m.len()) } else { None }),
+            modified_secs: md.as_ref().and_then(|m| {
+                m.modified().ok().and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs() as i64)
+                })
+            }),
+        });
+    }
+    // Dirs first, then files; both case-insensitive alphabetical.
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(FsListDirResult {
+        path: path_str.to_owned(),
+        entries,
     })
 }
 

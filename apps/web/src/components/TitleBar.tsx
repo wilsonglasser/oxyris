@@ -32,9 +32,21 @@ export function TitleBar({
   const onMax = () => void getCurrentWindow().toggleMaximize();
   const onClose = () => void getCurrentWindow().close();
 
+  // Belt-and-suspenders: `data-tauri-drag-region` is supposed to handle
+  // double-click → maximize on its own, but reports show it can miss when
+  // the cursor lands on a nested element. Fire toggleMaximize ourselves
+  // whenever the dblclick target sits inside any drag region.
+  const onHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("[data-tauri-drag-region]")) {
+      void getCurrentWindow().toggleMaximize();
+    }
+  };
+
   return (
     <header
       data-tauri-drag-region
+      onDoubleClick={onHeaderDoubleClick}
       className="flex h-9 shrink-0 select-none items-center border-b border-neutral-800 bg-neutral-900 pl-3 text-[11px] text-neutral-300"
     >
       <div

@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { TFunction } from "i18next";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
@@ -7,41 +6,46 @@ import {
   GitBranch,
   MessageSquarePlus,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   Search,
   Settings,
-  Star,
   Trash2,
-  X,
 } from "lucide-react";
 import {
   sessionDelete,
   sessionList,
   sessionRename,
+  sessionTogglePin,
   type SessionSummary,
 } from "~/ipc/session.ts";
 import {
+  PRIMARY_WORKTREE_ID,
   type WorktreeRow,
-  WorktreeCommandError,
-  worktreeCreate,
   worktreeList,
-  worktreeRemove,
 } from "~/ipc/worktree.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
-import { runAutoActionsOnWorktreeCreate } from "~/lib/runAutoActions.ts";
 
 interface Props {
   onNewProject: () => void;
   onOpenSettings: () => void;
   onNewSession?: () => void;
+  onOpenProjectSettings?: (projectId: string) => void;
 }
 
 type SessionsByProject = Record<string, SessionSummary[]>;
+type WorktreesByProject = Record<string, WorktreeRow[]>;
 
-export function Sidebar({ onNewProject, onOpenSettings, onNewSession }: Props) {
+export function Sidebar({
+  onNewProject,
+  onOpenSettings,
+  onNewSession,
+  onOpenProjectSettings,
+}: Props) {
   const { t } = useTranslation("common");
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeId);
@@ -54,7 +58,43 @@ export function Sidebar({ onNewProject, onOpenSettings, onNewSession }: Props) {
   const [sessionsByProject, setSessionsByProject] = useState<SessionsByProject>(
     {},
   );
+  const [worktreesByProject, setWorktreesByProject] =
+    useState<WorktreesByProject>({});
   const hasUpdate = useHasUpdate();
+
+  // User-resizable sidebar width, persisted across reloads. Bounds keep the
+  // chrome usable.
+  const [width, setWidth] = useState<number>(() => readStoredWidth());
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+    } catch {
+      /* localStorage may be disabled in odd contexts */
+    }
+  }, [width]);
+  const dragStartRef = useRef<{ x: number; w: number } | null>(null);
+  const onResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragStartRef.current = { x: e.clientX, w: width };
+    const onMove = (ev: MouseEvent) => {
+      const start = dragStartRef.current;
+      if (!start) return;
+      const next = Math.max(
+        SIDEBAR_MIN,
+        Math.min(SIDEBAR_MAX, start.w + (ev.clientX - start.x)),
+      );
+      setWidth(next);
+    };
+    const onUp = () => {
+      dragStartRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   const refreshProjectSessions = useCallback(async (projectId: string) => {
     try {
@@ -65,21 +105,25 @@ export function Sidebar({ onNewProject, onOpenSettings, onNewSession }: Props) {
     }
   }, []);
 
+  const refreshProjectWorktrees = useCallback(async (projectId: string) => {
+    try {
+      const rows = await worktreeList({ project_id: projectId });
+      setWorktreesByProject((prev) => ({ ...prev, [projectId]: rows }));
+    } catch {
+      /* leave prior snapshot in place */
+    }
+  }, []);
+
   // Keep session lists in sync with the known projects. Fetch for every
   // project so search can match by thread title even for collapsed nodes.
   useEffect(() => {
-    projects.forEach((p) => void refreshProjectSessions(p.id));
-    setSessionsByProject((prev) => {
-      // Drop cached rows for projects that no longer exist so stale data
-      // doesn't stick around.
-      const allowed = new Set(projects.map((p) => p.id));
-      const next: SessionsByProject = {};
-      for (const [pid, rows] of Object.entries(prev)) {
-        if (allowed.has(pid)) next[pid] = rows;
-      }
-      return next;
+    projects.forEach((p) => {
+      void refreshProjectSessions(p.id);
+      void refreshProjectWorktrees(p.id);
     });
-  }, [projects, refreshProjectSessions]);
+    setSessionsByProject((prev) => filterAllowed(prev, projects));
+    setWorktreesByProject((prev) => filterAllowed(prev, projects));
+  }, [projects, refreshProjectSessions, refreshProjectWorktrees]);
 
   // Refresh the active project's sessions when the active session id
   // changes — catches create/delete without waiting for a focus refresh.
@@ -128,18 +172,21 @@ export function Sidebar({ onNewProject, onOpenSettings, onNewSession }: Props) {
   };
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-neutral-800 bg-neutral-900 text-neutral-300">
-      <div className="flex items-center gap-2 px-3 py-2.5">
+    <aside
+      style={{ width }}
+      className="relative flex h-full shrink-0 flex-col border-r border-neutral-800 bg-neutral-900 text-neutral-300"
+    >
+      <div className="flex items-center gap-1 px-2 py-2">
         <div className="relative flex-1">
           <Search
-            className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-neutral-500"
+            className="pointer-events-none absolute left-1.5 top-1/2 size-3 -translate-y-1/2 text-neutral-500"
             strokeWidth={1.75}
           />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("sidebar.search_placeholder")}
-            className="w-full rounded-md border border-neutral-800 bg-neutral-900/60 py-1 pl-7 pr-2 text-[11px] text-neutral-200 placeholder:text-neutral-500 outline-none focus:border-neutral-700"
+            className="h-6 w-full rounded bg-neutral-900/60 pl-6 pr-2 text-[11px] text-neutral-200 placeholder:text-neutral-600 outline-none focus:bg-neutral-800/60"
           />
         </div>
         <button
@@ -147,7 +194,7 @@ export function Sidebar({ onNewProject, onOpenSettings, onNewSession }: Props) {
           onClick={onNewProject}
           aria-label={t("sidebar.new_project")}
           title={t("sidebar.new_project")}
-          className="flex size-7 shrink-0 items-center justify-center rounded-md border border-neutral-800 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
+          className="flex size-6 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
         >
           <Plus className="size-3.5" strokeWidth={1.75} />
         </button>
@@ -166,32 +213,60 @@ export function Sidebar({ onNewProject, onOpenSettings, onNewSession }: Props) {
           </p>
         ) : (
           <ul className="flex flex-col gap-0.5">
-            {visibleProjects.map((p) => (
-              <ProjectItem
-                key={p.id}
-                project={p}
-                isActive={p.id === activeProjectId}
-                isExpanded={searching || !!expanded[p.id]}
-                onToggle={() => toggle(p.id)}
-                onSelectProject={() => {
-                  setActiveProject(p.id);
-                  setExpanded((prev) => ({ ...prev, [p.id]: true }));
-                }}
-                activeSessionId={activeSessionId}
-                onSelectSession={(id) => {
-                  setActiveProject(p.id);
-                  setActiveSession(id);
-                }}
-                onNewSession={onNewSession}
-                sessions={visibleSessionsFor(p.id, p.name)}
-                onSessionsChanged={() => void refreshProjectSessions(p.id)}
-              />
-            ))}
+            {visibleProjects.map((p) => {
+              const worktrees = worktreesByProject[p.id] ?? [];
+              const worktreeNameById: Record<string, string> = {};
+              for (const w of worktrees) {
+                worktreeNameById[w.id] = w.is_primary
+                  ? `${w.branch || "main"} ★`
+                  : w.branch;
+              }
+              // Sessions persisted before the synthetic-primary landed
+              // carry `worktree_id: null` for the root checkout. Map that
+              // to the same label the synthetic primary card shows.
+              const primaryLabel = worktreeNameById[PRIMARY_WORKTREE_ID];
+              return (
+                <ProjectItem
+                  key={p.id}
+                  project={p}
+                  isActive={p.id === activeProjectId}
+                  isExpanded={searching || !!expanded[p.id]}
+                  onToggle={() => toggle(p.id)}
+                  onSelectProject={() => {
+                    setActiveProject(p.id);
+                    setActiveSession(null);
+                    setExpanded((prev) => ({ ...prev, [p.id]: true }));
+                  }}
+                  activeSessionId={activeSessionId}
+                  onSelectSession={(id) => {
+                    setActiveProject(p.id);
+                    setActiveSession(id);
+                  }}
+                  onNewSession={
+                    onNewSession
+                      ? () => {
+                          setActiveProject(p.id);
+                          onNewSession();
+                        }
+                      : undefined
+                  }
+                  onOpenProjectSettings={
+                    onOpenProjectSettings
+                      ? () => onOpenProjectSettings(p.id)
+                      : undefined
+                  }
+                  sessions={visibleSessionsFor(p.id, p.name)}
+                  worktreeNameById={worktreeNameById}
+                  primaryLabel={primaryLabel ?? null}
+                  onSessionsChanged={() => void refreshProjectSessions(p.id)}
+                />
+              );
+            })}
           </ul>
         )}
       </div>
 
-      <footer className="flex items-center justify-between border-t border-neutral-800 px-2 py-1.5">
+      <footer className="flex items-center justify-between border-t border-neutral-800 px-2 py-1">
         <button
           type="button"
           onClick={onOpenSettings}
@@ -205,17 +280,49 @@ export function Sidebar({ onNewProject, onOpenSettings, onNewSession }: Props) {
               ? t("sidebar.update_available")
               : t("sidebar.open_settings")
           }
-          className="relative flex size-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+          className="relative flex size-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
         >
           <Settings className="size-3.5" strokeWidth={1.75} />
           {hasUpdate && (
-            <span className="absolute right-1 top-1 size-1.5 rounded-full bg-emerald-400" />
+            <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-emerald-400" />
           )}
         </button>
-        <span className="pr-1.5 text-[10px] text-neutral-600">v0.1.0</span>
+        <span className="pr-1 text-[10px] text-neutral-600">v0.1.0</span>
       </footer>
+
+      {/*
+        Drag handle on the right edge — 4px wide invisible strip with a
+        visible bar on hover. Lives outside the scroll container so dragging
+        stays smooth even mid-scroll.
+      */}
+      <div
+        onMouseDown={onResizeStart}
+        role="separator"
+        aria-orientation="vertical"
+        className="group absolute right-0 top-0 z-10 h-full w-1 cursor-col-resize"
+      >
+        <div className="h-full w-full bg-transparent transition group-hover:bg-emerald-700/50" />
+      </div>
     </aside>
   );
+}
+
+const SIDEBAR_WIDTH_KEY = "oxyris.sidebar.width";
+const SIDEBAR_MIN = 180;
+const SIDEBAR_MAX = 480;
+const SIDEBAR_DEFAULT = 240;
+
+function readStoredWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= SIDEBAR_MIN && n <= SIDEBAR_MAX) {
+      return n;
+    }
+  } catch {
+    /* fall through */
+  }
+  return SIDEBAR_DEFAULT;
 }
 
 interface ProjectItemProps {
@@ -227,7 +334,10 @@ interface ProjectItemProps {
   activeSessionId: string | null;
   onSelectSession: (id: string | null) => void;
   onNewSession?: (() => void) | undefined;
+  onOpenProjectSettings?: (() => void) | undefined;
   sessions: SessionSummary[];
+  worktreeNameById: Record<string, string>;
+  primaryLabel: string | null;
   onSessionsChanged: () => void;
 }
 
@@ -240,54 +350,13 @@ function ProjectItem({
   activeSessionId,
   onSelectSession,
   onNewSession,
+  onOpenProjectSettings,
   sessions,
+  worktreeNameById,
+  primaryLabel,
   onSessionsChanged,
 }: ProjectItemProps) {
   const { t } = useTranslation("common");
-  const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
-  const [worktreesOpen, setWorktreesOpen] = useState(false);
-  const [wtError, setWtError] = useState<string | null>(null);
-
-  const refreshWorktrees = useCallback(() => {
-    void worktreeList({ project_id: project.id })
-      .then(setWorktrees)
-      .catch(() => {});
-  }, [project.id]);
-
-  useEffect(() => {
-    if (!isExpanded || !worktreesOpen) return;
-    refreshWorktrees();
-  }, [isExpanded, worktreesOpen, refreshWorktrees]);
-
-  const onNewWorktree = async () => {
-    const branch = window.prompt(
-      t("sidebar.new_worktree_prompt", { project: project.name }),
-    );
-    if (!branch) return;
-    try {
-      const created = await worktreeCreate({ project_id: project.id, branch });
-      refreshWorktrees();
-      setWtError(null);
-      void runAutoActionsOnWorktreeCreate({
-        projectId: project.id,
-        worktreeId: created.id,
-        sessionId: activeSessionId,
-      });
-    } catch (err) {
-      setWtError(formatWorktreeError(err, t));
-    }
-  };
-
-  const onRemoveWorktree = async (w: WorktreeRow) => {
-    if (!window.confirm(t("sidebar.remove_worktree_confirm", { name: w.name })))
-      return;
-    try {
-      await worktreeRemove({ id: w.id });
-      refreshWorktrees();
-    } catch (err) {
-      setWtError(formatWorktreeError(err, t));
-    }
-  };
 
   const envLabel =
     project.environment.kind === "windows"
@@ -330,6 +399,17 @@ function ProjectItem({
             </span>
           </span>
         </button>
+        {onOpenProjectSettings && isActive && (
+          <button
+            type="button"
+            onClick={onOpenProjectSettings}
+            aria-label={t("sidebar.project_settings")}
+            title={t("sidebar.project_settings")}
+            className="flex size-5 items-center justify-center rounded text-neutral-500 opacity-0 transition hover:bg-neutral-700 hover:text-neutral-100 group-hover:opacity-100"
+          >
+            <Settings className="size-3" strokeWidth={1.75} />
+          </button>
+        )}
         {onNewSession && isActive && (
           <button
             type="button"
@@ -356,8 +436,13 @@ function ProjectItem({
                   key={s.id}
                   session={s}
                   isActive={s.id === activeSessionId}
+                  worktreeName={
+                    !s.worktree_id || s.worktree_id === PRIMARY_WORKTREE_ID
+                      ? primaryLabel
+                      : worktreeNameById[s.worktree_id] ?? primaryLabel
+                  }
                   onSelect={() => onSelectSession(s.id)}
-                  onRenamed={onSessionsChanged}
+                  onChanged={onSessionsChanged}
                   onDeleted={() => {
                     if (activeSessionId === s.id) onSelectSession(null);
                     onSessionsChanged();
@@ -366,84 +451,6 @@ function ProjectItem({
               ))
             )}
           </ul>
-
-          <div>
-            <button
-              type="button"
-              onClick={() => setWorktreesOpen((v) => !v)}
-              className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-[10px] uppercase tracking-wider text-neutral-500 hover:bg-neutral-800/40 hover:text-neutral-300"
-            >
-              {worktreesOpen ? (
-                <ChevronDown className="size-3" strokeWidth={2} />
-              ) : (
-                <ChevronRight className="size-3" strokeWidth={2} />
-              )}
-              <GitBranch className="size-3" strokeWidth={1.75} />
-              <span className="flex-1 text-left">
-                {t("sidebar.worktrees")}
-              </span>
-              <span className="text-neutral-600">
-                {worktrees.length || ""}
-              </span>
-            </button>
-            {worktreesOpen && (
-              <ul className="ml-1 mt-0.5 flex flex-col gap-0.5">
-                <li className="flex justify-end px-1">
-                  <button
-                    type="button"
-                    onClick={() => void onNewWorktree()}
-                    className="inline-flex items-center gap-1 rounded border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
-                  >
-                    <Plus className="size-2.5" strokeWidth={2} />
-                    {t("sidebar.new_worktree")}
-                  </button>
-                </li>
-                {wtError && (
-                  <li className="rounded border border-red-900/60 bg-red-950/30 px-1.5 py-1 text-[10px] text-red-200">
-                    {wtError}
-                  </li>
-                )}
-                {worktrees.length === 0 ? (
-                  <li className="px-1.5 py-0.5 text-[10px] text-neutral-600">
-                    {t("sidebar.no_worktrees")}
-                  </li>
-                ) : (
-                  worktrees.map((w) => (
-                    <li
-                      key={w.id}
-                      className="group flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] text-neutral-400 hover:bg-neutral-800/40"
-                      title={w.path}
-                    >
-                      {w.is_primary ? (
-                        <Star
-                          className="size-3 shrink-0 text-neutral-500"
-                          strokeWidth={1.75}
-                        />
-                      ) : (
-                        <GitBranch
-                          className="size-3 shrink-0 text-neutral-600"
-                          strokeWidth={1.75}
-                        />
-                      )}
-                      <span className="min-w-0 flex-1 truncate">
-                        {w.branch}
-                      </span>
-                      {!w.is_primary && (
-                        <button
-                          type="button"
-                          onClick={() => void onRemoveWorktree(w)}
-                          aria-label="remove worktree"
-                          className="flex size-4 items-center justify-center rounded text-neutral-500 opacity-0 transition hover:bg-red-950/40 hover:text-red-300 group-hover:opacity-100"
-                        >
-                          <X className="size-2.5" strokeWidth={2} />
-                        </button>
-                      )}
-                    </li>
-                  ))
-                )}
-              </ul>
-            )}
-          </div>
         </div>
       )}
     </li>
@@ -453,20 +460,23 @@ function ProjectItem({
 interface SessionEntryProps {
   session: SessionSummary;
   isActive: boolean;
+  worktreeName: string | null;
   onSelect: () => void;
-  onRenamed: () => void;
+  onChanged: () => void;
   onDeleted: () => void;
 }
 
 function SessionEntry({
   session,
   isActive,
+  worktreeName,
   onSelect,
-  onRenamed,
+  onChanged,
   onDeleted,
 }: SessionEntryProps) {
   const { t } = useTranslation("common");
   const label = session.title || session.model || t("sidebar.untitled_session");
+  const pinned = !!session.pinned_at;
 
   const onRename = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -479,9 +489,19 @@ function SessionEntry({
     if (!trimmed || trimmed === session.title) return;
     try {
       await sessionRename({ session_id: session.id, title: trimmed });
-      onRenamed();
+      onChanged();
     } catch {
       /* keep whatever the store eventually reconciles via event */
+    }
+  };
+
+  const onTogglePin = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await sessionTogglePin({ session_id: session.id });
+      onChanged();
+    } catch {
+      /* event will reconcile */
     }
   };
 
@@ -496,6 +516,13 @@ function SessionEntry({
       /* noop */
     }
   };
+
+  const subtitle = (() => {
+    const parts: string[] = [];
+    if (worktreeName) parts.push(worktreeName);
+    parts.push(formatRelative(session.last_activity_at));
+    return parts.join(" · ");
+  })();
 
   return (
     <li>
@@ -515,28 +542,55 @@ function SessionEntry({
         >
           <span className="block truncate">{label}</span>
           <span className="block truncate text-[9px] text-neutral-500">
-            {session.turn_count} · {formatRelative(session.last_activity_at)}
+            <GitBranch
+              className="-mt-px mr-0.5 inline size-2.5 align-middle"
+              strokeWidth={1.75}
+            />
+            {subtitle}
           </span>
         </button>
-        <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
+        <div className="flex items-center gap-0.5">
           <button
             type="button"
-            onClick={(e) => void onRename(e)}
-            aria-label={t("sidebar.rename_session")}
-            title={t("sidebar.rename_session")}
-            className="flex size-4 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
+            onClick={(e) => void onTogglePin(e)}
+            aria-label={
+              pinned ? t("sidebar.unpin_session") : t("sidebar.pin_session")
+            }
+            title={
+              pinned ? t("sidebar.unpin_session") : t("sidebar.pin_session")
+            }
+            className={`flex size-4 items-center justify-center rounded transition ${
+              pinned
+                ? "text-amber-300 hover:bg-amber-950/40"
+                : "text-neutral-500 opacity-0 hover:bg-neutral-700 hover:text-neutral-200 group-hover:opacity-100"
+            }`}
           >
-            <Pencil className="size-2.5" strokeWidth={1.75} />
+            {pinned ? (
+              <Pin className="size-2.5" strokeWidth={2} />
+            ) : (
+              <PinOff className="size-2.5" strokeWidth={1.75} />
+            )}
           </button>
-          <button
-            type="button"
-            onClick={(e) => void onDelete(e)}
-            aria-label={t("sidebar.delete_session")}
-            title={t("sidebar.delete_session")}
-            className="flex size-4 items-center justify-center rounded text-neutral-500 hover:bg-red-950/40 hover:text-red-300"
-          >
-            <Trash2 className="size-2.5" strokeWidth={1.75} />
-          </button>
+          <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
+            <button
+              type="button"
+              onClick={(e) => void onRename(e)}
+              aria-label={t("sidebar.rename_session")}
+              title={t("sidebar.rename_session")}
+              className="flex size-4 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
+            >
+              <Pencil className="size-2.5" strokeWidth={1.75} />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => void onDelete(e)}
+              aria-label={t("sidebar.delete_session")}
+              title={t("sidebar.delete_session")}
+              className="flex size-4 items-center justify-center rounded text-neutral-500 hover:bg-red-950/40 hover:text-red-300"
+            >
+              <Trash2 className="size-2.5" strokeWidth={1.75} />
+            </button>
+          </div>
         </div>
       </div>
     </li>
@@ -557,24 +611,16 @@ function StatusDot({ status }: { status: string }) {
   );
 }
 
-function formatWorktreeError(err: unknown, t: TFunction<"common">): string {
-  if (err instanceof WorktreeCommandError) {
-    switch (err.tauri.code) {
-      case "domain":
-        return err.tauri.message;
-      case "git":
-        return t("sidebar.worktree_error.git", { message: err.tauri.message });
-      case "storage":
-        return t("sidebar.worktree_error.storage", { message: err.tauri.message });
-      case "project_not_found":
-        return t("sidebar.worktree_error.project_not_found");
-      case "projection":
-        return t("sidebar.worktree_error.projection", { message: err.tauri.message });
-      case "empty_repo":
-        return t("sidebar.worktree_error.empty_repo");
-    }
+function filterAllowed<T>(
+  prev: Record<string, T>,
+  projects: { id: string }[],
+): Record<string, T> {
+  const allowed = new Set(projects.map((p) => p.id));
+  const next: Record<string, T> = {};
+  for (const [pid, rows] of Object.entries(prev)) {
+    if (allowed.has(pid)) next[pid] = rows;
   }
-  return err instanceof Error ? err.message : t("sidebar.worktree_error.unknown");
+  return next;
 }
 
 function formatRelative(iso: string): string {

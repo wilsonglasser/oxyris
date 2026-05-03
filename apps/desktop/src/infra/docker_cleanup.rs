@@ -67,7 +67,21 @@ pub async fn prune_orphans_for_all(projections: &Projections) -> CleanupReport {
     for env in &envs {
         match prune_orphans_in(env, &live_short_ids).await {
             Ok(part) => merge_report(&mut report, part),
-            Err(e) => tracing::warn!(error = %e, ?env, "docker_cleanup: prune failed"),
+            Err(e) => {
+                // Daemon-not-running is expected when Docker Desktop is
+                // shut down — demote to debug so the user's normal logs
+                // stay quiet. Anything else still escalates.
+                let msg = e.to_lowercase();
+                if msg.contains("cannot find the file specified")
+                    || msg.contains("daemon")
+                    || msg.contains("dockerdesktop")
+                    || msg.contains("not be found")
+                {
+                    tracing::debug!(error = %e, ?env, "docker_cleanup: daemon unavailable; skipping");
+                } else {
+                    tracing::warn!(error = %e, ?env, "docker_cleanup: prune failed");
+                }
+            }
         }
     }
     if !report.orphan_projects.is_empty() {
@@ -113,26 +127,30 @@ async fn prune_orphans_in(
 }
 
 async fn list_oxyris_compose_projects(env: &Environment) -> Result<HashSet<String>, String> {
-    // Single `docker ps -a` reads the full set in one shot; we filter by
-    // the compose label and pick the project field.
-    let stdout = run_docker(
-        env,
-        &[
-            "ps",
-            "-a",
-            "--filter",
-            "label=com.docker.compose.project",
-            "--format",
-            "{{ index .Labels \"com.docker.compose.project\" }}",
-        ],
-    )
-    .await?;
-    Ok(stdout
-        .lines()
-        .filter_map(|l| {
-            let trimmed = l.trim();
-            if trimmed.starts_with("oxyris_") {
-                Some(trimmed.to_owned())
+    // `docker compose ls` is the right tool for "what compose projects
+    // exist on this host". `docker ps --format` previously tried to
+    // template-index `.Labels`, which fails on docker engines where that
+    // field is a comma-separated string rather than a map (Docker Desktop
+    // on Windows in particular). The compose-ls API returns a stable
+    // JSON list, no template gymnastics needed.
+    let stdout = run_docker(env, &["compose", "ls", "-a", "--format", "json"]).await?;
+    let raw = stdout.trim();
+    if raw.is_empty() {
+        return Ok(HashSet::new());
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        #[serde(default, rename = "Name")]
+        name: String,
+    }
+    let entries: Vec<Entry> = serde_json::from_str(raw)
+        .map_err(|e| format!("docker compose ls returned non-JSON output: {e} (got: {raw:?})"))?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|e| {
+            let n = e.name.trim();
+            if n.starts_with("oxyris_") {
+                Some(n.to_owned())
             } else {
                 None
             }

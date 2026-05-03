@@ -65,6 +65,10 @@ pub struct SessionSupervisor {
     agent_pool: Arc<AgentPool>,
     app: AppHandle,
     live: Mutex<HashMap<AggregateId, LiveSession>>,
+    /// Shared with `AppState`. Read at session-spawn time so the
+    /// per-worktree `mcp.json` includes `--lsp-bridge` when the bridge is
+    /// up. `None` until the bridge has bound.
+    lsp_bridge_port: Arc<std::sync::Mutex<Option<u16>>>,
 }
 
 impl SessionSupervisor {
@@ -74,6 +78,7 @@ impl SessionSupervisor {
         projections: Arc<Projections>,
         agent_pool: Arc<AgentPool>,
         app: AppHandle,
+        lsp_bridge_port: Arc<std::sync::Mutex<Option<u16>>>,
     ) -> Self {
         Self {
             registry,
@@ -82,7 +87,12 @@ impl SessionSupervisor {
             agent_pool,
             app,
             live: Mutex::new(HashMap::new()),
+            lsp_bridge_port,
         }
+    }
+
+    fn lsp_bridge_port(&self) -> Option<u16> {
+        self.lsp_bridge_port.lock().ok().and_then(|guard| *guard)
     }
 
     /// Start a new session: persist `SessionStarted`, spawn the provider, and
@@ -117,7 +127,7 @@ impl SessionSupervisor {
         let events = Session::decide(&SessionState::default(), cmd)?;
         self.persist_and_emit(session_id, 0, &events).await?;
 
-        let opts = augment_with_mcp(opts);
+        let opts = augment_with_mcp(opts, self.lsp_bridge_port());
         let provider_session = provider.start_session(opts)?;
         self.spawn_event_pump(session_id, provider_session).await;
 
@@ -135,8 +145,9 @@ impl SessionSupervisor {
         let now = Utc::now();
 
         // Auto-title the session from its first user message when it has no
-        // title yet. Runs as an extra decide+append piggybacking on the
-        // StartTurn version advance.
+        // title yet. Tighter threshold than just "non-empty": short prompts
+        // like "hi" or "test" produce noise titles, so we skip anything under
+        // ~15 useful chars. The user can always rename manually.
         let mut events = Session::decide(
             &state,
             SessionCommand::StartTurn {
@@ -149,18 +160,8 @@ impl SessionSupervisor {
             .inner
             .as_ref()
             .is_some_and(|d| d.title.is_none() && d.turns.is_empty());
-        if needs_auto_title {
-            let preview: String = text
-                .trim()
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(60)
-                .collect();
-            if !preview.is_empty() {
-                events.push(SessionEvent::SessionRenamed { title: preview });
-            }
+        if needs_auto_title && let Some(title) = derive_auto_title(&text) {
+            events.push(SessionEvent::SessionRenamed { title });
         }
 
         self.persist_and_emit(session_id, version, &events).await?;
@@ -225,6 +226,14 @@ impl SessionSupervisor {
     ) -> Result<(), SupervisorError> {
         let (state, version) = self.load_session(session_id)?;
         let events = Session::decide(&state, SessionCommand::Rename { title })?;
+        self.persist_and_emit(session_id, version, &events).await
+    }
+
+    /// Pin or unpin a session. Idempotent at the aggregate level; returns
+    /// without doing anything if the state hasn't changed.
+    pub async fn toggle_pin(&self, session_id: AggregateId) -> Result<(), SupervisorError> {
+        let (state, version) = self.load_session(session_id)?;
+        let events = Session::decide(&state, SessionCommand::TogglePin { now: Utc::now() })?;
         self.persist_and_emit(session_id, version, &events).await
     }
 
@@ -320,7 +329,7 @@ impl SessionSupervisor {
             resume_session_id: Some(resume_id),
             mcp_config_path: None,
         };
-        let opts = augment_with_mcp(opts);
+        let opts = augment_with_mcp(opts, self.lsp_bridge_port());
         let provider_session = provider.start_session(opts)?;
         self.spawn_event_pump(session_id, provider_session).await;
         Ok(())
@@ -406,12 +415,30 @@ impl SessionSupervisor {
     }
 }
 
+/// Build an auto-title from a user message. Returns `None` when the input
+/// is too short to be a useful title — caller should leave the title
+/// untouched in that case so the next message gets another shot. Uses the
+/// first non-empty line, trimmed, capped at 60 chars.
+fn derive_auto_title(text: &str) -> Option<String> {
+    const MIN_USEFUL_CHARS: usize = 15;
+    let first = text.trim().lines().find(|l| !l.trim().is_empty())?.trim();
+    if first.chars().count() < MIN_USEFUL_CHARS {
+        return None;
+    }
+    let mut chars = first.chars().take(60).collect::<String>();
+    // If we cut mid-word, trim trailing whitespace that the truncate left.
+    let trimmed_end = chars.trim_end().to_owned();
+    chars.clear();
+    chars.push_str(&trimmed_end);
+    Some(chars)
+}
+
 /// Generate the per-worktree MCP config (best-effort) and stitch it into
 /// `opts`: sets `mcp_config_path` and appends the system-prompt nudge so
 /// Claude knows the tools exist. WSL projects and missing-binary cases skip
 /// silently — the provider runs without MCP, which is the same as before.
-fn augment_with_mcp(mut opts: SessionOptions) -> SessionOptions {
-    let setup = match mcp::prepare_for_worktree(&opts.environment, &opts.cwd) {
+fn augment_with_mcp(mut opts: SessionOptions, lsp_bridge_port: Option<u16>) -> SessionOptions {
+    let setup = match mcp::prepare_for_worktree(&opts.environment, &opts.cwd, lsp_bridge_port) {
         Ok(Some(s)) => s,
         Ok(None) => return opts,
         Err(e) => {

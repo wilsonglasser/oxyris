@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { parseUserMessage } from "~/lib/parseUserMessage.ts";
-import { runAutoActionsOnWorktreeCreate } from "~/lib/runAutoActions.ts";
 import { matchesKey } from "~/lib/keybindings.ts";
 import {
   playTurnCompleteChime,
@@ -15,8 +14,8 @@ import {
   ArrowUp,
   Brain,
   ChevronsUpDown,
+  Clock,
   Cpu,
-  Folder,
   GitBranch,
   Mic,
   MicOff,
@@ -24,7 +23,6 @@ import {
   Paperclip,
   PauseCircle,
   PlayCircle,
-  Plus,
   Square as SquareIcon,
   Sparkles,
   StopCircle,
@@ -47,10 +45,14 @@ import {
   sessionStop,
 } from "~/ipc/session.ts";
 import {
+  isPrimaryWorktreeId,
   type WorktreeRow,
-  worktreeCreate,
   worktreeList,
 } from "~/ipc/worktree.ts";
+import { worktreeEnsureReady } from "~/ipc/indexing.ts";
+import { EmptyChatState } from "~/components/EmptyChatState.tsx";
+import { IndexingChip } from "~/components/IndexingChip.tsx";
+import { LspChip } from "~/components/LspChip.tsx";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import {
   toSpeechLocale,
@@ -95,8 +97,6 @@ const MODELS = [
   "claude-haiku-4-5-20251001",
 ];
 
-const NEW_WORKTREE_TOKEN = "__new__";
-
 export function ChatPanel({
   project,
   onToggleTerminal,
@@ -113,7 +113,14 @@ export function ChatPanel({
   const [runtime, setRuntime] = useState<RuntimeMode>("supervised");
   const [thinking, setThinking] = useState<ThinkingMode>("auto");
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
+  const [worktreesLoading, setWorktreesLoading] = useState(false);
   const [worktreeId, setWorktreeId] = useState<string>("");
+  /**
+   * Messages typed while a turn is still streaming. They auto-flush in
+   * order as soon as the busy flag flips false (TurnCompleted /
+   * TurnFailed / TurnInterrupted) — same UX Claude Code has in the CLI.
+   */
+  const [queue, setQueue] = useState<Array<{ id: string; text: string }>>([]);
   const [envMode, setEnvMode] = useState<EnvMode>("default");
   const [envTemplate, setEnvTemplate] = useState<EnvTemplate | null>(null);
   const [envStatus, setEnvStatus] = useState<EnvStatus | null>(null);
@@ -126,9 +133,11 @@ export function ChatPanel({
       setWorktrees([]);
       return;
     }
+    setWorktreesLoading(true);
     void worktreeList({ project_id: project.id })
       .then(setWorktrees)
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setWorktreesLoading(false));
   }, [project]);
 
   useEffect(() => {
@@ -222,6 +231,60 @@ export function ChatPanel({
 
   const activeSnapshot = activeId ? snapshots[activeId] : undefined;
   const isRunning = activeSnapshot?.status === "running";
+
+  // We need to know "is there a streaming turn right now?" inside the
+  // submit callback without making it depend on every snapshot tick. Keep
+  // the latest value in a ref.
+  const busyTurnIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    busyTurnIdRef.current = activeSnapshot
+      ? getBusyTurnId(activeSnapshot.turns)
+      : null;
+  }, [activeSnapshot]);
+
+  // Drain the queue on idle. Sequential: only one in-flight at a time so
+  // the order the user typed is preserved.
+  useEffect(() => {
+    if (!activeId) return;
+    if (queue.length === 0) return;
+    const busy = activeSnapshot
+      ? getBusyTurnId(activeSnapshot.turns) !== null
+      : false;
+    if (busy) return;
+    const [head, ...rest] = queue;
+    if (!head) return;
+    setQueue(rest);
+    void sessionSendMessage({ session_id: activeId, text: head.text }).catch(
+      (e) => setError(extractError(e)),
+    );
+  }, [activeId, activeSnapshot, queue]);
+
+  // Drop the queue when the session is gone — leftover messages would
+  // surprise the user on next start.
+  useEffect(() => {
+    if (!activeId) setQueue([]);
+  }, [activeId]);
+
+  // Idempotent "make this worktree ready" — covers worktrees created
+  // before the eager warm-up shipped, plus every reload of an existing
+  // project. Backend fast-paths when nothing needs to happen, so spamming
+  // the call on every worktree change is safe. Pass `project_id` so the
+  // backend can resolve the synthetic primary sentinel back to the
+  // project's root.
+  useEffect(() => {
+    const wtId =
+      activeSnapshot?.worktree_id ??
+      (worktreeId
+        ? worktreeId
+        : worktrees.find((w) => w.is_primary)?.id ?? null);
+    if (!wtId || !project) return;
+    void worktreeEnsureReady({
+      worktree_id: wtId,
+      project_id: project.id,
+    }).catch(() => {
+      /* surfaced via lsp:status / indexing:progress events */
+    });
+  }, [activeSnapshot?.worktree_id, worktreeId, worktrees, project]);
 
   // For an active session that has a worktree, load template + poll status
   // so we can show 🟢/🔴 on the env chip.
@@ -319,7 +382,19 @@ export function ChatPanel({
     async (text: string) => {
       if (!project) return;
       setError(null);
-      // If a session is already running, just send.
+      // Streaming a turn? Park the message — the drain effect picks it up
+      // when the in-flight turn finishes.
+      if (activeId && busyTurnIdRef.current) {
+        setQueue((q) => [
+          ...q,
+          {
+            id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+            text,
+          },
+        ]);
+        return;
+      }
+      // If a session is already running but idle, just send.
       if (activeId && isRunning) {
         await sessionSendMessage({ session_id: activeId, text });
         return;
@@ -329,6 +404,10 @@ export function ChatPanel({
       const wt = worktreeId
         ? worktrees.find((w) => w.id === worktreeId) ?? null
         : null;
+      // The synthetic primary maps to "no worktree" on the backend (uses the
+      // project root). Real user-created worktrees pass their id through.
+      const wtIdToSend =
+        wt && !isPrimaryWorktreeId(wt.id) ? wt.id : undefined;
       const res = await sessionStart({
         project_id: project.id,
         provider_id: "claude",
@@ -338,7 +417,7 @@ export function ChatPanel({
         thinking,
         runtime,
         env_mode: envMode,
-        ...(wt ? { worktree_id: wt.id } : {}),
+        ...(wtIdToSend ? { worktree_id: wtIdToSend } : {}),
       });
       setActive(res.session_id);
       // Auto-up the worktree env if the session opted into it and the stack
@@ -410,34 +489,6 @@ export function ChatPanel({
     }
   }, [activeId, activeSnapshot?.worktree_id, t]);
 
-  const onPickWorktree = useCallback(
-    async (next: string) => {
-      if (next !== NEW_WORKTREE_TOKEN) {
-        setWorktreeId(next);
-        return;
-      }
-      if (!project) return;
-      const branch = window.prompt(t("workspace_new_worktree_prompt"));
-      if (!branch) return;
-      try {
-        const created = await worktreeCreate({
-          project_id: project.id,
-          branch,
-        });
-        refreshWorktrees();
-        setWorktreeId(created.id);
-        void runAutoActionsOnWorktreeCreate({
-          projectId: project.id,
-          worktreeId: created.id,
-          sessionId: activeId,
-        });
-      } catch (e) {
-        setError(extractError(e));
-      }
-    },
-    [project, t, refreshWorktrees, activeId],
-  );
-
   if (!project) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-neutral-500">
@@ -465,12 +516,41 @@ export function ChatPanel({
               <span className="truncate text-neutral-600">
                 · {activeSnapshot.model || t("model_auto_short")}
               </span>
+              {(() => {
+                // `null` worktree_id means the session runs at the project
+                // root — render that as the primary card's branch.
+                const wt =
+                  activeSnapshot.worktree_id == null
+                    ? worktrees.find((w) => w.is_primary)
+                    : worktrees.find(
+                        (w) => w.id === activeSnapshot.worktree_id,
+                      );
+                return wt ? (
+                  <span className="inline-flex items-center gap-1 truncate text-neutral-500">
+                    · <GitBranch className="size-3" strokeWidth={1.75} />
+                    {wt.branch || "main"}
+                  </span>
+                ) : null;
+              })()}
             </>
           ) : (
             <span>{t("no_session")}</span>
           )}
         </div>
-        <div className="flex flex-1 items-center justify-end">
+        <div className="flex flex-1 items-center justify-end gap-2">
+          {(() => {
+            const wtId =
+              activeSnapshot?.worktree_id ??
+              (worktreeId
+                ? worktreeId
+                : worktrees.find((w) => w.is_primary)?.id ?? null);
+            return (
+              <>
+                <IndexingChip worktreeId={wtId} />
+                <LspChip worktreeId={wtId} />
+              </>
+            );
+          })()}
           <ProjectActionsBar
             projectId={project.id}
             sessionId={activeId}
@@ -531,7 +611,19 @@ export function ChatPanel({
         </div>
       )}
 
-      <Thread snapshot={activeSnapshot} />
+      {activeSnapshot ? (
+        <Thread snapshot={activeSnapshot} />
+      ) : (
+        <EmptyChatState
+          projectId={project.id}
+          projectName={project.name}
+          worktrees={worktrees}
+          loading={worktreesLoading}
+          selectedWorktreeId={worktreeId || null}
+          onSelectWorktree={(id) => setWorktreeId(id ?? "")}
+          onWorktreesChanged={refreshWorktrees}
+        />
+      )}
 
       <Composer
         onSend={onSendOrStart}
@@ -552,6 +644,10 @@ export function ChatPanel({
         sessionKey={activeId ?? "new"}
         busy={!!busyTurnId}
         startsNewSession={!isRunning}
+        queue={queue}
+        onRemoveFromQueue={(id) =>
+          setQueue((q) => q.filter((m) => m.id !== id))
+        }
         bottomBar={
           <BottomBar
             model={model}
@@ -560,9 +656,6 @@ export function ChatPanel({
             onRuntime={setRuntime}
             thinking={thinking}
             onThinking={setThinking}
-            worktrees={worktrees}
-            worktreeId={worktreeId}
-            onWorktree={(v) => void onPickWorktree(v)}
             disabled={isRunning}
             envMode={envMode}
             onEnvMode={(m) => void onChangeEnvMode(m)}
@@ -725,6 +818,12 @@ function TurnView({ turn, sessionId }: { turn: TurnEntry; sessionId: string }) {
           {t("turn_streaming_label")}
         </div>
       )}
+      {turn.status === "interrupted" && (
+        <div className="inline-flex items-center gap-1.5 self-start rounded border border-amber-900/50 bg-amber-950/20 px-2 py-0.5 text-[11px] text-amber-200">
+          <StopCircle className="size-3" strokeWidth={1.75} />
+          {t("turn_interrupted_by_user")}
+        </div>
+      )}
       {turn.status === "failed" && turn.error_message && (
         <div className="rounded-md border border-red-900/60 bg-red-950/30 px-3 py-2 text-xs text-red-200">
           {t("turn_failed", { message: turn.error_message })}
@@ -800,6 +899,9 @@ function BlockView({ block }: { block: AssistantBlock }) {
     case "text":
       return <AssistantTextBlock text={block.text || ""} />;
     case "thinking":
+      // Claude sometimes emits empty thinking blocks (signature-only
+      // thinking, or aborted reasoning). Hiding them keeps the chat clean.
+      if (!block.text || !block.text.trim()) return null;
       return (
         <details className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
           <summary className="flex cursor-pointer items-center gap-1.5 text-[10px] uppercase tracking-wide text-neutral-500">
@@ -899,6 +1001,8 @@ interface ComposerProps {
   sessionKey: string;
   busy: boolean;
   startsNewSession: boolean;
+  queue: Array<{ id: string; text: string }>;
+  onRemoveFromQueue: (id: string) => void;
   bottomBar: React.ReactNode;
 }
 
@@ -913,6 +1017,8 @@ function Composer({
   sessionKey,
   busy,
   startsNewSession,
+  queue,
+  onRemoveFromQueue,
   bottomBar,
 }: ComposerProps) {
   const { t, i18n } = useTranslation("chat");
@@ -987,7 +1093,9 @@ function Composer({
 
   const submit = async () => {
     const trimmed = text.trim();
-    if ((!trimmed && attachments.length === 0) || busy || sending) return;
+    // Sending mid-stream is OK now — the upstream handler routes it into
+    // the queue. We only block on local `sending` to stop double-submits.
+    if ((!trimmed && attachments.length === 0) || sending) return;
     setSending(true);
     try {
       const prefix = attachments.map((a) => `@${a.info.path}`).join(" ");
@@ -1057,15 +1165,46 @@ function Composer({
 
   const placeholder = useMemo(
     () =>
-      startsNewSession
-        ? t("composer_placeholder_new")
-        : t("composer_placeholder"),
-    [startsNewSession, t],
+      busy
+        ? t("composer_placeholder_busy")
+        : startsNewSession
+          ? t("composer_placeholder_new")
+          : t("composer_placeholder"),
+    [busy, startsNewSession, t],
   );
 
   return (
     <footer className="shrink-0 border-t border-neutral-800 bg-neutral-950 px-4 py-3">
       <div className="mx-auto max-w-3xl">
+        {queue.length > 0 && (
+          <div className="mb-2 flex flex-col gap-1 rounded-lg border border-neutral-800 bg-neutral-900/40 px-2.5 py-1.5">
+            <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-neutral-500">
+              <Clock className="size-3" strokeWidth={1.75} />
+              {t("composer_queued_heading", { count: queue.length })}
+            </div>
+            <ul className="flex flex-col gap-0.5">
+              {queue.map((m) => (
+                <li
+                  key={m.id}
+                  className="flex items-center gap-1.5 rounded bg-neutral-900/70 px-2 py-1 text-[11px] text-neutral-300"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {m.text || "(empty)"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveFromQueue(m.id)}
+                    aria-label={t("composer_queued_remove")}
+                    title={t("composer_queued_remove")}
+                    className="flex size-4 items-center justify-center rounded text-neutral-500 hover:bg-red-950/40 hover:text-red-300"
+                  >
+                    <X className="size-2.5" strokeWidth={2} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="flex flex-col rounded-2xl border border-neutral-800 bg-neutral-900 focus-within:border-neutral-700">
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 border-b border-neutral-800 px-3 pb-2 pt-3">
@@ -1184,17 +1323,28 @@ function Composer({
                 type="button"
                 disabled={
                   sending ||
-                  busy ||
                   (text.trim() === "" && attachments.length === 0)
                 }
                 onClick={() => void submit()}
-                aria-label={t("send")}
+                aria-label={busy ? t("queue") : t("send")}
                 title={
-                  startsNewSession ? t("start_session") : t("send")
+                  busy
+                    ? t("queue_hint")
+                    : startsNewSession
+                      ? t("start_session")
+                      : t("send")
                 }
-                className="flex size-7 items-center justify-center rounded-md bg-neutral-200 text-neutral-900 transition hover:bg-white disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-600"
+                className={`flex size-7 items-center justify-center rounded-md transition disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-600 ${
+                  busy
+                    ? "bg-amber-200 text-amber-950 hover:bg-amber-100"
+                    : "bg-neutral-200 text-neutral-900 hover:bg-white"
+                }`}
               >
-                <ArrowUp className="size-3.5" strokeWidth={2} />
+                {busy ? (
+                  <Clock className="size-3.5" strokeWidth={2} />
+                ) : (
+                  <ArrowUp className="size-3.5" strokeWidth={2} />
+                )}
               </button>
             </div>
           </div>
@@ -1214,9 +1364,6 @@ interface BottomBarProps {
   onRuntime: (r: RuntimeMode) => void;
   thinking: ThinkingMode;
   onThinking: (k: ThinkingMode) => void;
-  worktrees: WorktreeRow[];
-  worktreeId: string;
-  onWorktree: (id: string) => void;
   disabled: boolean;
   envMode: EnvMode;
   onEnvMode: (m: EnvMode) => void;
@@ -1235,9 +1382,6 @@ function BottomBar({
   onRuntime,
   thinking,
   onThinking,
-  worktrees,
-  worktreeId,
-  onWorktree,
   disabled,
   envMode,
   onEnvMode,
@@ -1326,39 +1470,6 @@ function BottomBar({
           </option>
           <option value="off" className="bg-neutral-900">
             {t("thinking_off")}
-          </option>
-        </select>
-      </Chip>
-
-      <Chip
-        icon={
-          worktreeId ? (
-            <GitBranch className="size-3" strokeWidth={1.75} />
-          ) : (
-            <Folder className="size-3" strokeWidth={1.75} />
-          )
-        }
-        label={t("workspace")}
-        disabled={disabled}
-      >
-        <select
-          aria-label={t("workspace")}
-          value={worktreeId}
-          onChange={(e) => onWorktree(e.target.value)}
-          disabled={disabled}
-          className="bg-transparent text-neutral-200 outline-none disabled:opacity-60"
-        >
-          <option value="" className="bg-neutral-900">
-            {t("worktree_none")}
-          </option>
-          {worktrees.map((w) => (
-            <option key={w.id} value={w.id} className="bg-neutral-900">
-              {w.branch}
-              {w.is_primary ? ` ${t("worktree_primary")}` : ""}
-            </option>
-          ))}
-          <option value={NEW_WORKTREE_TOKEN} className="bg-neutral-900">
-            + {t("workspace_new_worktree")}
           </option>
         </select>
       </Chip>

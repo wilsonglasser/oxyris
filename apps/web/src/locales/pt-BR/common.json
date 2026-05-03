@@ -6,6 +6,8 @@
   },
   "tabs": {
     "chat": "Chat",
+    "files": "Arquivos",
+    "git": "Git",
     "settings": "Configurações"
   },
   "sidebar": {
@@ -37,7 +39,29 @@
     "rename_session_prompt": "Novo nome para esta sessão:",
     "untitled_session": "Sessão sem título",
     "delete_session": "Excluir sessão",
-    "delete_session_confirm": "Excluir a sessão \"{{name}}\"? O histórico fica preservado no event log mas some da interface."
+    "delete_session_confirm": "Excluir a sessão \"{{name}}\"? O histórico fica preservado no event log mas some da interface.",
+    "pin_session": "Fixar no topo",
+    "unpin_session": "Desafixar",
+    "project_settings": "Configurações do projeto"
+  },
+  "empty_state": {
+    "heading": "Iniciar nova conversa",
+    "subheading": "Escolha um worktree para esta sessão.",
+    "primary_badge": "Principal",
+    "new_worktree_heading": "Ou crie um novo worktree",
+    "new_worktree_branch_label": "Branch (existente ou nova)",
+    "new_worktree_branch_placeholder": "ex. feature/auth-rework",
+    "new_worktree_submit": "Criar worktree",
+    "creating": "Criando…",
+    "loading": "Carregando worktrees…",
+    "error_prefix": "Falhou: {{message}}"
+  },
+  "project_settings_modal": {
+    "title": "Configurações do projeto — {{name}}",
+    "worktrees_heading": "Worktrees",
+    "worktrees_help": "Cada worktree é um diretório de trabalho separado em disco em sua própria branch. Use-os para rodar várias sessões paralelas no mesmo projeto sem se sobrepor.",
+    "new_worktree_prompt": "Nome da branch (nova ou existente):",
+    "remove_confirm": "Remover worktree \"{{name}}\"? O diretório será apagado do disco."
   },
   "language": {
     "label": "Idioma",
@@ -62,5 +86,16 @@
     "title": "Stacks docker órfãos limpos",
     "body": "{{count}} projeto(s) · {{containers}} containers · {{volumes}} volumes · {{networks}} networks",
     "dismiss": "Dispensar"
+  },
+  "indexing": {
+    "in_progress": "Indexando {{indexed}}/{{total}}",
+    "done": "Indexado · {{symbols}} símbolos",
+    "failed": "Indexação falhou"
+  },
+  "lsp": {
+    "warming": "Aquecendo {{language}}…",
+    "ready": "{{language}} pronto",
+    "failed": "{{language}} falhou",
+    "not_installed": "{{language}} não instalado"
   }
 }

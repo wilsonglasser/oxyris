@@ -42,6 +42,11 @@ pub struct SessionData {
     /// auto-picks `Worktree` when the template is detected.
     #[serde(default)]
     pub env_mode: EnvMode,
+    /// When set, the session is pinned to the top of the sidebar. The
+    /// timestamp is the moment the user pinned it (used to sort multiple
+    /// pinned sessions among themselves).
+    #[serde(default)]
+    pub pinned_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +153,11 @@ pub enum SessionCommand {
     Delete {
         now: DateTime<Utc>,
     },
+    /// Toggle the session's pinned flag. Pinned sessions float to the top of
+    /// the sidebar.
+    TogglePin {
+        now: DateTime<Utc>,
+    },
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -213,6 +223,10 @@ pub enum SessionEvent {
     SessionDeleted {
         at: DateTime<Utc>,
     },
+    /// `Some(at)` pins the session at the given moment, `None` unpins.
+    SessionPinToggled {
+        pinned_at: Option<DateTime<Utc>>,
+    },
 }
 
 impl DomainEvent for SessionEvent {
@@ -231,6 +245,7 @@ impl DomainEvent for SessionEvent {
             Self::SessionRenamed { .. } => "SessionRenamed",
             Self::SessionDeleted { .. } => "SessionDeleted",
             Self::SessionEnvModeChanged { .. } => "SessionEnvModeChanged",
+            Self::SessionPinToggled { .. } => "SessionPinToggled",
         }
     }
 }
@@ -423,6 +438,15 @@ impl Aggregate for Session {
                 let _data = state.inner.as_ref().ok_or(SessionError::NotFound)?;
                 Ok(vec![SessionEvent::SessionDeleted { at: now }])
             }
+            SessionCommand::TogglePin { now } => {
+                let data = state.inner.as_ref().ok_or(SessionError::NotFound)?;
+                let next = if data.pinned_at.is_some() {
+                    None
+                } else {
+                    Some(now)
+                };
+                Ok(vec![SessionEvent::SessionPinToggled { pinned_at: next }])
+            }
         }
     }
 
@@ -453,6 +477,7 @@ impl Aggregate for Session {
                     provider_session_id: None,
                     title: None,
                     env_mode: *env_mode,
+                    pinned_at: None,
                 });
             }
             SessionEvent::SessionEnvModeChanged { mode } => {
@@ -554,6 +579,11 @@ impl Aggregate for Session {
             }
             SessionEvent::SessionDeleted { .. } => {
                 state.inner = None;
+            }
+            SessionEvent::SessionPinToggled { pinned_at } => {
+                if let Some(data) = state.inner.as_mut() {
+                    data.pinned_at = *pinned_at;
+                }
             }
         }
     }

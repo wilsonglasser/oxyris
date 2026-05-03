@@ -18,10 +18,14 @@ use crate::domain::session::{Session, SessionCommand, SessionEvent};
 use crate::infra::agent_pool::AgentPool;
 use crate::infra::event_store::{EventStore, EventStoreError};
 use crate::infra::indexing::IndexingService;
+use crate::infra::language_packs::LanguagePacksService;
+use crate::infra::lsp::LspManager;
+use crate::infra::lsp_bridge;
 use crate::infra::observability::{self, LogGuard};
 use crate::infra::projections::{ProjectionError, Projections};
 use crate::infra::pty::PtySupervisor;
 use crate::infra::session_supervisor::SessionSupervisor;
+use std::sync::Mutex as StdMutex;
 
 pub struct AppState {
     pub event_store: Arc<EventStore>,
@@ -34,6 +38,15 @@ pub struct AppState {
     pub session_supervisor: SessionSupervisor,
     pub pty: PtySupervisor,
     pub indexing: Arc<IndexingService>,
+    pub lsp: Arc<LspManager>,
+    pub language_packs: Arc<LanguagePacksService>,
+    /// TCP port the LSP bridge is listening on (`127.0.0.1:<port>`).
+    /// Filled asynchronously after boot — `None` until the listener has
+    /// bound. The same `Arc` is cloned into `SessionSupervisor`; this
+    /// copy on `AppState` is reserved for future Tauri commands (status
+    /// chip, debugging) that need to know the port.
+    #[allow(dead_code)]
+    pub lsp_bridge_port: Arc<StdMutex<Option<u16>>>,
     /// Held so the async file-writer for NDJSON traces stays alive.
     #[allow(dead_code)]
     pub log_guard: LogGuard,
@@ -94,12 +107,15 @@ impl AppState {
         let providers = Arc::new(registry);
 
         let app_for_cleanup = app.clone();
+        let app_for_lsp = app.clone();
+        let lsp_bridge_port: Arc<StdMutex<Option<u16>>> = Arc::new(StdMutex::new(None));
         let session_supervisor = SessionSupervisor::new(
             providers.clone(),
             event_store.clone(),
             projections.clone(),
             agent_pool.clone(),
             app,
+            lsp_bridge_port.clone(),
         );
 
         // Daily checkpoint GC on a background task — keeps the hidden
@@ -111,7 +127,42 @@ impl AppState {
         // off the boot path so a hung docker daemon doesn't block startup.
         spawn_docker_cleanup(projections.clone(), app_for_cleanup);
 
-        let indexing = Arc::new(IndexingService::new());
+        let indexing = Arc::new(IndexingService::new(data_dir.clone(), agent_pool.clone()));
+        let app_for_packs = app_for_lsp.clone();
+        let lsp = Arc::new(LspManager::new(app_for_lsp));
+        let language_packs = Arc::new(LanguagePacksService::new(app_for_packs, data_dir.clone()));
+        // Wire packs into LSP so freshly-installed managed binaries win
+        // over older PATH entries. Done off the hot path so AppState
+        // construction stays sync-friendly.
+        {
+            let lsp_for_wire = lsp.clone();
+            let packs_for_wire = language_packs.clone();
+            tauri::async_runtime::spawn(async move {
+                lsp_for_wire.with_language_packs(packs_for_wire).await;
+            });
+        }
+        // LSP TCP bridge — single shared rust-analyzer / tsserver / etc.
+        // for every Claude session. MCP server proxies via TCP rather than
+        // spawning duplicates. Port is captured async after binding so
+        // `infra::mcp` can read it when generating the next session's
+        // `mcp.json`.
+        {
+            let lsp_for_bridge = lsp.clone();
+            let port_slot = lsp_bridge_port.clone();
+            tauri::async_runtime::spawn(async move {
+                match lsp_bridge::serve(lsp_for_bridge).await {
+                    Ok(port) => {
+                        if let Ok(mut slot) = port_slot.lock() {
+                            *slot = Some(port);
+                        }
+                        tracing::info!(port, "lsp_bridge: ready");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "lsp_bridge: bind failed; MCP will spawn its own LSPs");
+                    }
+                }
+            });
+        }
 
         Ok(Self {
             event_store,
@@ -121,6 +172,9 @@ impl AppState {
             session_supervisor,
             pty: PtySupervisor::new(),
             indexing,
+            lsp,
+            language_packs,
+            lsp_bridge_port,
             log_guard,
             logs_dir,
             data_dir,

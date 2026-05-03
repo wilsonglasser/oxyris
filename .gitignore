@@ -36,3 +36,11 @@ yarn-error.log*
 
 # Bun
 .bun/
+
+# Oxyris runtime artifacts (per-worktree mcp.json, indexes, scratch files).
+# Regenerated automatically when a worktree is opened.
+/.oxyris/
+**/.oxyris/
+
+# Local manual-test scratch files.
+teste.txt

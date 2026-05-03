@@ -7,10 +7,18 @@
 //! The caller just needs to know the project id and branch — everything else
 //! (target directory, primary-branch detection) is derived here.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use oxyris_core::{Aggregate, AggregateId, Environment};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+use uuid::Uuid;
+
+/// Synthetic id we attach to the project's primary checkout (the repo root).
+/// The primary isn't a real git worktree — we surface it as one so the UI
+/// can offer it as a card alongside actual worktrees. Backend translates
+/// this id back to "no worktree" (i.e., run at the project root) when a
+/// session is started with it.
+pub const PRIMARY_WORKTREE_SENTINEL: AggregateId = AggregateId(Uuid::nil());
 
 use crate::app_state::AppState;
 use crate::domain::worktree::{Worktree, WorktreeCommand, WorktreeEvent, WorktreeState};
@@ -79,6 +87,7 @@ pub struct ListWorktreesInput {
 pub async fn worktree_create(
     input: CreateWorktreeInput,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<WorktreeRow, TauriWorktreeError> {
     let project = find_project(&state, input.project_id)?;
     let name = input
@@ -126,13 +135,22 @@ pub async fn worktree_create(
 
     // Kick off the initial symbol-index walk in the background — Claude
     // sessions started before it finishes will still work, they just won't
-    // see oxyris_* tool results until the rebuild completes. WSL projects
-    // skip silently (handled inside `IndexingService::rebuild`).
+    // see Oxyris tool results until the rebuild completes. WSL projects
+    // skip silently (handled inside `IndexingService::rebuild`). Progress
+    // is forwarded as `indexing:progress` Tauri events for the UI chip.
     let indexing = state.indexing.clone();
     let env = project.environment.clone();
     let path = created.path.clone();
+    let app_for_progress = app.clone();
     tauri::async_runtime::spawn(async move {
-        match indexing.rebuild(id, &env, &path).await {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let pump = tauri::async_runtime::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let _ = app_for_progress.emit("indexing:progress", p);
+            }
+        });
+        let result = indexing.rebuild(id, &env, &path, Some(tx)).await;
+        match result {
             Ok(report) => {
                 tracing::info!(
                     worktree_id = %id,
@@ -145,9 +163,26 @@ pub async fn worktree_create(
             }
             Err(e) => {
                 tracing::debug!(worktree_id = %id, error = %e, "auto-index skipped");
+                let _ = app.emit(
+                    "indexing:progress",
+                    crate::infra::indexing::IndexingProgress::Failed {
+                        worktree_id: id,
+                        error: e.to_string(),
+                    },
+                );
             }
         }
+        // Drain pump — channel closed when tx drops.
+        let _ = pump.await;
     });
+
+    // Pre-warm the primary language's LSP in parallel so the user's first
+    // semantic query (hover / find references / diagnostics) doesn't pay
+    // the full cold-start cost. Status events flow through `lsp:status`
+    // for the UI chip.
+    state
+        .lsp
+        .warm_primary(id, project.environment.clone(), created.path.clone());
 
     // Return the freshly projected row.
     let rows = state.projections.list_worktrees(input.project_id, true)?;
@@ -194,13 +229,59 @@ pub async fn worktree_remove(
 }
 
 #[tauri::command]
-pub fn worktree_list(
+pub async fn worktree_list(
     input: ListWorktreesInput,
     state: State<'_, AppState>,
 ) -> Result<Vec<WorktreeRow>, TauriWorktreeError> {
-    Ok(state
+    let mut rows = state
         .projections
-        .list_worktrees(input.project_id, input.include_removed)?)
+        .list_worktrees(input.project_id, input.include_removed)?;
+    // Always prepend a synthetic primary so the UI has something to scope
+    // sessions to even on projects that the user hasn't created any
+    // worktrees on. Best-effort: if git can't tell us the current branch
+    // (empty repo, broken state) we still emit a card with an empty branch.
+    if let Ok(primary) = synthesize_primary(&state, input.project_id).await {
+        rows.insert(0, primary);
+    }
+    Ok(rows)
+}
+
+/// Build the synthetic primary row from project metadata + git's view of
+/// the repo. Returns the row directly, never persists it.
+async fn synthesize_primary(
+    state: &AppState,
+    project_id: AggregateId,
+) -> Result<WorktreeRow, TauriWorktreeError> {
+    let project = find_project(state, project_id)?;
+    // Try to pull the actual primary branch from git; fall back to a blank
+    // when the repo is empty or unreadable so the card still renders.
+    let primary_from_git =
+        git::list_worktrees(&project.environment, &state.agent_pool, &project.root_path)
+            .await
+            .ok()
+            .and_then(|ws| ws.into_iter().find(|w| w.is_primary));
+    let branch = primary_from_git
+        .as_ref()
+        .and_then(|w| w.branch.clone())
+        .unwrap_or_default();
+    let path = primary_from_git
+        .map(|w| w.path)
+        .unwrap_or_else(|| project.root_path.clone());
+
+    Ok(WorktreeRow {
+        id: PRIMARY_WORKTREE_SENTINEL,
+        project_id,
+        name: "primary".into(),
+        branch,
+        path,
+        is_primary: true,
+        created_at: epoch(),
+        removed_at: None,
+    })
+}
+
+fn epoch() -> DateTime<Utc> {
+    DateTime::from_timestamp(0, 0).expect("epoch always parses")
 }
 
 /// Enumerate git branches for a project, hitting git directly (not the

@@ -64,6 +64,11 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
             let result = fs::walk(&id, args).await?;
             Ok(serde_json::to_value(result)?)
         }
+        op_name::FS_LIST_DIR => {
+            let args: oxyris_ipc::ops::FsListDirArgs = from_args(args)?;
+            let result = fs::list_dir(&args.path, args.show_hidden)?;
+            Ok(serde_json::to_value(result)?)
+        }
         op_name::GIT_LIST_BRANCHES => git::list_branches(from_args(args)?),
         op_name::GIT_LIST_WORKTREES => git::list_worktrees(from_args(args)?),
         op_name::GIT_CREATE_WORKTREE => git::create_worktree(from_args(args)?),
@@ -71,6 +76,20 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         op_name::GIT_CHECKPOINT_CAPTURE => git::checkpoint_capture(from_args(args)?),
         op_name::GIT_CHECKPOINT_DIFF => git::checkpoint_diff(from_args(args)?),
         op_name::GIT_CHECKPOINT_REVERT => git::checkpoint_revert(from_args(args)?),
+        op_name::GIT_STATUS => git::status(from_args(args)?),
+        op_name::GIT_DIFF_FILE => git::diff_file(from_args(args)?),
+        op_name::GIT_STAGE => git::stage(from_args(args)?),
+        op_name::GIT_UNSTAGE => git::unstage(from_args(args)?),
+        op_name::GIT_COMMIT => git::commit(from_args(args)?),
+        op_name::GIT_FETCH => git::fetch(from_args(args)?),
+        op_name::GIT_PULL => git::pull(from_args(args)?),
+        op_name::GIT_PUSH => git::push(from_args(args)?),
+        op_name::GIT_CHECKOUT => git::checkout(from_args(args)?),
+        op_name::GIT_BRANCH_CREATE => git::branch_create(from_args(args)?),
+        op_name::GIT_BRANCH_DELETE => git::branch_delete(from_args(args)?),
+        op_name::GIT_LOG => git::log(from_args(args)?),
+        op_name::GIT_GET_CONFLICT => git::get_conflict(from_args(args)?),
+        op_name::GIT_RESOLVE => git::resolve(from_args(args)?),
         other => Err(OpError::UnknownOp(other.to_owned())),
     }
 }

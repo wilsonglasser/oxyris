@@ -39,6 +39,7 @@ oxyris-core.workspace = true
 oxyris-git.workspace = true
 oxyris-index.workspace = true
 oxyris-ipc.workspace = true
+oxyris-lsp.workspace = true
 oxyris-provider.workspace = true
 oxyris-claude.workspace = true
 ignore.workspace = true
@@ -49,6 +50,10 @@ git2.workspace = true
 which.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
+reqwest.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tempfile = "3.16"

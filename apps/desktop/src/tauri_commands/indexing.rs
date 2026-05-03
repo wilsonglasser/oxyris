@@ -10,7 +10,7 @@
 use oxyris_core::{AggregateId, Environment};
 use oxyris_index::{ProjectMap, Symbol, SymbolHit, SymbolKind};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::app_state::AppState;
 use crate::infra::indexing::{IndexingError, RebuildReport};
@@ -20,8 +20,6 @@ use crate::infra::indexing::{IndexingError, RebuildReport};
 pub enum TauriIndexingError {
     #[error("worktree not found")]
     WorktreeNotFound,
-    #[error("indexing for WSL projects is not yet supported")]
-    WslNotSupported,
     #[error("{0}")]
     Indexing(String),
     #[error("{0}")]
@@ -30,10 +28,7 @@ pub enum TauriIndexingError {
 
 impl From<IndexingError> for TauriIndexingError {
     fn from(e: IndexingError) -> Self {
-        match e {
-            IndexingError::WslNotSupported => TauriIndexingError::WslNotSupported,
-            other => TauriIndexingError::Indexing(other.to_string()),
-        }
+        TauriIndexingError::Indexing(e.to_string())
     }
 }
 
@@ -85,7 +80,7 @@ pub async fn index_rebuild(
     let ctx = lookup_worktree(&state, input.worktree_id)?;
     let report = state
         .indexing
-        .rebuild(input.worktree_id, &ctx.environment, &ctx.path)
+        .rebuild(input.worktree_id, &ctx.environment, &ctx.path, None)
         .await?;
     Ok(report)
 }
@@ -141,6 +136,97 @@ pub async fn index_project_map(
         .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?
         .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?;
     Ok(map)
+}
+
+/// Idempotent "make the worktree ready for queries" — covers projects that
+/// existed before the eager warm-up shipped. Triggers an initial index walk
+/// (only if the DB is empty) and pre-warms the primary LSP. All progress
+/// flows through the same `indexing:progress` and `lsp:status` events the
+/// auto-trigger uses, so the UI chip is identical across paths.
+///
+/// `project_id` is required when `worktree_id` is the synthetic primary
+/// sentinel — the sentinel doesn't disambiguate between projects, so we
+/// resolve the env+root through the project row instead.
+#[derive(Debug, Deserialize)]
+pub struct EnsureReadyInput {
+    pub worktree_id: AggregateId,
+    #[serde(default)]
+    pub project_id: Option<AggregateId>,
+}
+
+#[tauri::command]
+pub async fn worktree_ensure_ready(
+    input: EnsureReadyInput,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), TauriIndexingError> {
+    let ctx = if input.worktree_id == crate::tauri_commands::worktree::PRIMARY_WORKTREE_SENTINEL {
+        // Sentinel — resolve via the owning project so we have an env+path.
+        let project_id = input
+            .project_id
+            .ok_or(TauriIndexingError::WorktreeNotFound)?;
+        let projects = state
+            .projections
+            .list_projects()
+            .map_err(|e| TauriIndexingError::Storage(e.to_string()))?;
+        let p = projects
+            .into_iter()
+            .find(|p| p.id == project_id)
+            .ok_or(TauriIndexingError::WorktreeNotFound)?;
+        WorktreeContext {
+            environment: p.environment,
+            path: p.root_path,
+        }
+    } else {
+        lookup_worktree(&state, input.worktree_id)?
+    };
+    let worktree_id = input.worktree_id;
+
+    // Indexing — fire on a background task so the IPC returns immediately.
+    let indexing = state.indexing.clone();
+    let env_idx = ctx.environment.clone();
+    let path_idx = ctx.path.clone();
+    let app_for_progress = app.clone();
+    let app_for_failed = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let pump = tauri::async_runtime::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let _ = app_for_progress.emit("indexing:progress", p);
+            }
+        });
+        let res = indexing
+            .ensure_indexed(worktree_id, &env_idx, &path_idx, Some(tx))
+            .await;
+        if let Err(e) = res {
+            tracing::debug!(worktree_id = %worktree_id, error = %e, "ensure_indexed skipped");
+            let _ = app_for_failed.emit(
+                "indexing:progress",
+                crate::infra::indexing::IndexingProgress::Failed {
+                    worktree_id,
+                    error: e.to_string(),
+                },
+            );
+        }
+        let _ = pump.await;
+    });
+
+    // LSP — idempotent: fast-path returns existing client if already ready.
+    state
+        .lsp
+        .warm_primary(worktree_id, ctx.environment.clone(), ctx.path.clone());
+
+    // WSL only: kick off a background poll so symbol changes inside the
+    // distro show up without manual rebuild. Idempotent — re-calls collapse
+    // to the existing loop. Skipped for Windows worktrees because
+    // `notify` already covers them.
+    if matches!(ctx.environment, Environment::Wsl { .. }) {
+        state
+            .indexing
+            .start_wsl_poll(worktree_id, ctx.environment, ctx.path);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

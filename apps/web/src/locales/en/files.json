@@ -1,0 +1,23 @@
+{
+  "title": "Files",
+  "loading": "Loading…",
+  "saving": "Saving…",
+  "save": "Save",
+  "open_external": "Open externally",
+  "not_installed": "not installed",
+  "close_tab": "Close tab",
+  "no_open_files": "No open files. Pick one from the tree.",
+  "empty_dir": "Empty directory",
+  "refresh": "Refresh",
+  "worktree_picker_label": "Worktree",
+  "truncated": "truncated",
+  "pick_project": "Pick a project to browse its files.",
+  "scroll_tabs_left": "Scroll tabs left",
+  "scroll_tabs_right": "Scroll tabs right",
+  "ctx_close": "Close",
+  "ctx_close_others": "Close others",
+  "ctx_close_all": "Close all",
+  "view_raw": "Raw",
+  "view_preview": "Preview",
+  "preview_unsupported": "Preview not supported for this file type."
+}

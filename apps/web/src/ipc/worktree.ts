@@ -1,5 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/**
+ * Synthetic id the backend assigns to the project's primary checkout (the
+ * repo root). Mirror of `PRIMARY_WORKTREE_SENTINEL` in
+ * `apps/desktop/src/tauri_commands/worktree.rs`. The frontend translates
+ * this id back to "no worktree" before calling `session_start` so the
+ * backend doesn't have to look up a non-existent aggregate.
+ */
+export const PRIMARY_WORKTREE_ID = "00000000-0000-0000-0000-000000000000";
+
+export function isPrimaryWorktreeId(id: string | null | undefined): boolean {
+  return id === PRIMARY_WORKTREE_ID;
+}
+
 export type WorktreeRow = {
   id: string;
   project_id: string;

@@ -88,6 +88,13 @@ pub async fn session_start(
     input: StartSessionInput,
     state: State<'_, AppState>,
 ) -> Result<StartSessionResponse, TauriSessionError> {
+    // The frontend may pass the sentinel id when the user picks the
+    // synthetic primary card from the empty state. That doesn't map to a
+    // persisted worktree, so we translate it back to "no worktree" here.
+    let worktree_id = match input.worktree_id {
+        Some(id) if id == crate::tauri_commands::worktree::PRIMARY_WORKTREE_SENTINEL => None,
+        other => other,
+    };
     let opts = SessionOptions {
         environment: input.environment,
         cwd: input.cwd,
@@ -102,7 +109,7 @@ pub async fn session_start(
         .session_supervisor
         .start_session(
             input.project_id,
-            input.worktree_id,
+            worktree_id,
             input.provider_id,
             input.env_mode,
             opts,
@@ -213,6 +220,23 @@ pub async fn session_delete(
     state
         .session_supervisor
         .delete_session(input.session_id)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TogglePinInput {
+    pub session_id: AggregateId,
+}
+
+#[tauri::command]
+pub async fn session_toggle_pin(
+    input: TogglePinInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriSessionError> {
+    state
+        .session_supervisor
+        .toggle_pin(input.session_id)
         .await?;
     Ok(())
 }

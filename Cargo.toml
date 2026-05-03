@@ -8,6 +8,8 @@ members = [
     "crates/oxyris-git",
     "crates/oxyris-index",
     "crates/oxyris-ipc",
+    "crates/oxyris-laravel",
+    "crates/oxyris-lsp",
     "crates/oxyris-provider",
     "crates/oxyris-claude",
 ]
@@ -57,11 +59,20 @@ tauri-build = { version = "2.0", features = [] }
 tauri-plugin-dialog = "2.0"
 tauri-plugin-updater = "2.0"
 
+# HTTP client for downloading language-server binaries from GitHub
+# releases. We piggyback on rustls so we don't pull system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+flate2 = "1.0"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+zip = { version = "5.0", default-features = false, features = ["deflate"] }
+
 # Internal crates
 oxyris-core = { path = "crates/oxyris-core" }
 oxyris-git = { path = "crates/oxyris-git" }
 oxyris-index = { path = "crates/oxyris-index" }
 oxyris-ipc = { path = "crates/oxyris-ipc" }
+oxyris-laravel = { path = "crates/oxyris-laravel" }
+oxyris-lsp = { path = "crates/oxyris-lsp" }
 oxyris-provider = { path = "crates/oxyris-provider" }
 oxyris-claude = { path = "crates/oxyris-claude" }
 

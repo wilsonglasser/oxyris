@@ -1,0 +1,25 @@
+[package]
+name = "oxyris-lsp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Generic Language Server Protocol client used by the Oxyris MCP server to bridge per-language LSP servers (rust-analyzer, typescript-language-server, intelephense, ...) into MCP tools."
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+which.workspace = true
+
+# LSP message types — kept in sync with the protocol spec.
+lsp-types = "0.97"
+
+[dev-dependencies]
+tempfile = "3.16"

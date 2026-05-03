@@ -104,7 +104,8 @@ impl Projections {
                 state_snapshot   TEXT    NOT NULL,
                 created_at       TEXT    NOT NULL,
                 last_activity_at TEXT    NOT NULL,
-                title            TEXT
+                title            TEXT,
+                pinned_at        TEXT
             );
             CREATE INDEX IF NOT EXISTS projections_sessions_by_project
                 ON projections_sessions (project_id, last_activity_at DESC);
@@ -128,7 +129,10 @@ impl Projections {
         // doesn't touch an existing table, so additive fields have to come
         // through ALTER TABLE. We ignore "duplicate column" errors so the
         // migration is a no-op on the second run.
-        for alter in ["ALTER TABLE projections_sessions ADD COLUMN title TEXT"] {
+        for alter in [
+            "ALTER TABLE projections_sessions ADD COLUMN title TEXT",
+            "ALTER TABLE projections_sessions ADD COLUMN pinned_at TEXT",
+        ] {
             if let Err(e) = conn.execute(alter, []) {
                 let msg = e.to_string().to_ascii_lowercase();
                 if !msg.contains("duplicate column name") {
@@ -208,6 +212,26 @@ impl Projections {
             }
         }
         Ok(())
+    }
+
+    /// Look up a single worktree by id, regardless of `removed_at`. Returns
+    /// `None` when the row was never projected (e.g. the synthetic primary
+    /// sentinel) — callers must fall back to project root in that case.
+    pub fn get_worktree(
+        &self,
+        id: oxyris_core::AggregateId,
+    ) -> Result<Option<WorktreeRow>, ProjectionError> {
+        let conn = self.conn.lock().expect("projections mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, name, branch, path, is_primary, created_at, removed_at
+               FROM projections_worktrees
+              WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id.to_string()])?;
+        if let Some(row) = rows.next()? {
+            return Ok(Some(row_to_worktree(row)?));
+        }
+        Ok(None)
     }
 
     pub fn list_worktrees(
@@ -375,8 +399,9 @@ impl Projections {
         conn.execute(
             "INSERT OR REPLACE INTO projections_sessions
                 (id, project_id, worktree_id, provider_id, model, status,
-                 turn_count, state_snapshot, created_at, last_activity_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 turn_count, state_snapshot, created_at, last_activity_at,
+                 title, pinned_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 data.id.to_string(),
                 data.project_id.to_string(),
@@ -391,6 +416,8 @@ impl Projections {
                 snapshot_json,
                 data.created_at.to_rfc3339(),
                 stored.timestamp.to_rfc3339(),
+                data.title.clone(),
+                data.pinned_at.map(|t| t.to_rfc3339()),
             ],
         )?;
         Ok(())
@@ -403,10 +430,10 @@ impl Projections {
         let conn = self.conn.lock().expect("projections mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, project_id, worktree_id, provider_id, model, status,
-                    turn_count, created_at, last_activity_at, title
+                    turn_count, created_at, last_activity_at, title, pinned_at
                FROM projections_sessions
               WHERE project_id = ?1
-              ORDER BY last_activity_at DESC",
+              ORDER BY pinned_at IS NULL, pinned_at DESC, last_activity_at DESC",
         )?;
         let rows = stmt.query_map(params![project_id.to_string()], row_to_session_summary)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -419,7 +446,7 @@ impl Projections {
         let conn = self.conn.lock().expect("projections mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, project_id, worktree_id, provider_id, model, status,
-                    turn_count, created_at, last_activity_at, title
+                    turn_count, created_at, last_activity_at, title, pinned_at
                FROM projections_sessions
               WHERE status = 'running'
               ORDER BY last_activity_at DESC",
@@ -603,6 +630,7 @@ pub struct SessionSummaryRow {
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub title: Option<String>,
+    pub pinned_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,6 +667,11 @@ fn row_to_session_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSu
     let created_text: String = row.get(7)?;
     let activity_text: String = row.get(8)?;
     let title: Option<String> = row.get(9)?;
+    let pinned_text: Option<String> = row.get(10)?;
+    let pinned_at = match pinned_text {
+        Some(s) => Some(parse_ts(10, &s)?),
+        None => None,
+    };
     Ok(SessionSummaryRow {
         id: parse_id(0)?,
         project_id: parse_id(1)?,
@@ -650,6 +683,7 @@ fn row_to_session_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSu
         created_at: parse_ts(7, &created_text)?,
         last_activity_at: parse_ts(8, &activity_text)?,
         title,
+        pinned_at,
     })
 }
 

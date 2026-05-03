@@ -2,7 +2,27 @@
   "heading": "Configurações",
   "tabs": {
     "general": "Geral",
+    "languages": "Linguagens",
     "advanced": "Avançado"
+  },
+  "languages": {
+    "heading": "Pacotes de linguagem",
+    "description": "Cada pacote baixa ou instala um language server (LSP) pra que ferramentas semânticas — find references, hover, diagnostics — funcionem naquela linguagem.",
+    "loading": "Carregando pacotes…",
+    "install": "Instalar",
+    "uninstall": "Remover",
+    "uninstall_confirm": "Remover {{name}}? Apaga apenas o binário gerenciado pelo Oxyris; instalações no PATH não são tocadas.",
+    "install_managed": "Instalar cópia gerenciada pelo Oxyris ao lado da versão do PATH",
+    "install_managed_short": "Gerenciar",
+    "wsl_install": "Instalar no WSL:",
+    "wsl_install_ok": "Instalado em {{distro}}",
+    "wsl_install_failed": "Falhou em {{distro}}",
+    "status": {
+      "managed": "Gerenciado",
+      "path": "No PATH",
+      "installing": "{{progress}}%",
+      "failed": "Falhou"
+    }
   },
   "section_language": "Idioma",
   "section_updates": "Atualizações",

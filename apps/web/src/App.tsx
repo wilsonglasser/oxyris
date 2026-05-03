@@ -1,16 +1,21 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChatPanel } from "~/components/ChatPanel.tsx";
+import { FilesPanel } from "~/components/FilesPanel.tsx";
+import { GitPanel } from "~/components/GitPanel.tsx";
 import { Modal } from "~/components/Modal.tsx";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 import { ProjectPanel } from "~/components/ProjectPanel.tsx";
+import { ProjectSettingsModal } from "~/components/ProjectSettingsModal.tsx";
 import { SettingsPanel } from "~/components/SettingsPanel.tsx";
 import { Sidebar } from "~/components/Sidebar.tsx";
 import { TerminalPanel } from "~/components/TerminalPanel.tsx";
 import { TitleBar } from "~/components/TitleBar.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
+import { useIndexingStore } from "~/stores/indexingStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
+import { useLspStatusStore } from "~/stores/lspStatusStore.ts";
 import { useUpdaterStore } from "~/stores/updaterStore.ts";
 import {
   type DockerCleanupReport,
@@ -19,7 +24,7 @@ import {
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 
-type Tab = "chat" | "settings";
+type Tab = "chat" | "files" | "git" | "settings";
 
 export function App() {
   const { t } = useTranslation("common");
@@ -30,8 +35,12 @@ export function App() {
 
   const [tab, setTab] = useState<Tab>("chat");
   const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [projectSettingsId, setProjectSettingsId] = useState<string | null>(
+    null,
+  );
   const [terminalOpen, setTerminalOpen] = useState(false);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const setActiveSession = useSessionStore((s) => s.setActive);
   const bindings = useKeybindingsStore((s) => s.bindings);
   const loadBindings = useKeybindingsStore((s) => s.load);
   const backgroundCheckUpdate = useUpdaterStore((s) => s.backgroundCheck);
@@ -49,6 +58,29 @@ export function App() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh, loadBindings, backgroundCheckUpdate]);
+
+  // Subscribe once to the backend's `indexing:progress` and `lsp:status`
+  // streams so the chips live in any panel that wants them.
+  useEffect(() => {
+    let unlistenIndex: (() => void) | null = null;
+    let unlistenLsp: (() => void) | null = null;
+    void useIndexingStore
+      .getState()
+      .subscribe()
+      .then((fn) => {
+        unlistenIndex = fn;
+      });
+    void useLspStatusStore
+      .getState()
+      .subscribe()
+      .then((fn) => {
+        unlistenLsp = fn;
+      });
+    return () => {
+      if (unlistenIndex) unlistenIndex();
+      if (unlistenLsp) unlistenLsp();
+    };
+  }, []);
 
   // Subscribe to the boot-time docker cleanup report so the UI can surface
   // a one-time toast about the orphan stacks we pruned.
@@ -74,7 +106,14 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (matchesKey(e, bindings.new_thread)) {
         e.preventDefault();
-        setProjectModalOpen(true);
+        // "New thread" now means "leave the active session and land on the
+        // empty state for the active project". If there's no project yet,
+        // fall back to creating one — the user has nothing to scope to.
+        if (activeId) {
+          setActiveSession(null);
+        } else {
+          setProjectModalOpen(true);
+        }
         return;
       }
       if (matchesKey(e, bindings.toggle_terminal)) {
@@ -94,7 +133,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [bindings, activeSessionId]);
+  }, [bindings, activeSessionId, activeId, setActiveSession]);
 
   const center = active ? (
     <div className="flex items-center gap-2">
@@ -105,7 +144,7 @@ export function App() {
 
   const titleBarActions = (
     <div className="flex items-center gap-1 pr-2">
-      {(["chat", "settings"] as const).map((id) => (
+      {(["chat", "files", "git", "settings"] as const).map((id) => (
         <button
           key={id}
           type="button"
@@ -132,6 +171,8 @@ export function App() {
             <Sidebar
               onNewProject={() => setProjectModalOpen(true)}
               onOpenSettings={() => setTab("settings")}
+              onNewSession={() => setActiveSession(null)}
+              onOpenProjectSettings={(id) => setProjectSettingsId(id)}
             />
             <div className="flex min-h-0 flex-1 flex-col bg-neutral-950">
               <main className="flex min-h-0 flex-1 flex-col">
@@ -164,6 +205,32 @@ export function App() {
             </div>
           </>
         )}
+        {tab === "files" && (
+          <>
+            <Sidebar
+              onNewProject={() => setProjectModalOpen(true)}
+              onOpenSettings={() => setTab("settings")}
+              onNewSession={() => setActiveSession(null)}
+              onOpenProjectSettings={(id) => setProjectSettingsId(id)}
+            />
+            <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">
+              <FilesPanel projectId={activeId} />
+            </main>
+          </>
+        )}
+        {tab === "git" && (
+          <>
+            <Sidebar
+              onNewProject={() => setProjectModalOpen(true)}
+              onOpenSettings={() => setTab("settings")}
+              onNewSession={() => setActiveSession(null)}
+              onOpenProjectSettings={(id) => setProjectSettingsId(id)}
+            />
+            <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">
+              <GitPanel projectId={activeId} />
+            </main>
+          </>
+        )}
         {tab === "settings" && (
           <main className="min-h-0 flex-1 overflow-y-auto bg-neutral-950 p-4">
             <div className="mx-auto max-w-3xl">
@@ -179,6 +246,19 @@ export function App() {
         closeLabel={t("sidebar.close")}
       >
         <ProjectPanel onCreated={() => setProjectModalOpen(false)} />
+      </Modal>
+
+      <Modal
+        open={projectSettingsId !== null}
+        onClose={() => setProjectSettingsId(null)}
+        closeLabel={t("sidebar.close")}
+      >
+        {projectSettingsId && (
+          <ProjectSettingsModal
+            projectId={projectSettingsId}
+            onClose={() => setProjectSettingsId(null)}
+          />
+        )}
       </Modal>
 
       {cleanupReport && (

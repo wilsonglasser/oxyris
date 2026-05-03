@@ -11,6 +11,7 @@ pub mod op_name {
     pub const FS_READ: &str = "fs.read";
     pub const FS_WRITE: &str = "fs.write";
     pub const FS_WALK: &str = "fs.walk";
+    pub const FS_LIST_DIR: &str = "fs.list_dir";
     pub const GIT_LIST_BRANCHES: &str = "git.list_branches";
     pub const GIT_LIST_WORKTREES: &str = "git.list_worktrees";
     pub const GIT_CREATE_WORKTREE: &str = "git.create_worktree";
@@ -18,6 +19,20 @@ pub mod op_name {
     pub const GIT_CHECKPOINT_CAPTURE: &str = "git.checkpoint_capture";
     pub const GIT_CHECKPOINT_DIFF: &str = "git.checkpoint_diff";
     pub const GIT_CHECKPOINT_REVERT: &str = "git.checkpoint_revert";
+    pub const GIT_STATUS: &str = "git.status";
+    pub const GIT_DIFF_FILE: &str = "git.diff_file";
+    pub const GIT_STAGE: &str = "git.stage";
+    pub const GIT_UNSTAGE: &str = "git.unstage";
+    pub const GIT_COMMIT: &str = "git.commit";
+    pub const GIT_FETCH: &str = "git.fetch";
+    pub const GIT_PULL: &str = "git.pull";
+    pub const GIT_PUSH: &str = "git.push";
+    pub const GIT_CHECKOUT: &str = "git.checkout";
+    pub const GIT_BRANCH_CREATE: &str = "git.branch_create";
+    pub const GIT_BRANCH_DELETE: &str = "git.branch_delete";
+    pub const GIT_LOG: &str = "git.log";
+    pub const GIT_GET_CONFLICT: &str = "git.get_conflict";
+    pub const GIT_RESOLVE: &str = "git.resolve";
 }
 
 // ────── system.info ────────────────────────────────────────────────────────
@@ -119,6 +134,32 @@ pub struct FsWalkResult {
     pub truncated: bool,
 }
 
+// ────── fs.list_dir ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsListDirArgs {
+    pub path: String,
+    /// When false, hidden entries (leading-dot names on POSIX, hidden-attr on
+    /// Windows) are omitted. Defaults to false.
+    #[serde(default)]
+    pub show_hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsListDirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub size: Option<u64>,
+    pub modified_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsListDirResult {
+    pub path: String,
+    pub entries: Vec<FsListDirEntry>,
+}
+
 // ────── git.* ──────────────────────────────────────────────────────────────
 //
 // Every git op carries `repo_path` (absolute, inside the distro). Result
@@ -165,4 +206,125 @@ pub struct GitCheckpointTurnArgs {
     pub repo_path: String,
     pub session_id: String,
     pub turn_id: String,
+}
+
+// ────── git.status ─────────────────────────────────────────────────────────
+
+// Result type re-uses `oxyris_git::StatusReport` via a `Value` since this
+// crate is git2-free; the agent serializes it directly and the desktop
+// deserializes back into the typed shape.
+
+// ────── git.diff_file ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitDiffFileArgs {
+    pub repo_path: String,
+    pub path: String,
+    /// "working_vs_head" | "staged_vs_head" | "working_vs_staged"
+    pub mode: String,
+}
+
+// ────── git.stage / git.unstage ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitPathsArgs {
+    pub repo_path: String,
+    pub paths: Vec<String>,
+}
+
+// ────── git.commit ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitArgs {
+    pub repo_path: String,
+    pub message: String,
+    #[serde(default)]
+    pub amend: bool,
+}
+
+// ────── git.fetch / pull / push ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitFetchArgs {
+    pub repo_path: String,
+    #[serde(default)]
+    pub remote: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitPullArgs {
+    pub repo_path: String,
+    #[serde(default)]
+    pub remote: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub rebase: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitPushArgs {
+    pub repo_path: String,
+    #[serde(default)]
+    pub remote: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub set_upstream: bool,
+}
+
+// ────── git.checkout / branch_create / branch_delete ───────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCheckoutArgs {
+    pub repo_path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchCreateArgs {
+    pub repo_path: String,
+    pub name: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub checkout: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchDeleteArgs {
+    pub repo_path: String,
+    pub name: String,
+}
+
+// ────── git.log ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitLogArgs {
+    pub repo_path: String,
+    #[serde(default = "default_log_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub rev: Option<String>,
+}
+
+fn default_log_limit() -> u32 {
+    50
+}
+
+// ────── git.get_conflict / resolve ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitConflictPathArgs {
+    pub repo_path: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitResolveArgs {
+    pub repo_path: String,
+    pub path: String,
+    pub content: String,
 }

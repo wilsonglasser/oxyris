@@ -54,6 +54,7 @@ export type SessionSnapshot = {
   provider_session_id: string | null;
   title: string | null;
   env_mode: EnvMode;
+  pinned_at: string | null;
 };
 
 export type SessionSummary = {
@@ -67,6 +68,7 @@ export type SessionSummary = {
   created_at: string;
   last_activity_at: string;
   title: string | null;
+  pinned_at: string | null;
 };
 
 // Persisted SessionEvent shapes (the backend emits these via
@@ -116,7 +118,8 @@ export type SessionEventPayload =
   | { kind: "ProviderSessionAttached"; provider_session_id: string }
   | { kind: "SessionResumed"; at: string }
   | { kind: "SessionRenamed"; title: string }
-  | { kind: "SessionDeleted"; at: string };
+  | { kind: "SessionDeleted"; at: string }
+  | { kind: "SessionPinToggled"; pinned_at: string | null };
 
 export type EmittedSessionEvent = {
   session_id: string;
@@ -178,6 +181,12 @@ export async function sessionDelete(input: {
   session_id: string;
 }): Promise<void> {
   await invoke("session_delete", { input });
+}
+
+export async function sessionTogglePin(input: {
+  session_id: string;
+}): Promise<void> {
+  await invoke("session_toggle_pin", { input });
 }
 
 export async function sessionList(input: {

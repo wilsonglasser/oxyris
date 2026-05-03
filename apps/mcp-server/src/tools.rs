@@ -2,8 +2,16 @@
 //! human-readable text payload. Errors are returned as `Err(String)` and
 //! surface to the MCP client as JSON-RPC `-32603` errors.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
 use oxyris_index::{Index, SymbolKind};
+use oxyris_lsp::lsp_types::DiagnosticSeverity;
 use serde_json::Value;
+
+use crate::laravel_state::LaravelState;
+use crate::lsp_backend::LspBackend;
 
 pub fn find_symbol(index: Option<&Index>, args: &Value) -> Result<String, String> {
     let name = args
@@ -103,4 +111,479 @@ pub fn project_map(index: Option<&Index>, _args: &Value) -> Result<String, Strin
 
 fn no_index_msg() -> String {
     "Symbol index database is not available for this worktree (yet).".into()
+}
+
+// ────── LSP-backed tools ──────────────────────────────────────────────────
+
+pub async fn lsp_find_references(lsp: &Arc<LspBackend>, args: &Value) -> Result<String, String> {
+    let (_, line0, col0, file) = parse_position_args(args)?;
+    let include_declaration = args
+        .get("include_declaration")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let path = lsp.resolve_path(&file);
+    let locations = lsp
+        .find_references(&path, line0, col0, include_declaration)
+        .await?;
+    if locations.is_empty() {
+        return Ok(format!(
+            "No references found for the symbol at {file}:{}:{}.",
+            line0 + 1,
+            col0 + 1
+        ));
+    }
+    let mut out = format!(
+        "Found {} reference(s) for the symbol at {file}:{}:{}:\n",
+        locations.len(),
+        line0 + 1,
+        col0 + 1
+    );
+    for loc in locations {
+        let path_disp = lsp.uri_to_display(&loc.uri.to_string());
+        let r = loc.range;
+        out.push_str(&format!(
+            "  • {}:{}:{}\n",
+            path_disp,
+            r.start.line + 1,
+            r.start.character + 1
+        ));
+    }
+    Ok(out)
+}
+
+pub async fn lsp_hover(lsp: &Arc<LspBackend>, args: &Value) -> Result<String, String> {
+    let (_, line0, col0, file) = parse_position_args(args)?;
+    let path = lsp.resolve_path(&file);
+    let hover = lsp.hover(&path, line0, col0).await?;
+    match hover {
+        Some(text) => Ok(format!(
+            "Hover at {file}:{}:{}:\n\n{text}",
+            line0 + 1,
+            col0 + 1
+        )),
+        None => Ok(format!(
+            "No hover info for {file}:{}:{}.",
+            line0 + 1,
+            col0 + 1
+        )),
+    }
+}
+
+pub async fn lsp_diagnostics(lsp: &Arc<LspBackend>, args: &Value) -> Result<String, String> {
+    let file = args
+        .get("file")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'file'".to_string())?;
+    let path = lsp.resolve_path(file);
+
+    // The LSP server publishes diagnostics asynchronously after `didOpen`.
+    // Poll for up to ~2 seconds before reporting "no issues" — covers the
+    // common case where the user opens a fresh file and asks for diags
+    // immediately.
+    let diags = wait_for_diagnostics(lsp, &path).await;
+    if diags.is_empty() {
+        return Ok(format!("No diagnostics reported for {file}."));
+    }
+    let mut out = format!("{} diagnostic(s) in {file}:\n", diags.len());
+    for d in diags {
+        let sev = match d.severity {
+            Some(DiagnosticSeverity::ERROR) => "ERROR",
+            Some(DiagnosticSeverity::WARNING) => "WARN",
+            Some(DiagnosticSeverity::INFORMATION) => "INFO",
+            Some(DiagnosticSeverity::HINT) => "HINT",
+            _ => "NOTE",
+        };
+        let line = d.range.start.line + 1;
+        let col = d.range.start.character + 1;
+        let source = d.source.as_deref().unwrap_or("lsp");
+        out.push_str(&format!(
+            "  [{sev}] {file}:{line}:{col} ({source}): {}\n",
+            d.message.lines().next().unwrap_or("")
+        ));
+    }
+    Ok(out)
+}
+
+async fn wait_for_diagnostics(
+    lsp: &Arc<LspBackend>,
+    path: &Path,
+) -> Vec<oxyris_lsp::lsp_types::Diagnostic> {
+    // Up to 8 polls of 250ms = ~2s ceiling. As soon as we get a non-empty
+    // result we return; if it's empty after the budget we report empty
+    // (which is the correct answer when the file genuinely has no issues).
+    for i in 0..8 {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        match lsp.diagnostics(path).await {
+            Ok(d) if !d.is_empty() => return d,
+            _ => {}
+        }
+    }
+    lsp.diagnostics(path).await.unwrap_or_default()
+}
+
+// ────── Laravel-backed tools ──────────────────────────────────────────────
+
+pub async fn laravel_routes(
+    laravel: &Arc<LaravelState>,
+    workspace: &Path,
+    args: &Value,
+) -> Result<String, String> {
+    let snap = laravel
+        .get(workspace)
+        .await
+        .ok_or_else(|| "this workspace is not a Laravel project".to_string())?;
+    let filter = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let routes: Vec<_> = match filter {
+        Some(needle) => {
+            let lower = needle.to_lowercase();
+            snap.routes
+                .iter()
+                .filter(|r| {
+                    r.name
+                        .as_ref()
+                        .map(|n| n.to_lowercase().contains(&lower))
+                        .unwrap_or(false)
+                        || r.uri.to_lowercase().contains(&lower)
+                })
+                .collect()
+        }
+        None => snap.routes.iter().collect(),
+    };
+    if routes.is_empty() {
+        return Ok("No routes matched.".into());
+    }
+    let mut out = format!("{} route(s):\n", routes.len());
+    for r in routes {
+        let method = match &r.method {
+            oxyris_laravel::RouteMethod::Get => "GET",
+            oxyris_laravel::RouteMethod::Post => "POST",
+            oxyris_laravel::RouteMethod::Put => "PUT",
+            oxyris_laravel::RouteMethod::Patch => "PATCH",
+            oxyris_laravel::RouteMethod::Delete => "DELETE",
+            oxyris_laravel::RouteMethod::Options => "OPTIONS",
+            oxyris_laravel::RouteMethod::Any => "ANY",
+            oxyris_laravel::RouteMethod::Other(s) => s.as_str(),
+        };
+        let name_disp = r
+            .name
+            .as_ref()
+            .map(|n| format!(" [{}]", n))
+            .unwrap_or_default();
+        let mw_disp = if r.middleware.is_empty() {
+            String::new()
+        } else {
+            format!(" {{{}}}", r.middleware.join(","))
+        };
+        out.push_str(&format!(
+            "  {method:<7} {} → {}{name_disp}{mw_disp} ({}:{})\n",
+            r.uri,
+            r.action,
+            short_path(&r.file, workspace),
+            r.line
+        ));
+    }
+    Ok(out)
+}
+
+pub async fn laravel_configs(
+    laravel: &Arc<LaravelState>,
+    workspace: &Path,
+    args: &Value,
+) -> Result<String, String> {
+    let snap = laravel
+        .get(workspace)
+        .await
+        .ok_or_else(|| "this workspace is not a Laravel project".to_string())?;
+    let prefix = args
+        .get("prefix")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let mut out = String::new();
+    let mut count = 0;
+    for file in &snap.configs {
+        if let Some(p) = prefix.as_deref()
+            && !file.name.starts_with(p)
+        {
+            continue;
+        }
+        out.push_str(&format!("{}.{}\n", file.name, "*"));
+        for k in &file.keys {
+            if let Some(p) = prefix.as_deref() {
+                let full = format!("{}.{}", file.name, k.key);
+                if !full.starts_with(p) {
+                    continue;
+                }
+            }
+            out.push_str(&format!(
+                "  • {}.{} ({}:{})\n",
+                file.name,
+                k.key,
+                short_path(&file.file, workspace),
+                k.line
+            ));
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Ok("No configs matched.".into());
+    }
+    Ok(format!("{count} config key(s):\n{out}"))
+}
+
+pub async fn laravel_models(
+    laravel: &Arc<LaravelState>,
+    workspace: &Path,
+    args: &Value,
+) -> Result<String, String> {
+    let snap = laravel
+        .get(workspace)
+        .await
+        .ok_or_else(|| "this workspace is not a Laravel project".to_string())?;
+    let needle = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+    let models: Vec<_> = match needle.as_deref() {
+        Some(n) => snap
+            .models
+            .iter()
+            .filter(|m| m.class.to_lowercase().contains(n))
+            .collect(),
+        None => snap.models.iter().collect(),
+    };
+    if models.is_empty() {
+        return Ok("No models matched.".into());
+    }
+    let mut out = format!("{} model(s):\n", models.len());
+    for m in models {
+        out.push_str(&format!(
+            "  • {} ({}:{})\n",
+            m.class,
+            short_path(&m.file, workspace),
+            m.line
+        ));
+        if let Some(t) = &m.table {
+            out.push_str(&format!("      table: {t}\n"));
+        }
+        if !m.fillable.is_empty() {
+            out.push_str(&format!("      fillable: {}\n", m.fillable.join(", ")));
+        }
+        for r in &m.relations {
+            let kind = format!("{:?}", r.kind);
+            let related = r
+                .related
+                .as_ref()
+                .map(|s| format!(" → {s}"))
+                .unwrap_or_default();
+            out.push_str(&format!("      ↳ {}() {kind}{related}\n", r.method));
+        }
+    }
+    Ok(out)
+}
+
+pub async fn laravel_blade_components(
+    laravel: &Arc<LaravelState>,
+    workspace: &Path,
+    args: &Value,
+) -> Result<String, String> {
+    let snap = laravel
+        .get(workspace)
+        .await
+        .ok_or_else(|| "this workspace is not a Laravel project".to_string())?;
+    let needle = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+    let views: Vec<_> = match needle.as_deref() {
+        Some(n) => snap
+            .blades
+            .iter()
+            .filter(|v| v.name.to_lowercase().contains(n))
+            .collect(),
+        None => snap.blades.iter().collect(),
+    };
+    if views.is_empty() {
+        return Ok("No blade views matched.".into());
+    }
+    let mut out = format!("{} blade view(s):\n", views.len());
+    for v in views {
+        out.push_str(&format!(
+            "  • {} ({})\n",
+            v.name,
+            short_path(&v.file, workspace),
+        ));
+    }
+    Ok(out)
+}
+
+pub async fn laravel_observers(
+    laravel: &Arc<LaravelState>,
+    workspace: &Path,
+    args: &Value,
+) -> Result<String, String> {
+    let snap = laravel
+        .get(workspace)
+        .await
+        .ok_or_else(|| "this workspace is not a Laravel project".to_string())?;
+    let needle = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+    let items: Vec<_> = match needle.as_deref() {
+        Some(n) => snap
+            .observers
+            .iter()
+            .filter(|o| o.class.to_lowercase().contains(n))
+            .collect(),
+        None => snap.observers.iter().collect(),
+    };
+    if items.is_empty() {
+        return Ok("No observers matched.".into());
+    }
+    let mut out = format!("{} observer(s):\n", items.len());
+    for o in items {
+        let model_disp = o
+            .model
+            .as_ref()
+            .map(|m| format!(" → {m}"))
+            .unwrap_or_default();
+        let events_disp = if o.events.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", o.events.join(","))
+        };
+        out.push_str(&format!(
+            "  • {}{model_disp}{events_disp} ({}:{})\n",
+            o.class,
+            short_path(&o.file, workspace),
+            o.line
+        ));
+    }
+    Ok(out)
+}
+
+pub async fn laravel_policies(
+    laravel: &Arc<LaravelState>,
+    workspace: &Path,
+    args: &Value,
+) -> Result<String, String> {
+    let snap = laravel
+        .get(workspace)
+        .await
+        .ok_or_else(|| "this workspace is not a Laravel project".to_string())?;
+    let needle = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+    let items: Vec<_> = match needle.as_deref() {
+        Some(n) => snap
+            .policies
+            .iter()
+            .filter(|p| p.class.to_lowercase().contains(n))
+            .collect(),
+        None => snap.policies.iter().collect(),
+    };
+    if items.is_empty() {
+        return Ok("No policies matched.".into());
+    }
+    let mut out = format!("{} polic(ies):\n", items.len());
+    for p in items {
+        let model_disp = p
+            .model
+            .as_ref()
+            .map(|m| format!(" → {m}"))
+            .unwrap_or_default();
+        let abilities_disp = if p.abilities.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", p.abilities.join(","))
+        };
+        out.push_str(&format!(
+            "  • {}{model_disp}{abilities_disp} ({}:{})\n",
+            p.class,
+            short_path(&p.file, workspace),
+            p.line
+        ));
+    }
+    Ok(out)
+}
+
+pub async fn laravel_jobs(
+    laravel: &Arc<LaravelState>,
+    workspace: &Path,
+    args: &Value,
+) -> Result<String, String> {
+    let snap = laravel
+        .get(workspace)
+        .await
+        .ok_or_else(|| "this workspace is not a Laravel project".to_string())?;
+    let needle = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase());
+    let items: Vec<_> = match needle.as_deref() {
+        Some(n) => snap
+            .jobs
+            .iter()
+            .filter(|j| j.class.to_lowercase().contains(n))
+            .collect(),
+        None => snap.jobs.iter().collect(),
+    };
+    if items.is_empty() {
+        return Ok("No jobs matched.".into());
+    }
+    let mut out = format!("{} job(s):\n", items.len());
+    for j in items {
+        let queue_disp = if j.queueable {
+            match j.queue.as_deref() {
+                Some(q) => format!(" [queue:{q}]"),
+                None => " [queueable]".to_owned(),
+            }
+        } else {
+            " [sync]".to_owned()
+        };
+        out.push_str(&format!(
+            "  • {}{queue_disp} ({}:{})\n",
+            j.class,
+            short_path(&j.file, workspace),
+            j.line
+        ));
+    }
+    Ok(out)
+}
+
+fn short_path(file: &str, workspace: &Path) -> String {
+    let path = Path::new(file);
+    if let Ok(rel) = path.strip_prefix(workspace) {
+        rel.to_string_lossy().replace('\\', "/")
+    } else {
+        file.replace('\\', "/")
+    }
+}
+
+fn parse_position_args(args: &Value) -> Result<(PathBuf, u32, u32, String), String> {
+    let file = args
+        .get("file")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'file'".to_string())?;
+    let line = args
+        .get("line")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "missing 'line' (1-based)".to_string())?;
+    let column = args
+        .get("column")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "missing 'column' (1-based)".to_string())?;
+    if line == 0 || column == 0 {
+        return Err("line and column are 1-based; use ≥1".into());
+    }
+    let line0 = (line - 1) as u32;
+    let col0 = (column - 1) as u32;
+    Ok((PathBuf::from(file), line0, col0, file.to_owned()))
 }

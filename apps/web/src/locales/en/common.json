@@ -6,6 +6,8 @@
   },
   "tabs": {
     "chat": "Chat",
+    "files": "Files",
+    "git": "Git",
     "settings": "Settings"
   },
   "sidebar": {
@@ -37,7 +39,29 @@
     "rename_session_prompt": "New name for this session:",
     "untitled_session": "Untitled session",
     "delete_session": "Delete session",
-    "delete_session_confirm": "Delete session \"{{name}}\"? Its history is kept in the event log but it disappears from the UI."
+    "delete_session_confirm": "Delete session \"{{name}}\"? Its history is kept in the event log but it disappears from the UI.",
+    "pin_session": "Pin to top",
+    "unpin_session": "Unpin",
+    "project_settings": "Project settings"
+  },
+  "empty_state": {
+    "heading": "Start a new conversation",
+    "subheading": "Pick a worktree to scope this session.",
+    "primary_badge": "Primary",
+    "new_worktree_heading": "Or create a new worktree",
+    "new_worktree_branch_label": "Branch (existing or new)",
+    "new_worktree_branch_placeholder": "e.g. feature/auth-rework",
+    "new_worktree_submit": "Create worktree",
+    "creating": "Creating…",
+    "loading": "Loading worktrees…",
+    "error_prefix": "Failed: {{message}}"
+  },
+  "project_settings_modal": {
+    "title": "Project settings — {{name}}",
+    "worktrees_heading": "Worktrees",
+    "worktrees_help": "Each worktree is a separate working tree on disk on its own branch. Use them to run multiple parallel sessions on the same project without stepping on each other.",
+    "new_worktree_prompt": "Branch name (new or existing):",
+    "remove_confirm": "Remove worktree \"{{name}}\"? The directory will be deleted from disk."
   },
   "language": {
     "label": "Language",
@@ -62,5 +86,16 @@
     "title": "Cleaned up orphan docker stacks",
     "body": "{{count}} project(s) · {{containers}} containers · {{volumes}} volumes · {{networks}} networks",
     "dismiss": "Dismiss"
+  },
+  "indexing": {
+    "in_progress": "Indexing {{indexed}}/{{total}}",
+    "done": "Indexed · {{symbols}} symbols",
+    "failed": "Indexing failed"
+  },
+  "lsp": {
+    "warming": "Warming {{language}}…",
+    "ready": "{{language}} ready",
+    "failed": "{{language}} failed",
+    "not_installed": "{{language}} missing"
   }
 }

@@ -73,3 +73,63 @@ pub struct FileDiff {
 pub struct TurnDiff {
     pub files: Vec<FileDiff>,
 }
+
+// ────── working-tree status ────────────────────────────────────────────────
+
+/// Where the change lives. A single file can appear under both `staged` and
+/// `unstaged` if the index and working tree both differ from HEAD (the
+/// classic "staged + then edited again" case).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusBucket {
+    Staged,
+    Unstaged,
+    Untracked,
+    Conflicted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusEntry {
+    pub path: String,
+    /// Set when the change is a rename (`status == Renamed`). Present in
+    /// staged renames; the unstaged side reports as a delete + add unless
+    /// `status.options().renames(true)` is set, which we do.
+    pub old_path: Option<String>,
+    pub bucket: StatusBucket,
+    pub status: FileStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StatusReport {
+    pub entries: Vec<StatusEntry>,
+    /// Current branch shorthand or `None` for detached HEAD / empty repo.
+    pub branch: Option<String>,
+    /// Commits ahead/behind the upstream of `branch`. `None` when there is
+    /// no upstream tracking branch.
+    pub ahead_behind: Option<AheadBehind>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AheadBehind {
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+/// Which two endpoints to diff for a single file.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffMode {
+    /// Working tree vs HEAD (the "all uncommitted" view).
+    WorkingVsHead,
+    /// Index vs HEAD (just the staged delta).
+    StagedVsHead,
+    /// Working tree vs index (just the unstaged delta).
+    WorkingVsStaged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitResult {
+    pub oid: String,
+    pub message: String,
+    pub branch: Option<String>,
+}

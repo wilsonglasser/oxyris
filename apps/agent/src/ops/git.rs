@@ -1,11 +1,18 @@
 //! Git op handlers — all powered by `oxyris-git` (git2 under the hood).
 
+use oxyris_git::branch as git_branch;
 use oxyris_git::checkpoint;
-use oxyris_git::types::CheckpointPhase;
+use oxyris_git::conflict as git_conflict;
+use oxyris_git::log as git_log;
+use oxyris_git::remote;
+use oxyris_git::status as git_status;
+use oxyris_git::types::{CheckpointPhase, DiffMode};
 use oxyris_git::worktree;
 use oxyris_ipc::ops::{
-    GitCheckpointCaptureArgs, GitCheckpointCaptureResult, GitCheckpointTurnArgs,
-    GitCreateWorktreeArgs, GitRemoveWorktreeArgs, GitRepoPathArgs,
+    GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCheckpointCaptureArgs,
+    GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCommitArgs, GitConflictPathArgs,
+    GitCreateWorktreeArgs, GitDiffFileArgs, GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs,
+    GitPushArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs,
 };
 
 use super::OpError;
@@ -60,4 +67,100 @@ pub fn checkpoint_diff(args: GitCheckpointTurnArgs) -> Result<serde_json::Value,
 pub fn checkpoint_revert(args: GitCheckpointTurnArgs) -> Result<serde_json::Value, OpError> {
     checkpoint::revert_to_pre(&args.repo_path, &args.session_id, &args.turn_id)?;
     Ok(serde_json::Value::Null)
+}
+
+pub fn status(args: GitRepoPathArgs) -> Result<serde_json::Value, OpError> {
+    let report = git_status::status(&args.repo_path)?;
+    Ok(serde_json::to_value(report)?)
+}
+
+pub fn diff_file(args: GitDiffFileArgs) -> Result<serde_json::Value, OpError> {
+    let mode = parse_mode(&args.mode)?;
+    let diff = git_status::diff_file(&args.repo_path, &args.path, mode)?;
+    Ok(serde_json::to_value(diff)?)
+}
+
+pub fn stage(args: GitPathsArgs) -> Result<serde_json::Value, OpError> {
+    git_status::stage(&args.repo_path, &args.paths)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn unstage(args: GitPathsArgs) -> Result<serde_json::Value, OpError> {
+    git_status::unstage(&args.repo_path, &args.paths)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn commit(args: GitCommitArgs) -> Result<serde_json::Value, OpError> {
+    let result = git_status::commit(&args.repo_path, &args.message, args.amend)?;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub fn fetch(args: GitFetchArgs) -> Result<serde_json::Value, OpError> {
+    let result = remote::fetch(&args.repo_path, args.remote.as_deref())?;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub fn pull(args: GitPullArgs) -> Result<serde_json::Value, OpError> {
+    let result = remote::pull(
+        &args.repo_path,
+        args.remote.as_deref(),
+        args.branch.as_deref(),
+        args.rebase,
+    )?;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub fn push(args: GitPushArgs) -> Result<serde_json::Value, OpError> {
+    let result = remote::push(
+        &args.repo_path,
+        args.remote.as_deref(),
+        args.branch.as_deref(),
+        args.force,
+        args.set_upstream,
+    )?;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub fn checkout(args: GitCheckoutArgs) -> Result<serde_json::Value, OpError> {
+    git_branch::checkout(&args.repo_path, &args.name)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn branch_create(args: GitBranchCreateArgs) -> Result<serde_json::Value, OpError> {
+    git_branch::create_branch(
+        &args.repo_path,
+        &args.name,
+        args.from.as_deref(),
+        args.checkout,
+    )?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn branch_delete(args: GitBranchDeleteArgs) -> Result<serde_json::Value, OpError> {
+    git_branch::delete_branch(&args.repo_path, &args.name)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn log(args: GitLogArgs) -> Result<serde_json::Value, OpError> {
+    let entries = git_log::log(&args.repo_path, args.limit as usize, args.rev.as_deref())?;
+    Ok(serde_json::to_value(entries)?)
+}
+
+pub fn get_conflict(args: GitConflictPathArgs) -> Result<serde_json::Value, OpError> {
+    let c = git_conflict::get_conflict(&args.repo_path, &args.path)?;
+    Ok(serde_json::to_value(c)?)
+}
+
+pub fn resolve(args: GitResolveArgs) -> Result<serde_json::Value, OpError> {
+    git_conflict::resolve(&args.repo_path, &args.path, &args.content)?;
+    Ok(serde_json::Value::Null)
+}
+
+fn parse_mode(s: &str) -> Result<DiffMode, OpError> {
+    match s {
+        "working_vs_head" => Ok(DiffMode::WorkingVsHead),
+        "staged_vs_head" => Ok(DiffMode::StagedVsHead),
+        "working_vs_staged" => Ok(DiffMode::WorkingVsStaged),
+        other => Err(OpError::Git(format!("unknown diff mode: {other}"))),
+    }
 }

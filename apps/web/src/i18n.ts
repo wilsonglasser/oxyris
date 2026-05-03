@@ -4,10 +4,14 @@ import { initReactI18next } from "react-i18next";
 
 import enChat from "~/locales/en/chat.json";
 import enCommon from "~/locales/en/common.json";
+import enFiles from "~/locales/en/files.json";
+import enGit from "~/locales/en/git.json";
 import enProject from "~/locales/en/project.json";
 import enSettings from "~/locales/en/settings.json";
 import ptBRChat from "~/locales/pt-BR/chat.json";
 import ptBRCommon from "~/locales/pt-BR/common.json";
+import ptBRFiles from "~/locales/pt-BR/files.json";
+import ptBRGit from "~/locales/pt-BR/git.json";
 import ptBRProject from "~/locales/pt-BR/project.json";
 import ptBRSettings from "~/locales/pt-BR/settings.json";
 
@@ -27,19 +31,23 @@ void i18n
     fallbackLng: DEFAULT_LOCALE,
     supportedLngs: SUPPORTED_LOCALES as unknown as string[],
     defaultNS: "common",
-    ns: ["common", "project", "chat", "settings"],
+    ns: ["common", "project", "chat", "settings", "files", "git"],
     resources: {
       en: {
         common: enCommon,
         project: enProject,
         chat: enChat,
         settings: enSettings,
+        files: enFiles,
+        git: enGit,
       },
       "pt-BR": {
         common: ptBRCommon,
         project: ptBRProject,
         chat: ptBRChat,
         settings: ptBRSettings,
+        files: ptBRFiles,
+        git: ptBRGit,
       },
     },
     interpolation: { escapeValue: false },

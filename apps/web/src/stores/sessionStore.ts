@@ -72,6 +72,7 @@ function applyEventToSnapshot(
       provider_session_id: null,
       title: null,
       env_mode: event.env_mode,
+      pinned_at: null,
     };
   }
   if (!current) {
@@ -90,6 +91,7 @@ function applyEventToSnapshot(
       provider_session_id: null,
       title: null,
       env_mode: "default",
+      pinned_at: null,
     };
   }
   switch (event.kind) {
@@ -166,6 +168,8 @@ function applyEventToSnapshot(
       return { ...current, status: "running" };
     case "SessionRenamed":
       return { ...current, title: event.title };
+    case "SessionPinToggled":
+      return { ...current, pinned_at: event.pinned_at };
     case "SessionEnvModeChanged":
       return { ...current, env_mode: event.mode };
     case "SessionDeleted":

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use oxyris_core::Environment;
 use serde_json::json;
 
+use crate::infra::path_translator;
+
 /// What we plant on disk so Claude can spawn the Oxyris MCP server.
 pub struct McpSetup {
     /// Absolute path to the JSON config (`--mcp-config <this>`).
@@ -61,13 +63,27 @@ fn mcp_bin_filename() -> &'static str {
 pub fn prepare_for_worktree(
     env: &Environment,
     worktree_root: &str,
+    lsp_bridge_port: Option<u16>,
 ) -> std::io::Result<Option<McpSetup>> {
-    if !matches!(env, Environment::Windows) {
-        return Ok(None);
-    }
     let Some(bin) = resolve_mcp_bin() else {
         tracing::debug!("oxyris-mcp binary not located; skipping MCP config");
         return Ok(None);
+    };
+
+    // For WSL projects, the LSP bridge needs the POSIX path inside the
+    // distro (rust-analyzer running in Linux can't read `\\wsl.localhost`).
+    // The index DB stays Windows-side at `<worktree>/.oxyris/index.db`
+    // because SQLite over 9p is slow/crash-prone — we mount via the
+    // Windows UNC for that one file.
+    let workspace_for_args = match env {
+        Environment::Windows => worktree_root.to_owned(),
+        Environment::Wsl { distro } => match path_translator::to_posix(distro, worktree_root) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, distro, worktree = worktree_root, "mcp: wslpath translation failed; skipping MCP config");
+                return Ok(None);
+            }
+        },
     };
 
     let oxyris_dir = Path::new(worktree_root).join(".oxyris");
@@ -75,11 +91,28 @@ pub fn prepare_for_worktree(
     let index_db = oxyris_dir.join("index.db");
     let config_path = oxyris_dir.join("mcp.json");
 
+    // Build args. `--lsp-bridge` is included only when the desktop's TCP
+    // bridge is actually up — fallback path lets the MCP server spawn its
+    // own LSPs (the pre-bridge behaviour) instead of erroring out.
+    let mut args: Vec<String> = vec![
+        "--index-db".into(),
+        index_db.to_string_lossy().into_owned(),
+        "--workspace".into(),
+        workspace_for_args,
+    ];
+    if let Some(port) = lsp_bridge_port {
+        args.push("--lsp-bridge".into());
+        args.push(format!("tcp://127.0.0.1:{port}"));
+    }
+
     let contents = json!({
         "mcpServers": {
-            "oxyris": {
+            // Capitalized so Claude renders chips as `Oxyris > lsp_hover`,
+            // unambiguously distinct from any other LSP MCP the user might
+            // have registered globally.
+            "Oxyris": {
                 "command": bin.to_string_lossy(),
-                "args": ["--index-db", index_db.to_string_lossy()]
+                "args": args,
             }
         }
     });
@@ -94,8 +127,22 @@ pub fn prepare_for_worktree(
 /// Appended to the system prompt so Claude prefers the MCP tools over Grep
 /// when looking for code symbols. Kept short — tool descriptions carry the
 /// detailed contract.
-const SYSTEM_PROMPT_NUDGE: &str = r#"This project ships an `oxyris` MCP server with a pre-built tree-sitter symbol index. \
-Prefer `oxyris_find_symbol` over Grep when the user mentions a code identifier (function, class, struct, type, etc.) — \
-it returns precise file:line locations across all indexed languages and falls back to a case-insensitive prefix \
-when the exact name isn't found. Use `oxyris_list_symbols` for a file outline before reading large files end-to-end, \
-and `oxyris_project_map` at the start of unfamiliar tasks to orient yourself."#;
+const SYSTEM_PROMPT_NUDGE: &str = r#"This project ships an `Oxyris` MCP server with a tree-sitter symbol index, an LSP bridge, and (when the workspace is a Laravel app) Laravel-aware tools.
+
+For code identifiers (function/class/struct/type names), prefer `oxyris_find_symbol` over Grep — it returns precise file:line locations across all indexed languages and falls back to a case-insensitive prefix when the exact name isn't found. Use `oxyris_list_symbols` for a file outline before reading large files end-to-end, and `oxyris_project_map` at the start of unfamiliar tasks.
+
+When you need semantic accuracy (find every call site including renamed imports / generics / through dynamic dispatch, get an inferred type, or check compiler errors), use the LSP-backed tools:
+- `oxyris_lsp_find_references(file, line, column)` — every reference, computed by rust-analyzer / typescript-language-server / intelephense.
+- `oxyris_lsp_hover(file, line, column)` — type signature and doc comment at a position.
+- `oxyris_lsp_diagnostics(file)` — compiler errors and lints currently open in the file. Run after edits to verify.
+
+When the workspace is a Laravel project (composer.json with `laravel/framework`), the following tools become available — prefer them over Grep when reasoning about route names, config keys, Eloquent models, or Blade views:
+- `oxyris_laravel_routes(name?)` — list HTTP method/URI/controller@action/name plus `{middleware}` chip pulled from `routes/*.php`. Resource/apiResource calls expand into the conventional 7/5 endpoints, and `Route::group(['prefix'=>...,'middleware'=>...], fn)` (array syntax) plus `Route::prefix(...)->group(fn)` (chained) propagate prefixes/middleware to nested routes. Use to verify what `route('...')` resolves to, find a handler, or check what middleware guards a URI.
+- `oxyris_laravel_configs(prefix?)` — top-level keys from `config/*.php`. Use before writing `config('foo.bar')` to confirm the key exists.
+- `oxyris_laravel_models(name?)` — Eloquent class + table + fillable + relations from `app/Models/**`. Use before editing or querying a model so you know its schema and relationship names.
+- `oxyris_laravel_blade_components(name?)` — view dot-notation map. Use to verify what `view('...')` references exist.
+- `oxyris_laravel_observers(name?)` — Eloquent observers from `app/Observers/**` with model + lifecycle hooks (created/updated/deleting/...).
+- `oxyris_laravel_policies(name?)` — authorization policies from `app/Policies/**` with model + abilities (viewAny/view/update/delete/...).
+- `oxyris_laravel_jobs(name?)` — queueable/sync jobs from `app/Jobs/**` with `ShouldQueue` flag and any static `$queue` value.
+
+All layers are valid: tree-sitter is fast/structural, LSP is slow/precise, Laravel tools cover framework-specific magic strings. Use whichever fits."#;

@@ -1,4 +1,74 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* ────── CodeMirror MergeView 50/50 + per-side scroll ──────────────────── */
+/* MergeView root: full height inside its container. */
+.oxyris-diff .cm-mergeView,
+.oxyris-diff .cm-mergeViewEditors {
+  display: flex !important;
+  flex-direction: row !important;
+  height: 100% !important;
+  width: 100% !important;
+  min-width: 0;
+}
+/* Hard 50/50: width:50% + flex:none so neither pane grows past its share. */
+.oxyris-diff .cm-mergeViewEditor {
+  width: 50% !important;
+  max-width: 50% !important;
+  flex: 0 0 50% !important;
+  min-width: 0 !important;
+  height: 100% !important;
+  overflow: hidden !important;
+  box-sizing: border-box;
+}
+.oxyris-diff .cm-mergeViewEditor:first-child {
+  border-right: 1px solid var(--color-neutral-800);
+}
+.oxyris-diff .cm-mergeViewEditor .cm-editor {
+  height: 100% !important;
+}
+.oxyris-diff .cm-mergeViewEditor .cm-scroller {
+  overflow: auto !important;
+}
+/* Subtler change-line tint — JetBrains uses ~6-8% alpha, not 30%. */
+.cm-deletedChunk {
+  background-color: rgba(229, 85, 85, 0.08) !important;
+}
+.cm-changedLine {
+  background-color: rgba(229, 175, 90, 0.07) !important;
+}
+.cm-insertedLine {
+  background-color: rgba(80, 165, 120, 0.08) !important;
+}
+.cm-deletedText {
+  background-color: rgba(229, 85, 85, 0.22) !important;
+  color: #f0c4c4 !important;
+}
+.cm-insertedText {
+  background-color: rgba(80, 165, 120, 0.22) !important;
+  color: #c4e8d2 !important;
+}
+.cm-changedText {
+  background-color: rgba(229, 175, 90, 0.18) !important;
+}
+/* Diff gutter (the change marker column): dark surface, not bright white. */
+.cm-mergeView .cm-changeGutter,
+.cm-mergeView .cm-deletedChunkGutter {
+  background-color: var(--color-neutral-900) !important;
+}
+.cm-mergeView .cm-changedLineGutter {
+  background-color: rgba(229, 175, 90, 0.10) !important;
+}
+.cm-mergeView .cm-deletedLineGutter {
+  background-color: rgba(229, 85, 85, 0.10) !important;
+}
+.cm-mergeView .cm-insertedLineGutter {
+  background-color: rgba(80, 165, 120, 0.10) !important;
+}
+/* Hide the revert arrows — diff is read-only here. */
+.cm-merge-revert {
+  display: none !important;
+}
 
 /*
  * JetBrains "Island Dark"-inspired palette. We override Tailwind's neutral
