@@ -26,6 +26,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Stub WSL agent binary
+        # `tauri.conf.json#bundle.resources` lists `dist/agent/oxyris-agent`,
+        # which `tauri-build` validates at compile time. Regular CI doesn't
+        # cross-compile the real agent (that's the release pipeline) — drop
+        # an empty placeholder so the build proceeds.
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/agent | Out-Null
+          New-Item -ItemType File -Force -Path dist/agent/oxyris-agent | Out-Null
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
