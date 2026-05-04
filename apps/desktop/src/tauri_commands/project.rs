@@ -232,31 +232,103 @@ fn unc_for_root(env: &Environment, root: &str) -> String {
     }
 }
 
-const LOGO_NAMES: &[&str] = &["logo", "icon", "brand", "oxyris", "favicon"];
+/// Stems matched against the file's basename (case-insensitive). A file
+/// counts as a logo when its basename equals `<stem>` exactly OR starts
+/// with `<stem>` followed by `-` / `_` (so `favicon-128.png`,
+/// `app_icon-512x512.png`, `logo-dark.svg` all match).
+const LOGO_STEMS: &[&str] = &[
+    "logo",
+    "icon",
+    "brand",
+    "oxyris",
+    "favicon",
+    "appicon",
+    "app-icon",
+    "app_icon",
+    "project-logo",
+    "project-icon",
+    "banner",
+    "header",
+];
 const LOGO_EXTS: &[&str] = &["svg", "png", "webp", "jpg", "jpeg", "ico"];
-const LOGO_DIRS: &[&str] = &["", "assets", "public", "static", "docs", ".github"];
+const LOGO_DIRS: &[&str] = &[
+    "",
+    "assets",
+    "public",
+    "static",
+    "docs",
+    "resources",
+    ".github",
+    "src/assets",
+    "src-tauri/icons",
+];
 
 fn autodetect_logo_under(root: &std::path::Path) -> Option<String> {
+    // Visit dirs in priority order. Within a dir, prefer SVG > PNG > WebP >
+    // JPG > ICO when multiple files match the same stem.
+    let mut best: Option<(usize, std::path::PathBuf)> = None;
+
     for dir in LOGO_DIRS {
         let base = if dir.is_empty() {
             root.to_path_buf()
         } else {
             root.join(dir)
         };
-        if !base.exists() {
+        let Ok(entries) = std::fs::read_dir(&base) else {
             continue;
-        }
-        for name in LOGO_NAMES {
-            for ext in LOGO_EXTS {
-                let candidate = base.join(format!("{name}.{ext}"));
-                if candidate.is_file() {
-                    let rel = candidate.strip_prefix(root).unwrap_or(&candidate);
-                    return Some(rel.to_string_lossy().replace('\\', "/"));
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let lower = file_name.to_ascii_lowercase();
+            let Some((stem, ext)) = lower.rsplit_once('.') else {
+                continue;
+            };
+            let ext_rank = match LOGO_EXTS.iter().position(|e| *e == ext) {
+                Some(i) => i,
+                None => continue,
+            };
+            // Stem matches if it equals one of LOGO_STEMS exactly OR starts
+            // with one of them followed by `-` / `_`.
+            let matched = LOGO_STEMS.iter().any(|wanted| {
+                if stem == *wanted {
+                    return true;
                 }
+                if let Some(rest) = stem.strip_prefix(*wanted) {
+                    return rest.starts_with('-') || rest.starts_with('_');
+                }
+                false
+            });
+            if !matched {
+                continue;
+            }
+            // Lower rank = higher priority (svg=0 best). Replace when we
+            // beat the current best AND we didn't already lock onto an
+            // earlier directory.
+            if best
+                .as_ref()
+                .map(|(prev_rank, _)| ext_rank < *prev_rank)
+                .unwrap_or(true)
+            {
+                best = Some((ext_rank, path));
             }
         }
+        if best.is_some() {
+            // First directory with any hit wins — directories are listed
+            // in priority order.
+            break;
+        }
     }
-    None
+
+    best.map(|(_, path)| {
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        rel.to_string_lossy().replace('\\', "/")
+    })
 }
 
 #[derive(Debug, Deserialize)]

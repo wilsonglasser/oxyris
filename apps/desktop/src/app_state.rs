@@ -11,7 +11,7 @@ use chrono::Utc;
 use oxyris_claude::ClaudeProvider;
 use oxyris_core::{Aggregate, replay};
 use oxyris_provider::ProviderRegistry;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use thiserror::Error;
 
 use crate::domain::session::{Session, SessionCommand, SessionEvent};
@@ -74,6 +74,16 @@ impl AppState {
     /// Initialize the application state under the user's data directory,
     /// creating the directory if it doesn't exist yet.
     pub fn initialize(app: AppHandle, data_dir: PathBuf) -> Result<Self, AppStateError> {
+        // Resolve where the bundled agent lives in the installed app —
+        // Tauri stages `bundle.resources` into `<install>/resources/`, so
+        // `app.path().resource_dir()` + the bundle key gives us a stable
+        // production location. Falls through to the dev/env-var resolver
+        // below when running unbundled.
+        let bundled_agent = app
+            .path()
+            .resource_dir()
+            .ok()
+            .map(|r| r.join("agent").join("oxyris-agent"));
         std::fs::create_dir_all(&data_dir)?;
         let logs_dir = data_dir.join("logs");
         let log_guard = observability::install(&logs_dir).map_err(AppStateError::Io)?;
@@ -91,13 +101,17 @@ impl AppState {
         // of O(total_events).
         reconcile_stopped_sessions_from_projection(&event_store, &projections)?;
 
-        // Linux musl build of the agent. Defaults to the dev location; set
-        // `OXYRIS_AGENT_BIN_PATH` in production installs to the MSI-shipped
-        // copy under `%LOCALAPPDATA%\oxyris\agent\oxyris-agent`.
-        let default_agent_path = data_dir
-            .parent()
-            .map(|p| p.join("agent").join("oxyris-agent"))
-            .unwrap_or_else(|| data_dir.join("oxyris-agent"));
+        // Linux musl build of the agent. Resolution order:
+        //  1. `OXYRIS_AGENT_BIN_PATH` env var (always wins — dev override).
+        //  2. Bundled resource path under the Tauri install dir.
+        //  3. Dev fallback: `dist/agent/oxyris-agent` walked up from the exe.
+        //  4. Last-resort: `<data_dir>/agent/oxyris-agent` (legacy).
+        let default_agent_path = bundled_agent.unwrap_or_else(|| {
+            data_dir
+                .parent()
+                .map(|p| p.join("agent").join("oxyris-agent"))
+                .unwrap_or_else(|| data_dir.join("oxyris-agent"))
+        });
         let host_agent_path = AgentPool::resolve_host_agent_path(default_agent_path);
         let agent_pool = Arc::new(AgentPool::new(host_agent_path));
 

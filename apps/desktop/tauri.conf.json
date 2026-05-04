@@ -54,6 +54,9 @@
     ],
     "publisher": "Oxyris",
     "category": "DeveloperTool",
+    "resources": {
+      "../../dist/agent/oxyris-agent": "agent/oxyris-agent"
+    },
     "shortDescription": "Desktop coding agent for Windows + WSL",
     "longDescription": "Multi-session, multi-worktree Claude desktop client with first-class WSL support.",
     "copyright": "Oxyris Contributors",
