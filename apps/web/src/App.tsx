@@ -169,7 +169,12 @@ export function App() {
 
   const center = active ? (
     <div className="flex items-center gap-2">
-      <ProjectBadge name={active.name} size={16} />
+      <ProjectBadge
+        name={active.name}
+        projectId={active.id}
+        logoPath={active.logo_path}
+        size={16}
+      />
       <span className="text-neutral-200">{active.name}</span>
     </div>
   ) : null;

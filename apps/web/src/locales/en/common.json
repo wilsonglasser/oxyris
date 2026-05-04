@@ -61,7 +61,13 @@
     "worktrees_heading": "Worktrees",
     "worktrees_help": "Each worktree is a separate working tree on disk on its own branch. Use them to run multiple parallel sessions on the same project without stepping on each other.",
     "new_worktree_prompt": "Branch name (new or existing):",
-    "remove_confirm": "Remove worktree \"{{name}}\"? The directory will be deleted from disk."
+    "remove_confirm": "Remove worktree \"{{name}}\"? The directory will be deleted from disk.",
+    "logo_heading": "Logo",
+    "logo_help": "Pick an image file or let Oxyris auto-detect a logo from common locations (logo.png, assets/logo.svg, public/icon.png, etc).",
+    "logo_pick": "Pick file…",
+    "logo_autodetect": "Auto-detect",
+    "logo_clear": "Clear",
+    "logo_autodetect_empty": "No logo found in common locations. Pick a file manually."
   },
   "language": {
     "label": "Language",

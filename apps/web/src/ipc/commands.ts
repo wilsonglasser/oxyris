@@ -21,10 +21,30 @@ export type ProjectRow = {
   name: string;
   environment: Environment;
   root_path: string;
+  logo_path: string | null;
   session_count: number;
   created_at: string;
   last_activity_at: string;
 };
+
+export async function projectSetLogo(input: {
+  id: string;
+  logo_path?: string | null;
+}): Promise<void> {
+  await invoke("project_set_logo", { input });
+}
+
+export async function projectAutodetectLogo(input: {
+  id: string;
+}): Promise<{ logo_path: string | null }> {
+  return invoke("project_autodetect_logo", { input });
+}
+
+export async function projectLogoBytes(input: {
+  id: string;
+}): Promise<{ bytes_b64: string; mime: string } | null> {
+  return invoke("project_logo_bytes", { input });
+}
 
 export type ProjectError =
   | { code: "domain"; message: string }

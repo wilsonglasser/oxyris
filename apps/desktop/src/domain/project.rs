@@ -22,6 +22,10 @@ pub struct ProjectData {
     pub name: String,
     pub environment: Environment,
     pub root_path: String,
+    /// Optional logo — either a path relative to `root_path` (e.g.
+    /// `assets/logo.png`) or `None` when no custom logo is set.
+    #[serde(default)]
+    pub logo_path: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -36,6 +40,10 @@ pub enum ProjectCommand {
     },
     Rename {
         new_name: String,
+    },
+    SetLogo {
+        /// `None` clears any existing logo override.
+        logo_path: Option<String>,
     },
     Delete,
 }
@@ -57,6 +65,9 @@ pub enum ProjectEvent {
     ProjectRenamed {
         new_name: String,
     },
+    ProjectLogoSet {
+        logo_path: Option<String>,
+    },
     ProjectDeleted,
 }
 
@@ -65,6 +76,7 @@ impl DomainEvent for ProjectEvent {
         match self {
             Self::ProjectCreated { .. } => "ProjectCreated",
             Self::ProjectRenamed { .. } => "ProjectRenamed",
+            Self::ProjectLogoSet { .. } => "ProjectLogoSet",
             Self::ProjectDeleted => "ProjectDeleted",
         }
     }
@@ -136,6 +148,17 @@ impl Aggregate for Project {
                 }
                 Ok(vec![ProjectEvent::ProjectRenamed { new_name }])
             }
+            ProjectCommand::SetLogo { logo_path } => {
+                let current = state.inner.as_ref().ok_or(ProjectError::NotFound)?;
+                let trimmed = logo_path.as_ref().map(|s| s.trim().to_owned());
+                let normalized = trimmed.filter(|s| !s.is_empty());
+                if normalized == current.logo_path {
+                    return Ok(vec![]);
+                }
+                Ok(vec![ProjectEvent::ProjectLogoSet {
+                    logo_path: normalized,
+                }])
+            }
             ProjectCommand::Delete => {
                 if state.inner.is_none() {
                     return Err(ProjectError::NotFound);
@@ -159,12 +182,18 @@ impl Aggregate for Project {
                     name: name.clone(),
                     environment: environment.clone(),
                     root_path: root_path.clone(),
+                    logo_path: None,
                     created_at: *created_at,
                 });
             }
             ProjectEvent::ProjectRenamed { new_name } => {
                 if let Some(data) = state.inner.as_mut() {
                     data.name = new_name.clone();
+                }
+            }
+            ProjectEvent::ProjectLogoSet { logo_path } => {
+                if let Some(data) = state.inner.as_mut() {
+                    data.logo_path = logo_path.clone();
                 }
             }
             ProjectEvent::ProjectDeleted => {

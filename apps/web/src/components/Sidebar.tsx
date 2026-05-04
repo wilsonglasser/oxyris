@@ -389,7 +389,12 @@ function ProjectItem({
           onClick={onSelectProject}
           className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left"
         >
-          <ProjectBadge name={project.name} size={18} />
+          <ProjectBadge
+            name={project.name}
+            projectId={project.id}
+            logoPath={project.logo_path}
+            size={18}
+          />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-[12px] font-medium">
               {project.name}

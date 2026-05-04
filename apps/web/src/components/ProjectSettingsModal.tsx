@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { GitBranch, Plus, Star, X } from "lucide-react";
+import {
+  GitBranch,
+  Image as ImageIcon,
+  Plus,
+  Sparkles,
+  Star,
+  Trash2,
+  X,
+} from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import {
+  projectAutodetectLogo,
+  projectSetLogo,
+} from "~/ipc/commands.ts";
 import {
   type WorktreeRow,
   WorktreeCommandError,
@@ -10,6 +23,7 @@ import {
 } from "~/ipc/worktree.ts";
 import { runAutoActionsOnWorktreeCreate } from "~/lib/runAutoActions.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
+import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 
 interface Props {
   projectId: string;
@@ -94,7 +108,9 @@ export function ProjectSettingsModal({ projectId, onClose: _onClose }: Props) {
       </header>
 
       <div className="flex-1 overflow-y-auto px-5 py-4">
-        <section>
+        <LogoSection projectId={projectId} />
+
+        <section className="mt-6">
           <div className="mb-1.5 flex items-center justify-between">
             <h3 className="text-[12px] font-medium uppercase tracking-wider text-neutral-400">
               {t("project_settings_modal.worktrees_heading")}
@@ -188,4 +204,127 @@ function formatErr(e: unknown): string {
     return e.message;
   }
   return e instanceof Error ? e.message : String(e);
+}
+
+function LogoSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation("common");
+  const project = useProjectStore((s) =>
+    s.projects.find((p) => p.id === projectId),
+  );
+  const refreshProjects = useProjectStore((s) => s.refresh);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!project) return null;
+
+  const apply = async (logoPath: string | null) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await projectSetLogo({ id: projectId, logo_path: logoPath });
+      await refreshProjects();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPickFile = async () => {
+    setError(null);
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "webp", "svg", "ico", "gif"],
+          },
+        ],
+      });
+      if (typeof picked === "string") {
+        await apply(picked);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onAutodetect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await projectAutodetectLogo({ id: projectId });
+      if (!res.logo_path) {
+        setError(t("project_settings_modal.logo_autodetect_empty"));
+      } else {
+        await apply(res.logo_path);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section>
+      <h3 className="mb-1.5 text-[12px] font-medium uppercase tracking-wider text-neutral-400">
+        {t("project_settings_modal.logo_heading")}
+      </h3>
+      <p className="mb-3 text-[11px] text-neutral-500">
+        {t("project_settings_modal.logo_help")}
+      </p>
+      <div className="flex items-center gap-3">
+        <ProjectBadge
+          name={project.name}
+          projectId={projectId}
+          logoPath={project.logo_path}
+          size={48}
+        />
+        <div className="flex flex-col gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => void onPickFile()}
+              disabled={busy}
+              className="inline-flex items-center gap-1 rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 text-[11px] text-neutral-200 enabled:hover:bg-neutral-800 disabled:opacity-40"
+            >
+              <ImageIcon className="size-3" strokeWidth={2} />
+              {t("project_settings_modal.logo_pick")}
+            </button>
+            <button
+              type="button"
+              onClick={() => void onAutodetect()}
+              disabled={busy}
+              className="inline-flex items-center gap-1 rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 text-[11px] text-neutral-200 enabled:hover:bg-neutral-800 disabled:opacity-40"
+            >
+              <Sparkles className="size-3 text-amber-300" strokeWidth={2} />
+              {t("project_settings_modal.logo_autodetect")}
+            </button>
+            {project.logo_path && (
+              <button
+                type="button"
+                onClick={() => void apply(null)}
+                disabled={busy}
+                className="inline-flex items-center gap-1 rounded-md border border-red-900/50 bg-red-950/20 px-2.5 py-1 text-[11px] text-red-300 enabled:hover:bg-red-900/30 disabled:opacity-40"
+              >
+                <Trash2 className="size-3" strokeWidth={2} />
+                {t("project_settings_modal.logo_clear")}
+              </button>
+            )}
+          </div>
+          {project.logo_path && (
+            <code className="text-[10px] text-neutral-500">
+              {project.logo_path}
+            </code>
+          )}
+          {error && (
+            <p className="text-[10px] text-red-300">{error}</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
 }

@@ -61,7 +61,13 @@
     "worktrees_heading": "Worktrees",
     "worktrees_help": "Cada worktree é um diretório de trabalho separado em disco em sua própria branch. Use-os para rodar várias sessões paralelas no mesmo projeto sem se sobrepor.",
     "new_worktree_prompt": "Nome da branch (nova ou existente):",
-    "remove_confirm": "Remover worktree \"{{name}}\"? O diretório será apagado do disco."
+    "remove_confirm": "Remover worktree \"{{name}}\"? O diretório será apagado do disco.",
+    "logo_heading": "Logo",
+    "logo_help": "Escolha um arquivo de imagem ou deixe o Oxyris detectar logo nos lugares comuns (logo.png, assets/logo.svg, public/icon.png etc).",
+    "logo_pick": "Escolher arquivo…",
+    "logo_autodetect": "Detectar automaticamente",
+    "logo_clear": "Remover",
+    "logo_autodetect_empty": "Nenhum logo encontrado nos lugares comuns. Escolha um arquivo manualmente."
   },
   "language": {
     "label": "Idioma",

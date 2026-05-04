@@ -36,6 +36,8 @@ pub struct ProjectRow {
     pub name: String,
     pub environment: Environment,
     pub root_path: String,
+    #[serde(default)]
+    pub logo_path: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub session_count: u32,
@@ -135,6 +137,7 @@ impl Projections {
             "ALTER TABLE projections_actions ADD COLUMN icon TEXT",
             "ALTER TABLE projections_actions ADD COLUMN action_kind TEXT",
             "ALTER TABLE projections_actions ADD COLUMN show_in_sidebar INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE projections_projects ADD COLUMN logo_path TEXT",
         ] {
             if let Err(e) = conn.execute(alter, []) {
                 let msg = e.to_string().to_ascii_lowercase();
@@ -302,6 +305,18 @@ impl Projections {
                     ],
                 )?;
             }
+            ProjectEvent::ProjectLogoSet { logo_path } => {
+                conn.execute(
+                    "UPDATE projections_projects
+                        SET logo_path = ?1, last_activity_at = ?2
+                      WHERE id = ?3",
+                    params![
+                        logo_path,
+                        stored.timestamp.to_rfc3339(),
+                        stored.aggregate_id.to_string(),
+                    ],
+                )?;
+            }
             ProjectEvent::ProjectDeleted => {
                 conn.execute(
                     "DELETE FROM projections_projects WHERE id = ?1",
@@ -316,7 +331,7 @@ impl Projections {
         let conn = self.conn.lock().expect("projections mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, name, environment_kind, environment_distro, root_path,
-                    session_count, created_at, last_activity_at
+                    session_count, created_at, last_activity_at, logo_path
                FROM projections_projects
               ORDER BY last_activity_at DESC",
         )?;
@@ -797,11 +812,13 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
             })
     };
 
+    let logo_path: Option<String> = row.get(8).unwrap_or(None);
     Ok(ProjectRow {
         id: AggregateId(id),
         name: row.get(1)?,
         environment,
         root_path: row.get(4)?,
+        logo_path,
         session_count: row.get(5)?,
         created_at: parse_ts(6, &created_text)?,
         last_activity_at: parse_ts(7, &activity_text)?,
