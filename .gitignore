@@ -9,6 +9,8 @@ dist/
 dist-ssr/
 *.local
 .cache/
+CLAUDE.md
+.claude
 
 # Tauri
 /apps/desktop/gen/
@@ -41,6 +43,3 @@ yarn-error.log*
 # Regenerated automatically when a worktree is opened.
 /.oxyris/
 **/.oxyris/
-
-# Local manual-test scratch files.
-teste.txt
