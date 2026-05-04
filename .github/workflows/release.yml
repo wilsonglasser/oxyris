@@ -89,11 +89,12 @@ jobs:
       - name: Build desktop (release + bundle)
         run: bun x tauri build
         env:
-          # Tauri reads the signing keys from env. Leaving them unset
-          # produces an unsigned build — fine for first release; we'll
-          # wire Azure Trusted Signing once the cert is procured.
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Updater signing keys (minisign keypair generated via
+          # `bun x tauri signer generate`). Public key lives in
+          # `tauri.conf.json#plugins.updater.pubkey`; private key +
+          # optional password are GH repo secrets.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Collect installers
         shell: pwsh

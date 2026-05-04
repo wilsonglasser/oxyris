@@ -79,9 +79,9 @@
       "active": true,
       "dialog": false,
       "endpoints": [
-        "https://github.com/oxyris-code/oxyris/releases/latest/download/latest.json"
+        "https://github.com/wilsonglasser/oxyris/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_REAL_KEY_FROM_`tauri signer generate`"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1RkVBNUE4OENCNUI0NzkKUldSNXRMV01xS1greFhZYTRsYVR3WTJtWHlteG91VG9UMzNPS1hYN0tZS0VlbHEyV0pZd1M0N0QK"
     }
   }
 }
