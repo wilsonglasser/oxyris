@@ -20,6 +20,7 @@ interface State {
     auto_run_on_worktree_create: boolean;
     icon: string;
     kind: ActionKind;
+    show_in_sidebar?: boolean;
   }) => Promise<ActionRow>;
   remove: (projectId: string, id: string) => Promise<void>;
 }

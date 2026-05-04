@@ -77,7 +77,6 @@ import {
   sessionSetEnvMode,
 } from "~/ipc/env.ts";
 import { CodeBlock } from "~/components/CodeBlock.tsx";
-import { ProjectActionsBar } from "~/components/ProjectActionsBar.tsx";
 import { ToolCallView } from "~/components/ToolCallView.tsx";
 import { TurnDiffView } from "~/components/TurnDiff.tsx";
 
@@ -551,13 +550,6 @@ export function ChatPanel({
               </>
             );
           })()}
-          <ProjectActionsBar
-            projectId={project.id}
-            sessionId={activeId}
-            onShowTerminal={
-              onToggleTerminal && !terminalOpen ? onToggleTerminal : undefined
-            }
-          />
         </div>
         <div className="flex items-center gap-1">
           {onToggleTerminal && activeSnapshot && (

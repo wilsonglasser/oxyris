@@ -134,6 +134,7 @@ impl Projections {
             "ALTER TABLE projections_sessions ADD COLUMN pinned_at TEXT",
             "ALTER TABLE projections_actions ADD COLUMN icon TEXT",
             "ALTER TABLE projections_actions ADD COLUMN action_kind TEXT",
+            "ALTER TABLE projections_actions ADD COLUMN show_in_sidebar INTEGER NOT NULL DEFAULT 1",
         ] {
             if let Err(e) = conn.execute(alter, []) {
                 let msg = e.to_string().to_ascii_lowercase();
@@ -496,14 +497,15 @@ impl Projections {
                 auto_run_on_worktree_create,
                 icon,
                 kind,
+                show_in_sidebar,
                 created_at,
             } => {
                 conn.execute(
                     "INSERT OR REPLACE INTO projections_actions
                         (id, project_id, name, command, keybinding,
                          auto_run_on_worktree_create, icon, action_kind,
-                         created_at, updated_at, removed_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, NULL)",
+                         show_in_sidebar, created_at, updated_at, removed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, NULL)",
                     params![
                         id.to_string(),
                         project_id.to_string(),
@@ -513,6 +515,7 @@ impl Projections {
                         if *auto_run_on_worktree_create { 1 } else { 0 },
                         icon,
                         kind,
+                        if *show_in_sidebar { 1 } else { 0 },
                         created_at.to_rfc3339(),
                     ],
                 )?;
@@ -524,6 +527,7 @@ impl Projections {
                 auto_run_on_worktree_create,
                 icon,
                 kind,
+                show_in_sidebar,
                 updated_at,
             } => {
                 conn.execute(
@@ -534,8 +538,9 @@ impl Projections {
                             auto_run_on_worktree_create = ?4,
                             icon = ?5,
                             action_kind = ?6,
-                            updated_at = ?7
-                      WHERE id = ?8",
+                            show_in_sidebar = ?7,
+                            updated_at = ?8
+                      WHERE id = ?9",
                     params![
                         name,
                         command,
@@ -543,6 +548,7 @@ impl Projections {
                         if *auto_run_on_worktree_create { 1 } else { 0 },
                         icon,
                         kind,
+                        if *show_in_sidebar { 1 } else { 0 },
                         updated_at.to_rfc3339(),
                         stored.aggregate_id.to_string(),
                     ],
@@ -567,6 +573,7 @@ impl Projections {
                     auto_run_on_worktree_create,
                     COALESCE(icon, 'Terminal') AS icon,
                     COALESCE(action_kind, 'terminal_command') AS action_kind,
+                    COALESCE(show_in_sidebar, 1) AS show_in_sidebar,
                     created_at, updated_at
                FROM projections_actions
               WHERE project_id = ?1 AND removed_at IS NULL
@@ -587,6 +594,7 @@ pub struct ActionRow {
     pub auto_run_on_worktree_create: bool,
     pub icon: String,
     pub kind: String,
+    pub show_in_sidebar: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -612,8 +620,9 @@ fn row_to_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRow> {
     let auto_run_flag: i64 = row.get(5)?;
     let icon: String = row.get(6)?;
     let kind: String = row.get(7)?;
-    let created_text: String = row.get(8)?;
-    let updated_text: String = row.get(9)?;
+    let show_flag: i64 = row.get(8)?;
+    let created_text: String = row.get(9)?;
+    let updated_text: String = row.get(10)?;
     Ok(ActionRow {
         id: parse_id(0)?,
         project_id: parse_id(1)?,
@@ -623,8 +632,9 @@ fn row_to_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRow> {
         auto_run_on_worktree_create: auto_run_flag != 0,
         icon,
         kind,
-        created_at: parse_ts(8, &created_text)?,
-        updated_at: parse_ts(9, &updated_text)?,
+        show_in_sidebar: show_flag != 0,
+        created_at: parse_ts(9, &created_text)?,
+        updated_at: parse_ts(10, &updated_text)?,
     })
 }
 

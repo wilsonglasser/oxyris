@@ -27,6 +27,13 @@ export function ActionEditModal({ projectId, row, onClose }: Props) {
   const [command, setCommand] = useState(row?.command ?? "");
   const [icon, setIcon] = useState(row?.icon ?? "Terminal");
   const [kind, setKind] = useState<ActionKind>(row?.kind ?? "terminal_command");
+  const [keybinding, setKeybinding] = useState(row?.keybinding ?? "");
+  const [autoRun, setAutoRun] = useState(
+    row?.auto_run_on_worktree_create ?? false,
+  );
+  const [showInSidebar, setShowInSidebar] = useState(
+    row?.show_in_sidebar ?? true,
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -45,10 +52,11 @@ export function ActionEditModal({ projectId, row, onClose }: Props) {
         project_id: projectId,
         name: name.trim(),
         command,
-        keybinding: null,
-        auto_run_on_worktree_create: false,
+        keybinding: keybinding.trim() || null,
+        auto_run_on_worktree_create: autoRun,
         icon,
         kind,
+        show_in_sidebar: showInSidebar,
       });
       onClose();
     } catch (e) {
@@ -147,6 +155,49 @@ export function ActionEditModal({ projectId, row, onClose }: Props) {
             onClose={() => setPickerOpen(false)}
           />
         )}
+
+        <label className="mt-3 block text-[11px] text-neutral-400">
+          {t("keybinding")}
+        </label>
+        <input
+          type="text"
+          value={keybinding}
+          onChange={(e) => setKeybinding(e.target.value)}
+          placeholder="Ctrl+Shift+B"
+          className="mt-1 w-full rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-[12px] text-neutral-100 outline-none focus:ring-1 focus:ring-neutral-700"
+        />
+        <p className="mt-1 text-[10px] text-neutral-500">
+          {t("keybinding_hint")}
+        </p>
+
+        <div className="mt-3 flex items-center gap-2">
+          <input
+            id="action-show-in-sidebar"
+            type="checkbox"
+            checked={showInSidebar}
+            onChange={(e) => setShowInSidebar(e.target.checked)}
+            className="h-3 w-3 accent-emerald-600"
+          />
+          <label
+            htmlFor="action-show-in-sidebar"
+            className="text-[11px] text-neutral-300"
+          >
+            {t("show_in_sidebar")}
+          </label>
+        </div>
+
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            id="action-auto-run"
+            type="checkbox"
+            checked={autoRun}
+            onChange={(e) => setAutoRun(e.target.checked)}
+            className="h-3 w-3 accent-emerald-600"
+          />
+          <label htmlFor="action-auto-run" className="text-[11px] text-neutral-300">
+            {t("auto_run_on_worktree_create")}
+          </label>
+        </div>
 
         {error && (
           <div className="mt-3 text-[11px] text-red-400" role="alert">

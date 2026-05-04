@@ -30,17 +30,61 @@ export function ActionRunsModal({ actionId, actionName, onMinimize }: Props) {
 
   if (!active) return null;
 
+  const multi = runs.length > 1;
+
   return (
     <div className="fixed bottom-2 right-12 z-30 flex h-[55vh] w-[60vw] max-w-3xl flex-col rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl">
-      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 px-2 text-[12px]">
-        <span className="flex items-center gap-1.5 text-neutral-200">
-          <StatusDot status={active.status} />
-          <span className="truncate">{actionName}</span>
-        </span>
-        <span className="ml-2 text-[10px] text-neutral-500">
-          {labelForStatus(active.status, t)}
-        </span>
-        <div className="ml-auto flex items-center gap-0.5">
+      <div className="flex h-9 shrink-0 items-stretch border-b border-neutral-800 text-[12px]">
+        {multi ? (
+          <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
+            {runs.map((r, i) => {
+              const isActive = r.runId === active.runId;
+              return (
+                <div
+                  key={r.runId}
+                  className={`group flex shrink-0 items-center gap-1.5 border-r border-neutral-800 pl-3 pr-1 ${
+                    isActive
+                      ? "bg-neutral-900 text-neutral-100"
+                      : "text-neutral-400 hover:bg-neutral-900/50 hover:text-neutral-200"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab(actionId, r.runId)}
+                    className="flex items-center gap-1.5"
+                    title={`${actionName} #${i + 1} · ${new Date(r.startedAt).toLocaleString()}`}
+                  >
+                    <StatusDot status={r.status} />
+                    <span>
+                      {actionName}
+                      <span className="ml-1 text-neutral-500">#{i + 1}</span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => killRun(actionId, r.runId)}
+                    className="rounded p-0.5 text-neutral-500 hover:bg-red-900/40 hover:text-red-300"
+                    title={t("kill")}
+                    aria-label={t("kill")}
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 px-3">
+            <StatusDot status={active.status} />
+            <span className="truncate text-neutral-200">{actionName}</span>
+            {active.status.kind !== "running" && (
+              <span className="text-[10px] text-neutral-500">
+                {labelForStatus(active.status, t)}
+              </span>
+            )}
+          </div>
+        )}
+        <div className="flex shrink-0 items-center gap-0.5 border-l border-neutral-800 px-1">
           <button
             type="button"
             onClick={onMinimize}
@@ -50,41 +94,19 @@ export function ActionRunsModal({ actionId, actionName, onMinimize }: Props) {
           >
             <Minus size={13} />
           </button>
-          <button
-            type="button"
-            onClick={() => killRun(actionId, active.runId)}
-            className="rounded p-1 text-neutral-400 hover:bg-red-900/40 hover:text-red-300"
-            title={t("kill")}
-            aria-label={t("kill")}
-          >
-            <X size={13} />
-          </button>
+          {!multi && (
+            <button
+              type="button"
+              onClick={() => killRun(actionId, active.runId)}
+              className="rounded p-1 text-neutral-400 hover:bg-red-900/40 hover:text-red-300"
+              title={t("kill")}
+              aria-label={t("kill")}
+            >
+              <X size={13} />
+            </button>
+          )}
         </div>
       </div>
-
-      {runs.length > 1 && (
-        <div className="flex h-7 shrink-0 items-stretch overflow-x-auto border-b border-neutral-800 text-[11px]">
-          {runs.map((r, i) => {
-            const isActive = r.runId === active.runId;
-            return (
-              <button
-                key={r.runId}
-                type="button"
-                onClick={() => setActiveTab(actionId, r.runId)}
-                className={`flex shrink-0 items-center gap-1 border-r border-neutral-800 px-3 ${
-                  isActive
-                    ? "bg-neutral-900 text-neutral-100"
-                    : "text-neutral-400 hover:bg-neutral-900/50 hover:text-neutral-200"
-                }`}
-                title={new Date(r.startedAt).toLocaleString()}
-              >
-                <StatusDot status={r.status} small />
-                #{i + 1}
-              </button>
-            );
-          })}
-        </div>
-      )}
 
       <RunOutput run={active} />
     </div>

@@ -12,6 +12,7 @@ export type ActionRow = {
   auto_run_on_worktree_create: boolean;
   icon: string;
   kind: ActionKind;
+  show_in_sidebar: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -31,6 +32,7 @@ export async function actionUpsert(input: {
   auto_run_on_worktree_create: boolean;
   icon: string;
   kind: ActionKind;
+  show_in_sidebar?: boolean;
 }): Promise<ActionRow> {
   return invoke("action_upsert", { input });
 }

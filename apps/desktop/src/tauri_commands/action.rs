@@ -52,6 +52,8 @@ pub struct ActionUpsertInput {
     pub icon: String,
     #[serde(default = "default_kind")]
     pub kind: String,
+    #[serde(default = "default_show")]
+    pub show_in_sidebar: bool,
 }
 
 fn default_icon() -> String {
@@ -60,6 +62,10 @@ fn default_icon() -> String {
 
 fn default_kind() -> String {
     "terminal_command".into()
+}
+
+fn default_show() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +106,7 @@ pub fn action_upsert(
                     auto_run_on_worktree_create: input.auto_run_on_worktree_create,
                     icon: input.icon,
                     kind: input.kind,
+                    show_in_sidebar: input.show_in_sidebar,
                     now,
                 },
             )
@@ -117,6 +124,7 @@ pub fn action_upsert(
                     auto_run_on_worktree_create: input.auto_run_on_worktree_create,
                     icon: input.icon,
                     kind: input.kind,
+                    show_in_sidebar: input.show_in_sidebar,
                     now,
                 },
             )

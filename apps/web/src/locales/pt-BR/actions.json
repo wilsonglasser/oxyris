@@ -28,5 +28,13 @@
   "kill": "Matar (fechar)",
   "icon_change": "trocar",
   "icon_picker_search": "Buscar ícones…",
-  "icon_picker_empty": "Nenhum ícone encontrado."
+  "icon_picker_empty": "Nenhum ícone encontrado.",
+  "keybinding": "Atalho",
+  "keybinding_hint": "ex: Ctrl+Shift+B / Mod+R. Dispara só sem input em foco.",
+  "show_in_sidebar": "Mostrar ícone na sidebar",
+  "auto_run_on_worktree_create": "Executar automaticamente ao criar worktree",
+  "all_actions": "Todas as ações",
+  "no_actions_yet": "Nenhuma ação ainda — crie uma com Nova ação.",
+  "hidden": "oculta",
+  "auto_run_short": "auto-run"
 }

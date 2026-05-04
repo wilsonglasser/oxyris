@@ -35,6 +35,10 @@ pub struct ActionData {
     /// `github_workflow` (shells out to `gh workflow run`).
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// When false, the action only fires via shortcut / auto-run / list
+    /// modal — its icon is hidden from the right sidebar.
+    #[serde(default = "default_true")]
+    pub show_in_sidebar: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub removed_at: Option<DateTime<Utc>>,
@@ -48,6 +52,10 @@ fn default_kind() -> String {
     "terminal_command".into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone)]
 pub enum ActionCommand {
     Register {
@@ -59,6 +67,7 @@ pub enum ActionCommand {
         auto_run_on_worktree_create: bool,
         icon: String,
         kind: String,
+        show_in_sidebar: bool,
         now: DateTime<Utc>,
     },
     Update {
@@ -68,6 +77,7 @@ pub enum ActionCommand {
         auto_run_on_worktree_create: bool,
         icon: String,
         kind: String,
+        show_in_sidebar: bool,
         now: DateTime<Utc>,
     },
     Remove {
@@ -94,6 +104,8 @@ pub enum ActionEvent {
         // events.
         #[serde(default = "default_kind", rename = "action_kind")]
         kind: String,
+        #[serde(default = "default_true")]
+        show_in_sidebar: bool,
         created_at: DateTime<Utc>,
     },
     ActionUpdated {
@@ -105,6 +117,8 @@ pub enum ActionEvent {
         icon: String,
         #[serde(default = "default_kind", rename = "action_kind")]
         kind: String,
+        #[serde(default = "default_true")]
+        show_in_sidebar: bool,
         updated_at: DateTime<Utc>,
     },
     ActionRemoved {
@@ -152,6 +166,7 @@ impl Aggregate for Action {
                 auto_run_on_worktree_create,
                 icon,
                 kind,
+                show_in_sidebar,
                 now,
             } => {
                 if state.inner.is_some() {
@@ -169,6 +184,7 @@ impl Aggregate for Action {
                     auto_run_on_worktree_create,
                     icon,
                     kind,
+                    show_in_sidebar,
                     created_at: now,
                 }])
             }
@@ -179,6 +195,7 @@ impl Aggregate for Action {
                 auto_run_on_worktree_create,
                 icon,
                 kind,
+                show_in_sidebar,
                 now,
             } => {
                 let data = state.inner.as_ref().ok_or(ActionError::NotFound)?;
@@ -195,6 +212,7 @@ impl Aggregate for Action {
                     auto_run_on_worktree_create,
                     icon,
                     kind,
+                    show_in_sidebar,
                     updated_at: now,
                 }])
             }
@@ -219,6 +237,7 @@ impl Aggregate for Action {
                 auto_run_on_worktree_create,
                 icon,
                 kind,
+                show_in_sidebar,
                 created_at,
             } => {
                 state.inner = Some(ActionData {
@@ -230,6 +249,7 @@ impl Aggregate for Action {
                     auto_run_on_worktree_create: *auto_run_on_worktree_create,
                     icon: icon.clone(),
                     kind: kind.clone(),
+                    show_in_sidebar: *show_in_sidebar,
                     created_at: *created_at,
                     updated_at: *created_at,
                     removed_at: None,
@@ -242,6 +262,7 @@ impl Aggregate for Action {
                 auto_run_on_worktree_create,
                 icon,
                 kind,
+                show_in_sidebar,
                 updated_at,
             } => {
                 if let Some(data) = state.inner.as_mut() {
@@ -251,6 +272,7 @@ impl Aggregate for Action {
                     data.auto_run_on_worktree_create = *auto_run_on_worktree_create;
                     data.icon = icon.clone();
                     data.kind = kind.clone();
+                    data.show_in_sidebar = *show_in_sidebar;
                     data.updated_at = *updated_at;
                 }
             }
@@ -281,6 +303,7 @@ mod tests {
             auto_run_on_worktree_create: true,
             icon: "Hammer".into(),
             kind: "terminal_command".into(),
+            show_in_sidebar: true,
             now: now(),
         }
     }
@@ -302,6 +325,7 @@ mod tests {
             auto_run_on_worktree_create: false,
             icon: "Terminal".into(),
             kind: "terminal_command".into(),
+            show_in_sidebar: true,
             now: now(),
         };
         assert_eq!(
@@ -335,6 +359,7 @@ mod tests {
             auto_run_on_worktree_create: false,
             icon: "TestTube".into(),
             kind: "terminal_command".into(),
+            show_in_sidebar: true,
             now: now(),
         };
         for e in Action::decide(&s, update).unwrap() {

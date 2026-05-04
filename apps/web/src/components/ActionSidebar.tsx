@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import * as LucideIcons from "lucide-react";
-import { Pencil, Play, Plus, Terminal, Trash2 } from "lucide-react";
+import { LayoutList, Pencil, Play, Plus, Terminal, Trash2 } from "lucide-react";
 import { actionDelete, actionList, type ActionRow } from "~/ipc/actions.ts";
 import { ActionEditModal } from "~/components/ActionEditModal.tsx";
 import { ActionRunsModal } from "~/components/ActionRunsModal.tsx";
+import { AllActionsModal } from "~/components/AllActionsModal.tsx";
+import { matchesKey } from "~/lib/keybindings.ts";
 import { useActionRunsStore } from "~/stores/actionRunsStore.ts";
 
 interface Props {
@@ -26,9 +28,14 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
   const { t } = useTranslation("actions");
   const [actions, setActions] = useState<ActionRow[]>([]);
   const [edit, setEdit] = useState<{ row: ActionRow | null } | null>(null);
+  const [allOpen, setAllOpen] = useState(false);
   const [menu, setMenu] = useState<
     { x: number; y: number; row: ActionRow } | null
   >(null);
+  const visibleActions = useMemo(
+    () => actions.filter((a) => a.show_in_sidebar),
+    [actions],
+  );
 
   const startRun = useActionRunsStore((s) => s.start);
   const toggleOpen = useActionRunsStore((s) => s.toggleOpen);
@@ -66,6 +73,31 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
     };
   }, [menu]);
 
+  // Global keyboard listener — fires bound actions.
+  useEffect(() => {
+    if (!projectId) return;
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      for (const a of actions) {
+        if (a.keybinding && matchesKey(e, a.keybinding)) {
+          e.preventDefault();
+          void startRun(a.id, a.name, projectId, worktreeId).catch(() => {});
+          return;
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [actions, projectId, worktreeId, startRun]);
+
   if (!projectId) return null;
 
   const onIconClick = async (a: ActionRow) => {
@@ -87,7 +119,7 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
         className="flex w-10 shrink-0 flex-col items-center gap-1 border-l border-neutral-800 bg-neutral-900/40 py-2"
         aria-label={t("sidebar")}
       >
-        {actions.map((a) => {
+        {visibleActions.map((a) => {
           const Icon = lookupIcon(a.icon);
           const count = runs[a.id]?.length ?? 0;
           const open = openActionIds[a.id] ?? false;
@@ -126,11 +158,20 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
         >
           <Plus size={14} />
         </button>
+        <button
+          type="button"
+          onClick={() => setAllOpen(true)}
+          className="flex h-8 w-8 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+          title={t("all_actions")}
+          aria-label={t("all_actions")}
+        >
+          <LayoutList size={14} />
+        </button>
       </aside>
 
       {menu && (
         <div
-          style={{ left: menu.x, top: menu.y }}
+          style={{ right: window.innerWidth - menu.x, top: menu.y }}
           className="fixed z-50 min-w-[170px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-lg"
           onMouseDown={(e) => e.stopPropagation()}
         >
@@ -190,6 +231,16 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
           row={edit.row}
           onClose={() => {
             setEdit(null);
+            void refresh();
+          }}
+        />
+      )}
+
+      {allOpen && (
+        <AllActionsModal
+          projectId={projectId}
+          onClose={() => {
+            setAllOpen(false);
             void refresh();
           }}
         />

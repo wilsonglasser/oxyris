@@ -28,5 +28,13 @@
   "kill": "Kill (close)",
   "icon_change": "change",
   "icon_picker_search": "Search icons…",
-  "icon_picker_empty": "No icons match."
+  "icon_picker_empty": "No icons match.",
+  "keybinding": "Keybinding",
+  "keybinding_hint": "e.g. Ctrl+Shift+B / Mod+R. Only fires when no input is focused.",
+  "show_in_sidebar": "Show icon in sidebar",
+  "auto_run_on_worktree_create": "Auto-run when a worktree is created",
+  "all_actions": "All actions",
+  "no_actions_yet": "No actions yet — create one with the New action button.",
+  "hidden": "hidden",
+  "auto_run_short": "auto-run"
 }
