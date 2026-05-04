@@ -100,13 +100,23 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          $bundleDir = "apps/desktop/target/release/bundle"
-          $patterns = @("msi/*.msi", "nsis/*.exe")
+          # Cargo workspace puts the build dir at the repo root, not under
+          # `apps/desktop/target/`. Tauri also ships `latest.json` for the
+          # updater plugin — pick it up alongside the installers.
+          $bundleDir = "target/release/bundle"
+          $patterns = @("msi/*.msi", "msi/*.msi.sig", "nsis/*.exe", "nsis/*.exe.sig")
           foreach ($pat in $patterns) {
               Get-ChildItem -Path (Join-Path $bundleDir $pat) -ErrorAction SilentlyContinue |
                   ForEach-Object { Copy-Item -Force $_.FullName -Destination release }
           }
+          # Also surface the updater manifest if it landed in the bundle dir.
+          Get-ChildItem -Path (Join-Path $bundleDir "*.json") -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -eq "latest.json" } |
+              ForEach-Object { Copy-Item -Force $_.FullName -Destination release }
           Get-ChildItem release | ForEach-Object { Write-Host "  - $($_.Name)" }
+          if ((Get-ChildItem release -ErrorAction SilentlyContinue).Count -eq 0) {
+              Write-Error "No installers were produced — see the build step above."
+          }
 
       - name: Upload installers (artifact)
         uses: actions/upload-artifact@v4
