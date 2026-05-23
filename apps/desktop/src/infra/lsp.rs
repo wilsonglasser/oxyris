@@ -219,6 +219,14 @@ impl LspManager {
         // For WSL projects, the binary string is the *Linux-side* binary
         // name (e.g. `rust-analyzer`) and we spawn via wsl.exe. For
         // Windows projects, `binary` is the absolute Windows path.
+        tracing::info!(
+            worktree_id = %worktree_id,
+            ?lang,
+            binary = %binary.display(),
+            ?args,
+            workspace = %workspace.display(),
+            "lsp spawn",
+        );
         let result = match env {
             Environment::Windows => LspClient::spawn(&binary, &args, &workspace).await,
             Environment::Wsl { distro } => {

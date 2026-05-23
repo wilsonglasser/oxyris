@@ -2533,6 +2533,7 @@ name = "oxyris-claude"
 version = "0.1.0"
 dependencies = [
  "oxyris-core",
+ "oxyris-procutil",
  "oxyris-provider",
  "serde",
  "serde_json",
@@ -2572,6 +2573,7 @@ dependencies = [
  "oxyris-index",
  "oxyris-ipc",
  "oxyris-lsp",
+ "oxyris-procutil",
  "oxyris-provider",
  "portable-pty",
  "reqwest 0.12.28",
@@ -2599,6 +2601,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "git2",
+ "oxyris-procutil",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2655,6 +2658,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lsp-types",
+ "oxyris-procutil",
  "serde",
  "serde_json",
  "tempfile",
@@ -2678,6 +2682,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "oxyris-procutil"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

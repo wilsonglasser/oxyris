@@ -7,6 +7,8 @@ import type { Environment } from "~/ipc/commands.ts";
 export type RuntimeMode = "supervised" | "accept_edits" | "full_access" | "plan";
 export type ThinkingMode = "auto" | "off" | "on";
 export type EnvMode = "default" | "worktree";
+/** Structured = event-sourced chat; Pure = interactive claude TUI in a PTY. */
+export type SessionKind = "structured" | "pure";
 
 export type AssistantBlock =
   | { kind: "text"; text: string }
@@ -54,6 +56,7 @@ export type SessionSnapshot = {
   provider_session_id: string | null;
   title: string | null;
   env_mode: EnvMode;
+  kind: SessionKind;
   pinned_at: string | null;
 };
 
@@ -84,6 +87,7 @@ export type SessionEventPayload =
       thinking: ThinkingMode;
       runtime: RuntimeMode;
       env_mode: EnvMode;
+      session_kind: SessionKind;
       created_at: string;
     }
   | { kind: "SessionEnvModeChanged"; mode: EnvMode }
@@ -140,6 +144,7 @@ export async function sessionStart(input: {
   runtime?: RuntimeMode;
   system_prompt?: string;
   env_mode?: EnvMode;
+  kind?: SessionKind;
 }): Promise<{ session_id: string }> {
   return invoke("session_start", { input });
 }

@@ -22,6 +22,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use oxyris_ipc::{Frame, RequestFrame};
+use oxyris_procutil::HideConsole;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -192,13 +193,47 @@ impl AgentPool {
                 path: self.host_agent_path.display().to_string(),
             });
         }
-        // Convert `C:\...\oxyris-agent` into `/mnt/c/.../oxyris-agent` via
-        // `wslpath -u` inside the distro. This keeps the copy entirely inside
-        // the distro's own filesystem ops.
-        let host_path_str = self.host_agent_path.to_string_lossy().replace('\\', "\\\\");
+
+        // wsl.exe mangles forwarded args (eats `\` as escape, sometimes
+        // collapses other characters depending on version). Earlier
+        // attempts — forward-slash workaround, WSLENV /p, base64 in args —
+        // all hit edge cases on at least one user's setup. The robust
+        // path: stream the entire shell script + payload over stdin to
+        // `bash`, so no script bytes ever flow through wsl.exe's arg
+        // parser. Backticks, single quotes, backslashes, newlines all
+        // survive intact.
+        let host_path = self.host_agent_path.to_string_lossy().into_owned();
+        // The host path is embedded in a heredoc body. Heredoc bodies
+        // expand `$VAR`, backticks and `\`, so quote the delimiter (`'EOF'`)
+        // to disable expansion entirely — the path then survives byte-for-byte.
+        // Reject paths that contain the delimiter to keep heredoc parsing
+        // unambiguous (Windows paths never contain `\nOXYRIS_EOF\n` in practice).
+        let delim = "OXYRIS_EOF_8a4f3";
+        if host_path.contains(delim) {
+            return Err(AgentError::DeployFailed {
+                stage: "validate_host_path",
+                stderr: format!("host path contains reserved delimiter: {host_path}"),
+            });
+        }
         let script = format!(
             "set -e\n\
-             src=$(wslpath -u '{host_path_str}')\n\
+             win_path=$(cat <<'{delim}'\n\
+             {host_path}\n\
+             {delim}\n\
+             )\n\
+             # `cat <<\\'...\\'` preserves the path's leading whitespace from\n\
+             # our line-continuation indentation, so trim it.\n\
+             win_path=${{win_path#\"${{win_path%%[![:space:]]*}}\"}}\n\
+             win_path=${{win_path%\"${{win_path##*[![:space:]]}}\"}}\n\
+             src=$(wslpath -u \"$win_path\" 2>/dev/null || true)\n\
+             if [ -z \"$src\" ]; then\n\
+                 echo \"wslpath -u returned empty for: [$win_path]\" >&2\n\
+                 exit 1\n\
+             fi\n\
+             if [ ! -f \"$src\" ]; then\n\
+                 echo \"agent binary not visible from inside the distro at $src (host path: $win_path)\" >&2\n\
+                 exit 1\n\
+             fi\n\
              mkdir -p ~/.oxyris/bin\n\
              if [ ! -f ~/.oxyris/bin/oxyris-agent ] || [ \"$src\" -nt ~/.oxyris/bin/oxyris-agent ]; then\n\
                  cp \"$src\" ~/.oxyris/bin/oxyris-agent\n\
@@ -206,10 +241,22 @@ impl AgentPool {
              fi\n"
         );
 
-        let out = Command::new("wsl.exe")
-            .args(["-d", distro, "--", "sh", "-c", &script])
-            .output()
-            .await?;
+        // `bash -s` reads the script body from stdin. We use bash specifically
+        // because `sh` on Alpine is busybox and lacks the `${var#pattern}`
+        // shapes used above; bash is universally available on Ubuntu/Debian/
+        // Fedora/Arch and on Alpine after `apk add bash`.
+        let mut child = Command::new("wsl.exe")
+            .args(["-d", distro, "--", "bash", "-s"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .hide_console()
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(script.as_bytes()).await?;
+            stdin.shutdown().await?;
+        }
+        let out = child.wait_with_output().await?;
         if !out.status.success() {
             return Err(AgentError::DeployFailed {
                 stage: "copy_and_chmod",
@@ -233,6 +280,7 @@ impl AgentPool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
+            .hide_console()
             .spawn()?;
 
         let stdin = child.stdin.take().ok_or(AgentError::AgentGone)?;

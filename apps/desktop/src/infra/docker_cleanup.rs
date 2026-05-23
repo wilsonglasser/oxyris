@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::process::Stdio;
 
 use oxyris_core::Environment;
+use oxyris_procutil::HideConsole;
 use serde::Serialize;
 use tokio::process::Command;
 
@@ -213,6 +214,7 @@ async fn run_docker(env: &Environment, args: &[&str]) -> Result<String, String> 
         }
     };
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.hide_console();
     let out = cmd.output().await.map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());

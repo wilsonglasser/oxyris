@@ -16,6 +16,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use oxyris_procutil::HideConsole;
+
 use crate::error::GitError;
 use crate::types::{CheckpointPhase, FileDiff, FileStatus, TurnDiff};
 
@@ -37,6 +39,7 @@ pub fn capture(
 
     let out = Command::new("git")
         .args(["-C", repo_path, "stash", "create", "oxyris checkpoint"])
+        .hide_console()
         .output()?;
     if !out.status.success() {
         return Err(GitError::NonZero(
@@ -79,6 +82,7 @@ pub fn revert_to_pre(repo_path: &str, session_id: &str, turn_id: &str) -> Result
             "--reset",
             &oid.to_string(),
         ])
+        .hide_console()
         .output()?;
     if !out.status.success() {
         return Err(GitError::NonZero(

@@ -72,6 +72,7 @@ function applyEventToSnapshot(
       provider_session_id: null,
       title: null,
       env_mode: event.env_mode,
+      kind: event.session_kind,
       pinned_at: null,
     };
   }
@@ -91,6 +92,7 @@ function applyEventToSnapshot(
       provider_session_id: null,
       title: null,
       env_mode: "default",
+      kind: "structured",
       pinned_at: null,
     };
   }

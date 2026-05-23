@@ -48,10 +48,12 @@ pub fn wsl_distro_for_path(path: &std::path::Path) -> Option<String> {
 }
 
 fn default_wsl_distro() -> Option<String> {
+    use oxyris_procutil::HideConsole;
     use std::process::Command;
     let out = Command::new("wsl.exe")
         .arg("--list")
         .arg("--quiet")
+        .hide_console()
         .output()
         .ok()?;
     if !out.status.success() {
@@ -71,15 +73,14 @@ pub fn decode_wsl_output_for_command(bytes: &[u8]) -> String {
 }
 
 fn decode_wsl_output(bytes: &[u8]) -> String {
-    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+    let raw = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         // UTF-16LE with BOM
         let units: Vec<u16> = bytes[2..]
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        return String::from_utf16_lossy(&units);
-    }
-    if bytes.len().is_multiple_of(2)
+        String::from_utf16_lossy(&units)
+    } else if bytes.len().is_multiple_of(2)
         && bytes.iter().step_by(2).filter(|b| **b == 0).count() > bytes.len() / 4
     {
         // Looks like UTF-16LE without BOM
@@ -87,9 +88,15 @@ fn decode_wsl_output(bytes: &[u8]) -> String {
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        return String::from_utf16_lossy(&units);
-    }
-    String::from_utf8_lossy(bytes).into_owned()
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    // Some `wsl.exe` builds emit stray NUL bytes (BOM-less UTF-16 with odd
+    // padding, leading U+FEFF inside the body, etc.). Strip them — neither
+    // distro names nor stdout/stderr we feed back into UI / arg lists ever
+    // contain a legitimate NUL, and `Command::arg` rejects strings that do.
+    raw.replace('\u{0}', "")
 }
 
 #[cfg(test)]

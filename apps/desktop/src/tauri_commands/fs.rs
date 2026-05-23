@@ -498,7 +498,11 @@ mod open_external {
     }
 
     pub fn launch(target: &Resolved) -> std::io::Result<()> {
-        Command::new(&target.program).args(&target.args).spawn()?;
+        use oxyris_procutil::HideConsole;
+        Command::new(&target.program)
+            .args(&target.args)
+            .hide_console()
+            .spawn()?;
         Ok(())
     }
 }

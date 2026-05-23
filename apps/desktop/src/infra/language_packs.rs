@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use serde::Serialize;
+use oxyris_procutil::HideConsole;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -158,6 +159,12 @@ pub enum InstallSource {
     Path,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WslInstallInfo {
+    pub distro: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PackRow {
     pub id: &'static str,
@@ -166,6 +173,9 @@ pub struct PackRow {
     pub lsp_language: &'static str,
     pub install_method: &'static str,
     pub status: InstallStatus,
+    /// Per-distro WSL installs the user has performed via Oxyris.
+    /// Persisted across restarts in `<data_dir>/language_packs_wsl.json`.
+    pub wsl_installs: Vec<WslInstallInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,15 +206,21 @@ pub struct LanguagePacksService {
     data_dir: PathBuf,
     in_flight: Mutex<std::collections::HashSet<String>>,
     last_failure: Mutex<std::collections::HashMap<String, String>>,
+    /// `pack_id -> [{distro, path}]`. Records every successful WSL install
+    /// so the UI can show "[Ubuntu] /usr/bin/intelephense" alongside the
+    /// Windows-side path. Persisted to `<data_dir>/language_packs_wsl.json`.
+    wsl_installs: Mutex<std::collections::HashMap<String, Vec<WslInstallInfo>>>,
 }
 
 impl LanguagePacksService {
     pub fn new(app: AppHandle, data_dir: PathBuf) -> Self {
+        let wsl_installs = load_wsl_installs(&data_dir);
         Self {
             app,
             data_dir,
             in_flight: Mutex::new(std::collections::HashSet::new()),
             last_failure: Mutex::new(std::collections::HashMap::new()),
+            wsl_installs: Mutex::new(wsl_installs),
         }
     }
 
@@ -213,6 +229,7 @@ impl LanguagePacksService {
     pub async fn list(&self) -> Vec<PackRow> {
         let in_flight = self.in_flight.lock().await;
         let last_failure = self.last_failure.lock().await;
+        let wsl_installs = self.wsl_installs.lock().await;
         registry()
             .iter()
             .map(|p| {
@@ -232,9 +249,28 @@ impl LanguagePacksService {
                     lsp_language: p.lsp_language.id(),
                     install_method: install_method_label(&p.install),
                     status,
+                    wsl_installs: wsl_installs.get(p.id).cloned().unwrap_or_default(),
                 }
             })
             .collect()
+    }
+
+    async fn record_wsl_install(&self, pack_id: &str, distro: &str, path: &str) {
+        let mut map = self.wsl_installs.lock().await;
+        let entries = map.entry(pack_id.to_owned()).or_default();
+        if let Some(existing) = entries.iter_mut().find(|e| e.distro == distro) {
+            existing.path = path.to_owned();
+        } else {
+            entries.push(WslInstallInfo {
+                distro: distro.to_owned(),
+                path: path.to_owned(),
+            });
+        }
+        let snapshot = map.clone();
+        drop(map);
+        if let Err(e) = persist_wsl_installs(&self.data_dir, &snapshot) {
+            tracing::warn!(error = %e, "language_pack: failed to persist wsl_installs map");
+        }
     }
 
     /// Resolve a pack's binary path. Prefers the managed copy in
@@ -523,6 +559,7 @@ impl LanguagePacksService {
         };
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.hide_console();
 
         tracing::info!(
             pack = pack_id,
@@ -625,17 +662,45 @@ impl LanguagePacksService {
         self.emit(PackProgressEvent::Started { id: event_id });
         tracing::info!(pack = id, distro, "language_pack: starting wsl install");
 
+        // Stream the install script over stdin to `bash -l` instead of
+        // passing it as an arg. Login shell so user-PATH (nvm, asdf, …)
+        // is loaded; stdin so wsl.exe never gets to mangle the script.
         let mut cmd = tokio::process::Command::new("wsl.exe");
         cmd.arg("-d")
             .arg(distro)
             .arg("--")
             .arg("bash")
-            .arg("-lc")
-            .arg(&one_liner);
+            .arg("-l")
+            .arg("-s");
+        cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.hide_console();
 
-        let result = tokio::time::timeout(NPM_INSTALL_TIMEOUT, cmd.output()).await;
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("wsl spawn failed: {e}");
+                self.emit(PackProgressEvent::Failed {
+                    id: event_id,
+                    message: msg.clone(),
+                });
+                return Err(PackError::Command(msg));
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(one_liner.as_bytes()).await {
+                let msg = format!("write install script to wsl stdin: {e}");
+                self.emit(PackProgressEvent::Failed {
+                    id: event_id,
+                    message: msg.clone(),
+                });
+                return Err(PackError::Command(msg));
+            }
+            let _ = stdin.shutdown().await;
+        }
+
+        let result = tokio::time::timeout(NPM_INSTALL_TIMEOUT, child.wait_with_output()).await;
         match result {
             Ok(Ok(out)) => {
                 let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -650,7 +715,15 @@ impl LanguagePacksService {
                     "language_pack: wsl install finished",
                 );
                 if out.status.success() {
-                    let path = format!("~/.local/bin/{}", pack.binary_name);
+                    // Resolved binary path is the last non-empty stdout line —
+                    // matches the `echo \"$resolved\"` in `npm_install_one_liner`.
+                    let path = stdout
+                        .lines()
+                        .map(str::trim)
+                        .rfind(|l| !l.is_empty())
+                        .map(|s| s.to_owned())
+                        .unwrap_or_else(|| format!("~/.local/bin/{}", pack.binary_name));
+                    self.record_wsl_install(pack.id, distro, &path).await;
                     self.emit(PackProgressEvent::Done {
                         id: event_id,
                         path: path.clone(),
@@ -725,22 +798,117 @@ fn wsl_install_one_liner(pack: &Pack) -> Result<String, PackError> {
              ~/.local/bin/rust-analyzer --version"
                 .to_owned()
         }
-        LspLanguage::TypeScriptJavaScript => {
-            "set -e; \
-             command -v npm >/dev/null 2>&1 || { echo 'npm not found in distro PATH; install Node first (e.g. apt install nodejs npm)' >&2; exit 1; }; \
-             npm install -g typescript-language-server typescript; \
-             command -v typescript-language-server"
-                .to_owned()
-        }
+        LspLanguage::TypeScriptJavaScript => npm_install_one_liner(
+            "typescript-language-server typescript",
+            "typescript-language-server",
+        ),
         LspLanguage::Php => {
-            "set -e; \
-             command -v npm >/dev/null 2>&1 || { echo 'npm not found in distro PATH; install Node first (e.g. apt install nodejs npm)' >&2; exit 1; }; \
-             npm install -g intelephense; \
-             command -v intelephense"
-                .to_owned()
+            npm_install_one_liner("intelephense", "intelephense")
         }
     };
     Ok(cmd)
+}
+
+/// Bash one-liner that installs an npm package globally inside a WSL
+/// distro. Two safety nets:
+///
+/// 1. **Strip `/mnt/*` from PATH up-front.** When WSL→Win32 interop is on
+///    and node isn't installed natively, every Windows-side `node`/`npm`
+///    leaks into the distro's PATH at `/mnt/c/Program Files/nodejs/...`.
+///    Running through that interop shim lands the package under
+///    `%APPDATA%\npm` on Windows — *not* in the distro — and the LSP
+///    server can't be invoked from inside WSL. Pruning the `/mnt/`
+///    entries first guarantees only a real distro npm can satisfy
+///    `command -v npm`. Pure detection (matching `/mnt/*`) wasn't
+///    reliable: `command -v` output format varies (alias resolution,
+///    WSLInterop registration, …) and one shape slipped past pattern
+///    matching, ran the Windows shim, and failed at parse time on the
+///    `Program Files` space.
+/// 2. **Auto-install via passwordless apt** when npm is genuinely
+///    absent and `sudo -n` works; otherwise print distro-specific
+///    install instructions.
+fn npm_install_one_liner(packages: &str, verify_bin: &str) -> String {
+    // Bash receives this on stdin from `bash -l -s`. Login mode reads
+    // `~/.profile` / `~/.bash_profile`, but **non-interactive** bash skips
+    // most `~/.bashrc` content (typical guard: `[ -z \"$PS1\" ] && return`),
+    // so version managers like nvm/fnm/asdf — which install themselves into
+    // `.bashrc` — are not active here. Bootstrap them explicitly, then
+    // strip `/mnt/*` to refuse the Windows interop shim, then verify a
+    // distro-native npm is reachable.
+    format!(
+        r#"set -e
+# ---- Make user-installed node toolchains visible to non-interactive bash. ----
+# nvm
+if [ -z "$NVM_DIR" ] && [ -d "$HOME/.nvm" ]; then export NVM_DIR="$HOME/.nvm"; fi
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+fi
+# fnm
+if command -v fnm >/dev/null 2>&1; then
+  eval "$(fnm env --use-on-cd 2>/dev/null)" >/dev/null 2>&1 || true
+fi
+# asdf
+if [ -s "$HOME/.asdf/asdf.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.asdf/asdf.sh" >/dev/null 2>&1 || true
+fi
+# Common bin dirs that ship a distro-native node/npm.
+for d in "$HOME/.local/bin" "$HOME/.npm-global/bin" "$HOME/.bun/bin" \
+         /usr/local/bin /usr/bin /opt/nodejs/bin; do
+  if [ -d "$d" ]; then
+    case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
+  fi
+done
+export PATH
+
+# ---- Strip Windows interop entries — guarantees no /mnt/c/.../npm wins. ----
+clean_path=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | grep -v '^$' | paste -sd: -)
+export PATH="$clean_path"
+
+# ---- Verify npm reachable; auto-install via apt only if sudo -n works. ----
+if ! command -v npm >/dev/null 2>&1; then
+  echo 'npm not found in distro PATH (after stripping Windows interop entries).' >&2
+  echo 'Trying passwordless apt install...' >&2
+  if command -v apt-get >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n apt-get update -y >&2 && sudo -n apt-get install -y nodejs npm >&2 || true
+  fi
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo '' >&2
+  echo 'ERROR: npm is not installed natively in this WSL distro.' >&2
+  echo 'Oxyris refuses to use the Windows npm interop shim — packages installed' >&2
+  echo 'through it land in %APPDATA%\npm on Windows, not inside the distro, and' >&2
+  echo 'the LSP server would not be reachable from WSL.' >&2
+  echo '' >&2
+  echo 'Searched PATH:' >&2
+  echo "  $PATH" >&2
+  echo '' >&2
+  echo 'If you have npm installed via nvm/fnm/asdf and it is only loaded in' >&2
+  echo 'interactive shells, run `which npm` in your distro terminal and add' >&2
+  echo "its directory to your shell's non-interactive PATH (e.g. ~/.profile)." >&2
+  echo '' >&2
+  echo 'Otherwise install Node natively, then retry:' >&2
+  echo '  Debian/Ubuntu:   sudo apt update && sudo apt install -y nodejs npm' >&2
+  echo '  Alpine:          sudo apk add --no-cache nodejs npm' >&2
+  echo '  Fedora/RHEL:     sudo dnf install -y nodejs npm' >&2
+  echo '  Arch:            sudo pacman -S --noconfirm nodejs npm' >&2
+  exit 1
+fi
+
+# ---- Install + report final binary path. ----
+npm install -g {packages} >&2
+resolved=$(command -v {verify_bin} 2>/dev/null || true)
+if [ -z "$resolved" ]; then
+  echo "{verify_bin} not on PATH after install" >&2
+  exit 1
+fi
+case "$resolved" in
+  /mnt/*) echo "{verify_bin} ended up at $resolved (Windows side) — install rejected." >&2; exit 1 ;;
+esac
+echo "$resolved"
+"#
+    )
 }
 
 fn install_method_label(m: &InstallMethod) -> &'static str {
@@ -755,14 +923,64 @@ fn install_method_label(m: &InstallMethod) -> &'static str {
 /// global directories explicitly so a freshly installed package is found
 /// without needing the user to restart their shell, then falls back to
 /// `which::which` for anything else on PATH.
+///
+/// Validates rustup proxies (binaries inside `~/.cargo/bin/`): rustup ships
+/// a shim that exits with `Unknown binary` if the corresponding component
+/// isn't installed. We can't use it as-is, so we resolve through
+/// `rustup which <name>` which fails fast when the component is missing.
 fn find_external_binary(name: &str) -> Option<PathBuf> {
     let stripped = name.trim_end_matches(".exe");
     for candidate in well_known_global_candidates(stripped) {
         if candidate.exists() {
-            return Some(candidate);
+            return validate_external(candidate, stripped);
         }
     }
-    which::which(stripped).ok()
+    which::which(stripped)
+        .ok()
+        .and_then(|p| validate_external(p, stripped))
+}
+
+/// Returns Some(path) if the binary is usable, None if it's a broken shim
+/// (e.g. rustup proxy with no component installed).
+fn validate_external(path: PathBuf, name: &str) -> Option<PathBuf> {
+    if is_rustup_proxy(&path) {
+        return resolve_via_rustup(name);
+    }
+    Some(path)
+}
+
+fn is_rustup_proxy(path: &Path) -> bool {
+    let cargo_bin = match std::env::var_os(
+        #[cfg(target_os = "windows")]
+        "USERPROFILE",
+        #[cfg(not(target_os = "windows"))]
+        "HOME",
+    ) {
+        Some(h) => PathBuf::from(h).join(".cargo").join("bin"),
+        None => return false,
+    };
+    path.parent()
+        .map(|p| p == cargo_bin.as_path())
+        .unwrap_or(false)
+}
+
+/// Ask rustup for the real binary path. Succeeds only if the corresponding
+/// component is installed in the active toolchain.
+fn resolve_via_rustup(name: &str) -> Option<PathBuf> {
+    use oxyris_procutil::HideConsole;
+    let out = std::process::Command::new("rustup")
+        .args(["which", name])
+        .hide_console()
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 #[cfg(target_os = "windows")]
@@ -816,4 +1034,36 @@ fn tail_lines(s: &str, n: usize) -> String {
         out.push('\n');
     }
     out.trim_end().to_owned()
+}
+
+fn wsl_installs_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("language_packs_wsl.json")
+}
+
+fn load_wsl_installs(data_dir: &Path) -> std::collections::HashMap<String, Vec<WslInstallInfo>> {
+    let path = wsl_installs_path(data_dir);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "language_pack: failed to parse wsl_installs file; starting empty");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+fn persist_wsl_installs(
+    data_dir: &Path,
+    map: &std::collections::HashMap<String, Vec<WslInstallInfo>>,
+) -> std::io::Result<()> {
+    if let Err(e) = std::fs::create_dir_all(data_dir)
+        && e.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        return Err(e);
+    }
+    let json = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
+    std::fs::write(wsl_installs_path(data_dir), json)
 }

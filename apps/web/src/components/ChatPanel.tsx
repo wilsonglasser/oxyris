@@ -84,6 +84,12 @@ interface ChatPanelProps {
   project: ProjectRow | null;
   onToggleTerminal?: (() => void) | undefined;
   terminalOpen?: boolean;
+  /**
+   * When set, the panel operates on this session instead of the global active
+   * one — used to embed a thread as a Multi View pane. Existing-session panes
+   * never create new sessions, so the `setActive` paths stay dormant.
+   */
+  sessionId?: string;
 }
 
 /**
@@ -100,10 +106,14 @@ export function ChatPanel({
   project,
   onToggleTerminal,
   terminalOpen = false,
+  sessionId,
 }: ChatPanelProps) {
   const { t } = useTranslation("chat");
   const snapshots = useSessionStore((s) => s.snapshots);
-  const activeId = useSessionStore((s) => s.activeSessionId);
+  const storeActiveId = useSessionStore((s) => s.activeSessionId);
+  // A `sessionId` prop pins the panel to one session (Multi View pane);
+  // otherwise it follows the global active session.
+  const activeId = sessionId ?? storeActiveId;
   const setActive = useSessionStore((s) => s.setActive);
   const hydrate = useSessionStore((s) => s.hydrate);
   const applyEvent = useSessionStore((s) => s.applyEvent);
@@ -126,23 +136,48 @@ export function ChatPanel({
   const [dotenvStatus, setDotenvStatus] = useState<DotenvStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Worktrees for the workspace picker.
+  // Worktrees for the workspace picker. Keyed on `project?.id` (string) so
+  // switching projects always retriggers the fetch even if the row object
+  // ref happens to be stable. The cancellation guard keeps an in-flight
+  // request for an old project from clobbering the new project's data on
+  // out-of-order resolution.
+  const projectId = project?.id ?? null;
+  useEffect(() => {
+    setWorktreeId("");
+    if (!projectId) {
+      setWorktrees([]);
+      setWorktreesLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setWorktrees([]);
+    setWorktreesLoading(true);
+    void worktreeList({ project_id: projectId })
+      .then((rows) => {
+        if (!cancelled) setWorktrees(rows);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setWorktreesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  // Imperative refresh used by children that mutate worktrees (e.g. the
+  // empty-state's "create new worktree" form).
   const refreshWorktrees = useCallback(() => {
-    if (!project) {
+    if (!projectId) {
       setWorktrees([]);
       return;
     }
     setWorktreesLoading(true);
-    void worktreeList({ project_id: project.id })
+    void worktreeList({ project_id: projectId })
       .then(setWorktrees)
       .catch(() => {})
       .finally(() => setWorktreesLoading(false));
-  }, [project]);
-
-  useEffect(() => {
-    refreshWorktrees();
-    setWorktreeId("");
-  }, [refreshWorktrees]);
+  }, [projectId]);
 
   // Detect docker template + initial status whenever the worktree picker
   // changes. We only run this when the user is about to start a session
@@ -1089,18 +1124,24 @@ function Composer({
     // the queue. We only block on local `sending` to stop double-submits.
     if ((!trimmed && attachments.length === 0) || sending) return;
     setSending(true);
+    const prefix = attachments.map((a) => `@${a.info.path}`).join(" ");
+    const payload = prefix
+      ? `${prefix}${trimmed ? `\n\n${trimmed}` : ""}`
+      : trimmed;
+    const sentAttachments = attachments;
+    // Clear optimistically so the textarea empties immediately instead of
+    // staying full while we await the streamed response.
+    setText("");
+    setAttachments([]);
     try {
-      const prefix = attachments.map((a) => `@${a.info.path}`).join(" ");
-      const payload = prefix
-        ? `${prefix}${trimmed ? `\n\n${trimmed}` : ""}`
-        : trimmed;
       await onSend(payload);
-      setText("");
-      attachments.forEach((a) => URL.revokeObjectURL(a.previewUrl));
-      setAttachments([]);
+      sentAttachments.forEach((a) => URL.revokeObjectURL(a.previewUrl));
     } catch (e) {
       // Surfaces via the panel-level error handler in onSend already.
+      // Restore the draft so the user doesn't lose their input.
       console.error(e);
+      setText(trimmed);
+      setAttachments(sentAttachments);
     } finally {
       setSending(false);
     }

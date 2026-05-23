@@ -6,6 +6,7 @@
   },
   "tabs": {
     "chat": "Chat",
+    "multi": "Multi",
     "files": "Arquivos",
     "git": "Git",
     "settings": "Configurações"

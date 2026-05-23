@@ -11,6 +11,7 @@
 use std::process::Stdio;
 
 use oxyris_core::{AggregateId, Environment};
+use oxyris_procutil::HideConsole;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tokio::process::Command;
@@ -244,6 +245,7 @@ async fn docker_ps_services(
         }
     };
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.hide_console();
 
     let out = cmd
         .output()

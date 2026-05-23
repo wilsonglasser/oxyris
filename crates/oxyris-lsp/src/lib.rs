@@ -32,6 +32,7 @@ use lsp_types::{
     TextDocumentItem, TextDocumentPositionParams, Uri, WindowClientCapabilities,
     WorkDoneProgressParams, WorkspaceFolder,
 };
+use oxyris_procutil::HideConsole;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -142,6 +143,7 @@ impl LspClient {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true);
+        cmd.hide_console();
 
         let mut child = cmd.spawn()?;
         let stdin = child
@@ -156,7 +158,7 @@ impl LspClient {
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    tracing::debug!(target: "oxyris_lsp::stderr", "{line}");
+                    tracing::warn!(target: "oxyris_lsp::stderr", "{line}");
                 }
             });
         }

@@ -17,6 +17,7 @@ thiserror.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 which.workspace = true
+oxyris-procutil.workspace = true
 
 # LSP message types — kept in sync with the protocol spec.
 lsp-types = "0.97"

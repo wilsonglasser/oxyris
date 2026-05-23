@@ -71,6 +71,187 @@ pub struct TerminalAttachSnapshot {
     pub last_seq: u64,
 }
 
+/// What to launch inside a freshly-opened PTY.
+enum PtyProgram {
+    /// The user's login shell (pwsh/cmd on Windows, login shell in WSL).
+    Shell,
+    /// The interactive `claude` TUI with our index/workspace flags — the
+    /// "Claude Code puro" mode.
+    Claude(ClaudePtyOpts),
+}
+
+impl PtyProgram {
+    fn title_prefix(&self) -> &'static str {
+        match self {
+            PtyProgram::Shell => "Terminal",
+            PtyProgram::Claude(_) => "Claude",
+        }
+    }
+}
+
+/// Flags handed to the interactive `claude` process in pure mode. Mirrors the
+/// subset of the stream-json adapter's options that make sense for a TUI.
+#[derive(Debug, Clone, Default)]
+pub struct ClaudePtyOpts {
+    /// Empty → let claude pick its default model.
+    pub model: String,
+    /// e.g. "default" | "acceptEdits" | "bypassPermissions" | "plan". Empty →
+    /// claude's interactive default.
+    pub permission_mode: String,
+    /// `--mcp-config <path>` when present (oxyris index/LSP server).
+    pub mcp_config_path: Option<String>,
+    /// `--append-system-prompt <text>` when present (MCP tool nudge).
+    pub system_prompt: Option<String>,
+}
+
+/// Build the `CommandBuilder` for a PTY program, resolving the right binary
+/// for the environment. Mirrors the binary-resolution the stream-json adapter
+/// does for `claude` (npm shim is usually `claude.cmd`, which CreateProcess
+/// can't launch directly — forward through `cmd.exe /C`).
+fn build_cmd(
+    env: &Environment,
+    cwd: &str,
+    extra_env: &[(String, String)],
+    program: &PtyProgram,
+) -> Result<CommandBuilder, PtyError> {
+    match (env, program) {
+        (Environment::Windows, PtyProgram::Shell) => {
+            // PowerShell first, fall back to cmd.
+            let shell = which::which("pwsh.exe")
+                .or_else(|_| which::which("powershell.exe"))
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "cmd.exe".into());
+            let mut cmd = CommandBuilder::new(shell);
+            cmd.cwd(cwd);
+            apply_env(&mut cmd, extra_env);
+            Ok(cmd)
+        }
+        (Environment::Wsl { distro }, PtyProgram::Shell) => {
+            // Launch wsl.exe with the distro + cwd; the Linux side picks the
+            // user's login shell automatically. ConPTY hosts the pty and
+            // bridges bytes to wsl.exe — no agent needed for interactive use.
+            let wsl = wsl_exe();
+            let mut cmd = CommandBuilder::new(wsl);
+            cmd.args(["-d", distro, "--cd", cwd]);
+            apply_wslenv(&mut cmd, extra_env);
+            Ok(cmd)
+        }
+        (Environment::Windows, PtyProgram::Claude(opts)) => {
+            let full = which::which("claude")
+                .or_else(|_| which::which("claude.cmd"))
+                .or_else(|_| which::which("claude.exe"))
+                .map_err(|e| {
+                    PtyError::Other(format!(
+                        "claude not found on PATH (checked claude, claude.cmd, claude.exe): {e}"
+                    ))
+                })?;
+            let is_batch = full
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| matches!(x.to_ascii_lowercase().as_str(), "cmd" | "bat"))
+                .unwrap_or(false);
+            let mut cmd = if is_batch {
+                let mut c = CommandBuilder::new("cmd.exe");
+                c.arg("/C");
+                c.arg(full.as_os_str());
+                c
+            } else {
+                CommandBuilder::new(full.as_os_str())
+            };
+            for a in claude_args(opts) {
+                cmd.arg(a);
+            }
+            cmd.cwd(cwd);
+            apply_env(&mut cmd, extra_env);
+            Ok(cmd)
+        }
+        (Environment::Wsl { distro }, PtyProgram::Claude(opts)) => {
+            // Run through a login shell inside the distro, mirroring the
+            // stream-json adapter. Two reasons we can't pass `wsl -- claude
+            // <args>` directly: (1) the cwd is a Windows UNC path that must be
+            // translated to POSIX, and (2) the system-prompt nudge is a
+            // multiline string with backticks — handed to wsl bare it gets
+            // interpreted by the shell. `sh -lc` with single-quote escaping
+            // neutralises both, and `-l` puts claude on PATH.
+            let posix_cwd = crate::infra::path_translator::to_posix(distro, cwd)
+                .unwrap_or_else(|_| cwd.to_owned());
+            let mut translated = opts.clone();
+            if let Some(p) = &opts.mcp_config_path {
+                translated.mcp_config_path =
+                    crate::infra::path_translator::to_posix(distro, p).ok();
+            }
+            let args = claude_args(&translated)
+                .iter()
+                .map(|a| shell_escape(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let script = format!("cd {} && exec claude {}", shell_escape(&posix_cwd), args);
+            let mut cmd = CommandBuilder::new(wsl_exe());
+            cmd.args(["-d", distro, "--", "sh", "-lc", &script]);
+            apply_wslenv(&mut cmd, extra_env);
+            Ok(cmd)
+        }
+    }
+}
+
+/// Single-quote a value for a POSIX shell so backticks, spaces, newlines and
+/// `$()` inside it stay literal. Bare-word fast path for simple tokens.
+fn shell_escape(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+    {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+fn wsl_exe() -> String {
+    which::which("wsl.exe")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "wsl.exe".into())
+}
+
+fn claude_args(opts: &ClaudePtyOpts) -> Vec<String> {
+    let mut args = Vec::new();
+    if !opts.model.trim().is_empty() {
+        args.push("--model".into());
+        args.push(opts.model.clone());
+    }
+    if !opts.permission_mode.trim().is_empty() {
+        args.push("--permission-mode".into());
+        args.push(opts.permission_mode.clone());
+    }
+    if let Some(p) = &opts.mcp_config_path {
+        args.push("--mcp-config".into());
+        args.push(p.clone());
+    }
+    if let Some(s) = &opts.system_prompt {
+        args.push("--append-system-prompt".into());
+        args.push(s.clone());
+    }
+    args
+}
+
+fn apply_env(cmd: &mut CommandBuilder, extra_env: &[(String, String)]) {
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+}
+
+/// wsl.exe forwards `WSLENV=NAME/u:OTHER/u` over the boundary; listing our
+/// vars there makes them appear inside the distro.
+fn apply_wslenv(cmd: &mut CommandBuilder, extra_env: &[(String, String)]) {
+    if extra_env.is_empty() {
+        return;
+    }
+    let names: Vec<String> = extra_env.iter().map(|(k, _)| format!("{k}/u")).collect();
+    cmd.env("WSLENV", names.join(":"));
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+}
+
 #[derive(Default)]
 pub struct PtySupervisor {
     terminals: Mutex<HashMap<String, LiveTerminal>>,
@@ -111,6 +292,58 @@ impl PtySupervisor {
         rows: u16,
         extra_env: &[(String, String)],
     ) -> Result<TerminalInfo, PtyError> {
+        self.spawn_program(
+            app,
+            env,
+            session_id,
+            cwd,
+            cols,
+            rows,
+            extra_env,
+            PtyProgram::Shell,
+        )
+    }
+
+    /// Spawn the provider's interactive TUI (`claude`) directly in a PTY —
+    /// the "Claude Code puro" mode. Same plumbing as a shell terminal; only
+    /// the launched program differs. MCP/system-prompt/model flags are passed
+    /// through `opts` so the pure session still gets our index + workspace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_claude(
+        &self,
+        app: AppHandle,
+        env: &Environment,
+        session_id: AggregateId,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(String, String)],
+        opts: ClaudePtyOpts,
+    ) -> Result<TerminalInfo, PtyError> {
+        self.spawn_program(
+            app,
+            env,
+            session_id,
+            cwd,
+            cols,
+            rows,
+            extra_env,
+            PtyProgram::Claude(opts),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_program(
+        &self,
+        app: AppHandle,
+        env: &Environment,
+        session_id: AggregateId,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        extra_env: &[(String, String)],
+        program: PtyProgram,
+    ) -> Result<TerminalInfo, PtyError> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system
             .openpty(PtySize {
@@ -121,44 +354,8 @@ impl PtySupervisor {
             })
             .map_err(|e| PtyError::Other(e.to_string()))?;
 
-        let cmd = match env {
-            Environment::Windows => {
-                // PowerShell first, fall back to cmd.
-                let shell = which::which("pwsh.exe")
-                    .or_else(|_| which::which("powershell.exe"))
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "cmd.exe".into());
-                let mut cmd = CommandBuilder::new(shell);
-                cmd.cwd(cwd);
-                for (k, v) in extra_env {
-                    cmd.env(k, v);
-                }
-                cmd
-            }
-            Environment::Wsl { distro } => {
-                // Launch wsl.exe with the distro + cwd; the Linux side picks
-                // the user's login shell automatically. ConPTY hosts the
-                // pty and forwards bytes to wsl.exe's stdin/stdout which
-                // bridges to the distro's shell — no agent needed for
-                // interactive terminal.
-                let wsl = which::which("wsl.exe")
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "wsl.exe".into());
-                let mut cmd = CommandBuilder::new(wsl);
-                cmd.args(["-d", distro, "--cd", cwd]);
-                // wsl.exe forwards `WSLENV=NAME/u:OTHER/u` over the boundary;
-                // listing our vars there makes them appear inside the distro.
-                if !extra_env.is_empty() {
-                    let names: Vec<String> =
-                        extra_env.iter().map(|(k, _)| format!("{k}/u")).collect();
-                    cmd.env("WSLENV", names.join(":"));
-                    for (k, v) in extra_env {
-                        cmd.env(k, v);
-                    }
-                }
-                cmd
-            }
-        };
+        let title_prefix = program.title_prefix();
+        let cmd = build_cmd(env, cwd, extra_env, &program)?;
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -243,7 +440,7 @@ impl PtySupervisor {
             .filter(|t| t.session_id == session_id)
             .count()
             + 1;
-        let title = format!("Terminal {next_index}");
+        let title = format!("{title_prefix} {next_index}");
         let cwd_owned = cwd.to_owned();
         terminals.insert(
             id.clone(),

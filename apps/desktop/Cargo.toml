@@ -40,6 +40,7 @@ oxyris-git.workspace = true
 oxyris-index.workspace = true
 oxyris-ipc.workspace = true
 oxyris-lsp.workspace = true
+oxyris-procutil.workspace = true
 oxyris-provider.workspace = true
 oxyris-claude.workspace = true
 ignore.workspace = true

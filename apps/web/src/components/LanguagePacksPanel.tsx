@@ -138,7 +138,7 @@ function PackRow({
       const path = await languagePacksInstallInWsl(pack.id, distro);
       setWslResult({ distro, ok: true, message: path });
     } catch (e) {
-      const msg = typeof e === "string" ? e : String((e as Error).message ?? e);
+      const msg = extractErrorMessage(e);
       setWslResult({ distro, ok: false, message: msg });
     } finally {
       setWslBusy(null);
@@ -229,6 +229,16 @@ function PackRow({
           )}
         </div>
       )}
+      {wslResult && wslResult.ok && (
+        <code className="block break-all rounded border border-emerald-900/40 bg-emerald-950/10 px-2 py-1 font-mono text-[10px] leading-snug text-emerald-200/90">
+          {wslResult.message}
+        </code>
+      )}
+      {wslResult && !wslResult.ok && (
+        <pre className="whitespace-pre-wrap break-words rounded border border-red-900/40 bg-red-950/20 px-2 py-1.5 font-mono text-[10px] leading-snug text-red-200">
+          {wslResult.message}
+        </pre>
+      )}
     </li>
   );
 }
@@ -272,19 +282,34 @@ function StatusBadge({ pack }: { pack: LanguagePack }) {
 
 function PathLine({ pack }: { pack: LanguagePack }) {
   const s = pack.status;
+  const wslLines = (pack.wsl_installs ?? []).map((w) => (
+    <p
+      key={`wsl:${w.distro}`}
+      className="mt-0.5 truncate font-mono text-[10px] text-neutral-600"
+    >
+      <span className="text-emerald-500/80">[{w.distro}]</span> {w.path}
+    </p>
+  ));
   if (s.kind === "installed") {
     return (
-      <p className="mt-0.5 truncate font-mono text-[10px] text-neutral-600">
-        {s.path}
-      </p>
+      <>
+        <p className="mt-0.5 truncate font-mono text-[10px] text-neutral-600">
+          <span className="text-sky-500/80">[Windows]</span> {s.path}
+        </p>
+        {wslLines}
+      </>
     );
   }
   if (s.kind === "failed") {
     return (
-      <p className="mt-0.5 text-[11px] text-red-300">
-        {s.message}
-      </p>
+      <>
+        <p className="mt-0.5 text-[11px] text-red-300">{s.message}</p>
+        {wslLines}
+      </>
     );
+  }
+  if (wslLines.length > 0) {
+    return <>{wslLines}</>;
   }
   return null;
 }
@@ -349,4 +374,21 @@ function Action({
       )}
     </div>
   );
+}
+
+/** Tauri command errors come back as `{code, message}`, plain strings, or
+ * Error objects (rejected JS promises). Reach into each shape so the user
+ * sees the real reason instead of `[object Object]` or `undefined`. */
+function extractErrorMessage(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object") {
+    const anyE = e as { message?: unknown; code?: unknown };
+    if (typeof anyE.message === "string" && anyE.message) return anyE.message;
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return String(e);
+    }
+  }
+  return String(e);
 }

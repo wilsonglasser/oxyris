@@ -11,6 +11,7 @@ use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use oxyris_core::Environment;
+use oxyris_procutil::HideConsole;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
@@ -83,6 +84,7 @@ async fn run_version_windows(path: &std::path::Path) -> Result<String, String> {
     };
     cmd.arg("--version");
     cmd.kill_on_drop(true);
+    cmd.hide_console();
 
     let result = tokio::time::timeout(VERSION_TIMEOUT, cmd.output()).await;
     match result {
@@ -116,6 +118,7 @@ async fn discover_wsl(distro: String, env: Environment) -> DiscoveredInstall {
         move || {
             StdCommand::new("wsl.exe")
                 .args(["-d", &distro, "--", "bash", "-ilc", script])
+                .hide_console()
                 .output()
         }
     })

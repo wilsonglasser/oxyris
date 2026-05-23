@@ -9,6 +9,7 @@
 use std::process::{Command, Output};
 
 use oxyris_core::Environment;
+use oxyris_procutil::HideConsole;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -85,6 +86,7 @@ struct WslDistro {
 fn run_wsl_list() -> Result<Vec<WslDistro>, EnvironmentsError> {
     let out = Command::new("wsl.exe")
         .args(["--list", "--verbose"])
+        .hide_console()
         .output()?;
     check_status(&out)?;
     Ok(parse_wsl_list(&out.stdout))

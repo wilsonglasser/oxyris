@@ -42,6 +42,10 @@ pub struct SessionData {
     /// auto-picks `Worktree` when the template is detected.
     #[serde(default)]
     pub env_mode: EnvMode,
+    /// Structured (event-sourced chat) vs Pure (interactive TUI in a PTY).
+    /// Defaults to `Structured` so pre-existing event logs replay unchanged.
+    #[serde(default)]
+    pub kind: SessionKind,
     /// When set, the session is pinned to the top of the sidebar. The
     /// timestamp is the moment the user pinned it (used to sort multiple
     /// pinned sessions among themselves).
@@ -55,6 +59,20 @@ pub enum EnvMode {
     #[default]
     Default,
     Worktree,
+}
+
+/// How a session drives its provider. `Structured` is the default
+/// event-sourced chat: the backend owns the provider over stream-json and
+/// records every turn/block. `Pure` runs the provider's interactive TUI
+/// directly in a PTY (the "Claude Code puro" mode) — no stream-json, no
+/// per-turn events; the session aggregate only tracks lifecycle + metadata
+/// (cwd/worktree/title) and the PTY is spawned on demand by the UI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    #[default]
+    Structured,
+    Pure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +118,7 @@ pub enum SessionCommand {
         thinking: ThinkingMode,
         runtime: RuntimeMode,
         env_mode: EnvMode,
+        kind: SessionKind,
         now: DateTime<Utc>,
     },
     SetEnvMode {
@@ -174,6 +193,8 @@ pub enum SessionEvent {
         runtime: RuntimeMode,
         #[serde(default)]
         env_mode: EnvMode,
+        #[serde(default)]
+        session_kind: SessionKind,
         created_at: DateTime<Utc>,
     },
     SessionEnvModeChanged {
@@ -288,6 +309,7 @@ impl Aggregate for Session {
                 thinking,
                 runtime,
                 env_mode,
+                kind,
                 now,
             } => {
                 if state.inner.is_some() {
@@ -302,6 +324,7 @@ impl Aggregate for Session {
                     thinking,
                     runtime,
                     env_mode,
+                    session_kind: kind,
                     created_at: now,
                 }])
             }
@@ -461,6 +484,7 @@ impl Aggregate for Session {
                 thinking,
                 runtime,
                 env_mode,
+                session_kind,
                 created_at,
             } => {
                 state.inner = Some(SessionData {
@@ -477,6 +501,7 @@ impl Aggregate for Session {
                     provider_session_id: None,
                     title: None,
                     env_mode: *env_mode,
+                    kind: *session_kind,
                     pinned_at: None,
                 });
             }
@@ -621,6 +646,7 @@ mod tests {
             thinking: ThinkingMode::Auto,
             runtime: RuntimeMode::Supervised,
             env_mode: EnvMode::Default,
+            kind: SessionKind::Structured,
             now: now(),
         }
     }

@@ -91,7 +91,7 @@ impl SessionSupervisor {
         }
     }
 
-    fn lsp_bridge_port(&self) -> Option<u16> {
+    pub fn lsp_bridge_port(&self) -> Option<u16> {
         self.lsp_bridge_port.lock().ok().and_then(|guard| *guard)
     }
 
@@ -104,12 +104,22 @@ impl SessionSupervisor {
         worktree_id: Option<AggregateId>,
         provider_id: String,
         env_mode: crate::domain::session::EnvMode,
+        kind: crate::domain::session::SessionKind,
         opts: SessionOptions,
     ) -> Result<AggregateId, SupervisorError> {
-        let provider = self
-            .registry
-            .get(&provider_id)
-            .ok_or_else(|| SupervisorError::UnknownProvider(provider_id.clone()))?;
+        use crate::domain::session::SessionKind;
+
+        // Structured sessions need a registered provider up front; Pure
+        // sessions run the interactive TUI in a PTY (spawned later by the UI)
+        // so they don't touch the stream-json provider registry at all.
+        let provider = match kind {
+            SessionKind::Structured => Some(
+                self.registry
+                    .get(&provider_id)
+                    .ok_or_else(|| SupervisorError::UnknownProvider(provider_id.clone()))?,
+            ),
+            SessionKind::Pure => None,
+        };
 
         let session_id = AggregateId::new();
         let now = Utc::now();
@@ -122,14 +132,20 @@ impl SessionSupervisor {
             thinking: opts.thinking,
             runtime: opts.runtime,
             env_mode,
+            kind,
             now,
         };
         let events = Session::decide(&SessionState::default(), cmd)?;
         self.persist_and_emit(session_id, 0, &events).await?;
 
-        let opts = augment_with_mcp(opts, self.lsp_bridge_port());
-        let provider_session = provider.start_session(opts)?;
-        self.spawn_event_pump(session_id, provider_session).await;
+        // Pure mode stops here: the aggregate exists (so the session shows in
+        // the sidebar with its cwd/title), but the conversation happens in the
+        // PTY, not over stream-json. No provider, no event pump.
+        if let Some(provider) = provider {
+            let opts = augment_with_mcp(opts, self.lsp_bridge_port());
+            let provider_session = provider.start_session(opts)?;
+            self.spawn_event_pump(session_id, provider_session).await;
+        }
 
         Ok(session_id)
     }
@@ -299,6 +315,13 @@ impl SessionSupervisor {
             .as_ref()
             .ok_or(SupervisorError::Domain(SessionError::NotFound))?
             .clone();
+
+        // Pure sessions have no stream-json provider to resume — the PTY is
+        // owned by the UI and respawned on demand. Nothing to do here.
+        if data.kind == crate::domain::session::SessionKind::Pure {
+            return Ok(());
+        }
+
         let resume_id = data
             .provider_session_id
             .clone()

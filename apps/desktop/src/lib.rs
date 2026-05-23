@@ -60,6 +60,7 @@ pub fn run() {
             tauri_commands::settings::settings_keybindings_read,
             tauri_commands::settings::settings_keybindings_write,
             tauri_commands::terminal::terminal_spawn,
+            tauri_commands::terminal::claude_pty_spawn,
             tauri_commands::terminal::terminal_write,
             tauri_commands::terminal::terminal_resize,
             tauri_commands::terminal::terminal_kill,
@@ -127,7 +128,20 @@ pub fn run() {
             tauri_commands::language_packs::wsl_distros,
         ])
         .setup(|app| {
-            let data_dir = app.path().app_data_dir().expect("resolve app_data_dir");
+            // Keep dev runs isolated from the installed release. Both share
+            // the same `identifier` so without a suffix Tauri resolves both
+            // to `%APPDATA%\dev.oxyris.app` and the installed app would see
+            // events.sqlite from local cargo runs.
+            #[allow(unused_mut)]
+            let mut data_dir = app.path().app_data_dir().expect("resolve app_data_dir");
+            #[cfg(debug_assertions)]
+            {
+                let leaf = data_dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "oxyris".into());
+                data_dir.set_file_name(format!("{leaf}-dev"));
+            }
             let state = AppState::initialize(app.handle().clone(), data_dir)?;
             app.manage(state);
             tracing::info!("oxyris-desktop v{} booted", env!("CARGO_PKG_VERSION"));

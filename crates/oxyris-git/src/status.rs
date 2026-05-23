@@ -450,6 +450,8 @@ pub fn apply_patch(
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    use oxyris_procutil::HideConsole;
+
     let mut args: Vec<&str> = vec!["-C", repo_path, "apply"];
     if cached {
         args.push("--cached");
@@ -466,6 +468,7 @@ pub fn apply_patch(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .hide_console()
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(patch.as_bytes())?;

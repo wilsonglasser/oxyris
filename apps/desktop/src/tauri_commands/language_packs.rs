@@ -84,10 +84,12 @@ pub async fn language_packs_install_in_wsl(
 /// WSL is not installed or no distros are registered.
 #[tauri::command]
 pub async fn wsl_distros() -> Result<Vec<String>, TauriPackError> {
+    use oxyris_procutil::HideConsole;
     use std::process::Command;
     let out = match Command::new("wsl.exe")
         .arg("--list")
         .arg("--quiet")
+        .hide_console()
         .output()
     {
         Ok(o) if o.status.success() => o,

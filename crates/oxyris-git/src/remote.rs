@@ -8,6 +8,7 @@
 
 use std::process::Command;
 
+use oxyris_procutil::HideConsole;
 use serde::{Deserialize, Serialize};
 
 use crate::error::GitError;
@@ -72,7 +73,7 @@ pub fn push(
 }
 
 fn run(args: &[&str]) -> Result<RemoteOpResult, GitError> {
-    let out = Command::new("git").args(args).output()?;
+    let out = Command::new("git").args(args).hide_console().output()?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {

@@ -16,4 +16,5 @@ tokio.workspace = true
 tracing.workspace = true
 which.workspace = true
 oxyris-core.workspace = true
+oxyris-procutil.workspace = true
 oxyris-provider.workspace = true

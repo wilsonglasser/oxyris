@@ -53,12 +53,16 @@ export function IndexingChip({ worktreeId }: Props) {
 
   if (state.phase === "failed") {
     return (
-      <span
-        title={state.error ?? ""}
-        className="inline-flex items-center gap-1 rounded border border-red-900/50 bg-red-950/20 px-1.5 py-0.5 text-[10px] text-red-300"
-      >
-        <TriangleAlert className="size-3" strokeWidth={1.75} />
-        {t("indexing.failed")}
+      <span className="inline-flex max-w-[36rem] items-start gap-1 rounded border border-red-900/50 bg-red-950/20 px-1.5 py-0.5 text-[10px] text-red-300">
+        <TriangleAlert className="mt-0.5 size-3 shrink-0" strokeWidth={1.75} />
+        <span className="flex flex-col gap-0.5">
+          <span>{t("indexing.failed")}</span>
+          {state.error && (
+            <span className="font-mono text-[10px] text-red-200/90 break-words whitespace-pre-wrap">
+              {state.error}
+            </span>
+          )}
+        </span>
       </span>
     );
   }

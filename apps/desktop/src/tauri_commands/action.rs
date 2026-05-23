@@ -238,6 +238,7 @@ pub async fn action_run(
 }
 
 fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: String, run_id: String) {
+    use oxyris_procutil::HideConsole;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
@@ -250,6 +251,7 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true)
+                .hide_console()
                 .spawn(),
             Environment::Wsl { ref distro } => Command::new("wsl.exe")
                 .args([
@@ -265,6 +267,7 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true)
+                .hide_console()
                 .spawn(),
         };
         let mut child = match spawn_result {

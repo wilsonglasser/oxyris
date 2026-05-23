@@ -202,9 +202,10 @@ interface ViewProps {
 
 /**
  * Renders one xterm bound to an already-spawned PTY. Stays mounted across
- * tab switches (just toggles `visible`) so scrollback is preserved.
+ * tab switches (just toggles `visible`) so scrollback is preserved. Exported
+ * so the Pure-mode panel can reuse the exact replay/live/resize plumbing.
  */
-function TerminalView({ terminalId, visible, onExit }: ViewProps) {
+export function TerminalView({ terminalId, visible, onExit }: ViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -236,6 +237,12 @@ function TerminalView({ terminalId, visible, onExit }: ViewProps) {
     };
     const fitTimer = window.setTimeout(safeFit, 30);
     window.addEventListener("resize", safeFit);
+    // Re-fit when the container itself changes size (not just the window) —
+    // e.g. a composer growing with attachment chips above the terminal. Without
+    // this the fixed-size canvas overflows and covers sibling content until the
+    // next window resize.
+    const ro = new ResizeObserver(() => safeFit());
+    ro.observe(mount);
 
     let unlistenOut: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
@@ -323,6 +330,7 @@ function TerminalView({ terminalId, visible, onExit }: ViewProps) {
       window.clearTimeout(fitTimer);
       window.clearTimeout(resizeTimer);
       window.removeEventListener("resize", safeFit);
+      ro.disconnect();
       try {
         dataHandlers.forEach((d) => d.dispose());
       } catch {

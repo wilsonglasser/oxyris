@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ActionSidebar } from "~/components/ActionSidebar.tsx";
 import { ChatPanel } from "~/components/ChatPanel.tsx";
+import { PureClaudePanel } from "~/components/PureClaudePanel.tsx";
+import { MultiViewPanel } from "~/components/MultiViewPanel.tsx";
 import { FilesPanel } from "~/components/FilesPanel.tsx";
 import { GitPanel } from "~/components/GitPanel.tsx";
 import { Modal } from "~/components/Modal.tsx";
@@ -27,8 +29,9 @@ import {
 import { useFileEditorStore } from "~/stores/fileEditorStore.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
+import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 
-type Tab = "chat" | "files" | "git" | "settings";
+type Tab = "chat" | "multi" | "files" | "git" | "settings";
 
 export function App() {
   const { t } = useTranslation("common");
@@ -49,6 +52,7 @@ export function App() {
     activeSessionId ? s.snapshots[activeSessionId] : null,
   );
   const setActiveSession = useSessionStore((s) => s.setActive);
+  const pureMode = useAppSettingsStore((s) => s.pureMode);
   const bindings = useKeybindingsStore((s) => s.bindings);
   const loadBindings = useKeybindingsStore((s) => s.load);
   const backgroundCheckUpdate = useUpdaterStore((s) => s.backgroundCheck);
@@ -181,7 +185,7 @@ export function App() {
 
   const titleBarActions = (
     <div className="flex items-center gap-1 pr-2">
-      {(["chat", "files", "git", "settings"] as const).map((id) => (
+      {(["chat", "multi", "files", "git", "settings"] as const).map((id) => (
         <button
           key={id}
           type="button"
@@ -219,8 +223,24 @@ export function App() {
                       onNewProject={() => setProjectModalOpen(true)}
                     />
                   </div>
+                ) : pureMode ? (
+                  // "Claude Code puro": the interactive TUI in a PTY replaces
+                  // the structured chat entirely. Keyed by session for the
+                  // same isolation reason as ChatPanel below.
+                  <PureClaudePanel
+                    key={activeSessionId ?? "new"}
+                    project={active}
+                  />
                 ) : (
                   <ChatPanel
+                    // Key by session so each conversation gets its own
+                    // composer state (draft text, queue, attachments,
+                    // sending flag). Without this the single instance leaks
+                    // one thread's draft into the next. Remounting also
+                    // re-hydrates via `sessionGet`, which heals a snapshot
+                    // left stuck "streaming" because its live TurnCompleted
+                    // fired while the user was on a different conversation.
+                    key={activeSessionId ?? "new"}
                     project={active}
                     onToggleTerminal={
                       activeSessionId
@@ -240,6 +260,19 @@ export function App() {
                 </div>
               )}
             </div>
+          </>
+        )}
+        {tab === "multi" && (
+          <>
+            <Sidebar
+              onNewProject={() => setProjectModalOpen(true)}
+              onOpenSettings={() => setTab("settings")}
+              onNewSession={() => setActiveSession(null)}
+              onOpenProjectSettings={(id) => setProjectSettingsId(id)}
+            />
+            <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">
+              <MultiViewPanel />
+            </main>
           </>
         )}
         {tab === "files" && (

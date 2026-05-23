@@ -10,6 +10,7 @@ members = [
     "crates/oxyris-ipc",
     "crates/oxyris-laravel",
     "crates/oxyris-lsp",
+    "crates/oxyris-procutil",
     "crates/oxyris-provider",
     "crates/oxyris-claude",
 ]
@@ -73,6 +74,7 @@ oxyris-index = { path = "crates/oxyris-index" }
 oxyris-ipc = { path = "crates/oxyris-ipc" }
 oxyris-laravel = { path = "crates/oxyris-laravel" }
 oxyris-lsp = { path = "crates/oxyris-lsp" }
+oxyris-procutil = { path = "crates/oxyris-procutil" }
 oxyris-provider = { path = "crates/oxyris-provider" }
 oxyris-claude = { path = "crates/oxyris-claude" }
 

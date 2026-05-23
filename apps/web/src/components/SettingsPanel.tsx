@@ -17,6 +17,7 @@ import type { Environment } from "~/ipc/commands.ts";
 import { LanguageSwitcher } from "~/components/LanguageSwitcher.tsx";
 import { LanguagePacksPanel } from "~/components/LanguagePacksPanel.tsx";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
+import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import {
   type UpdateStatus,
   applyUpdate,
@@ -101,6 +102,8 @@ function GeneralTab() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() =>
     isNotificationSoundEnabled(),
   );
+  const pureMode = useAppSettingsStore((s) => s.pureMode);
+  const setPureMode = useAppSettingsStore((s) => s.setPureMode);
 
   useEffect(() => {
     void getVersion().then(setVersion).catch(() => {});
@@ -269,6 +272,28 @@ function GeneralTab() {
             </span>
             <span className="block text-neutral-500">
               {t("notifications_sound_desc")}
+            </span>
+          </span>
+        </label>
+      </Section>
+
+      <Section
+        icon={<TerminalSquare className="size-3.5" strokeWidth={1.75} />}
+        title={t("section_pure_mode")}
+      >
+        <label className="flex items-start gap-2 text-[11px] text-neutral-400">
+          <input
+            type="checkbox"
+            checked={pureMode}
+            onChange={(e) => setPureMode(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span>
+            <span className="font-medium text-neutral-200">
+              {t("pure_mode_title")}
+            </span>
+            <span className="block text-neutral-500">
+              {t("pure_mode_desc")}
             </span>
           </span>
         </label>

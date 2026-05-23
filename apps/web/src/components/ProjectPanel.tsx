@@ -5,11 +5,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   type Environment,
   type PathValidation,
-  type ProjectRow,
   ProjectCommandError,
   projectCreate,
-  projectDelete,
-  projectRename,
   projectValidatePath,
 } from "~/ipc/commands.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
@@ -22,9 +19,20 @@ interface ProjectPanelProps {
   onCreated?: () => void;
 }
 
+/** Match `\\wsl.localhost\<distro>\<rest>` or `\\wsl$\<distro>\<rest>` (and
+ * forward-slash variants). Returns `[distro, posixPath]` on hit. */
+function parseWslUnc(picked: string): [string, string] | null {
+  const re = /^[\\/][\\/](?:wsl\.localhost|wsl\$)[\\/]([^\\/]+)(.*)$/;
+  const m = picked.match(re);
+  if (!m || !m[1]) return null;
+  const distro = m[1];
+  const rest = (m[2] ?? "").replace(/\\/g, "/");
+  const posix = rest.length === 0 ? "/" : rest;
+  return [distro, posix];
+}
+
 export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
   const { t } = useTranslation("project");
-  const projects = useProjectStore((s) => s.projects);
   const refresh = useProjectStore((s) => s.refresh);
   const setActive = useProjectStore((s) => s.setActive);
   const [error, setError] = useState<string | null>(null);
@@ -35,10 +43,6 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
   const [rootPath, setRootPath] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [validation, setValidation] = useState<PathValidation | null>(null);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
 
   // Debounced path validation — avoid hammering the agent on every keystroke.
   const validateTimer = useRef<number | undefined>(undefined);
@@ -60,9 +64,20 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
   }, [rootPath, envKind, distro]);
 
   const onBrowse = async () => {
-    if (envKind !== "windows") return;
     const picked = await openDialog({ directory: true, multiple: false });
-    if (typeof picked === "string") {
+    if (typeof picked !== "string") return;
+    const wsl = parseWslUnc(picked);
+    if (wsl) {
+      const [pickedDistro, posix] = wsl;
+      setEnvKind("wsl");
+      setDistro(pickedDistro);
+      setRootPath(posix);
+      if (!name.trim()) {
+        const leaf = posix.split("/").filter(Boolean).pop();
+        if (leaf) setName(leaf);
+      }
+    } else {
+      setEnvKind("windows");
       setRootPath(picked);
       if (!name.trim()) {
         const leaf = picked.split(/[\\/]/).filter(Boolean).pop();
@@ -95,34 +110,10 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
     }
   };
 
-  const onRename = async (p: ProjectRow) => {
-    const next = window.prompt(t("list.rename_prompt", { name: p.name }), p.name);
-    if (!next || next === p.name) return;
-    try {
-      await projectRename({ id: p.id, new_name: next });
-      await refresh();
-    } catch (err) {
-      setError(formatError(err, t));
-    }
-  };
-
-  const onDelete = async (p: ProjectRow) => {
-    if (!window.confirm(t("list.delete_confirm", { name: p.name }))) return;
-    try {
-      await projectDelete({ id: p.id });
-      await refresh();
-    } catch (err) {
-      setError(formatError(err, t));
-    }
-  };
-
-  const { i18n } = useTranslation();
-  const locale = i18n.resolvedLanguage ?? i18n.language;
-
   return (
     <section className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
       <h2 className="mb-3 text-sm font-medium text-neutral-300">
-        {t("heading")}
+        {t("create.heading")}
       </h2>
 
       {error !== null && (
@@ -130,54 +121,6 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
           {error}
         </p>
       )}
-
-      {projects.length === 0 ? (
-        <p className="mb-4 text-xs text-neutral-500">{t("empty")}</p>
-      ) : (
-        <ul className="mb-4 flex flex-col gap-2">
-          {projects.map((p) => (
-            <li
-              key={p.id}
-              className="flex items-center justify-between rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{p.name}</div>
-                <div className="truncate text-[11px] text-neutral-500">
-                  {p.environment.kind === "windows"
-                    ? t("list.environment_windows")
-                    : t("list.environment_wsl", { distro: p.environment.distro })}
-                  {" · "}
-                  <span className="font-mono">{p.root_path}</span>
-                  {" · "}
-                  {t("list.created_at", {
-                    date: new Date(p.created_at).toLocaleString(locale),
-                  })}
-                </div>
-              </div>
-              <div className="ml-3 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => void onRename(p)}
-                  className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
-                >
-                  {t("list.rename")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void onDelete(p)}
-                  className="rounded border border-red-900/60 px-2 py-1 text-xs text-red-300 hover:bg-red-950/40"
-                >
-                  {t("list.delete")}
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <h3 className="mb-2 text-xs uppercase tracking-wide text-neutral-500">
-        {t("create.heading")}
-      </h3>
       <form onSubmit={onCreate} className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="flex flex-col gap-1 text-xs text-neutral-400">
           {t("create.name")}
@@ -231,15 +174,13 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
               required
               className="flex-1 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
             />
-            {envKind === "windows" && (
-              <button
-                type="button"
-                onClick={() => void onBrowse()}
-                className="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs text-neutral-200 hover:bg-neutral-800"
-              >
-                {t("create.browse")}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => void onBrowse()}
+              className="rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs text-neutral-200 hover:bg-neutral-800"
+            >
+              {t("create.browse")}
+            </button>
           </div>
           {validation && (
             <ValidationBadge validation={validation} t={t} />

@@ -9,6 +9,8 @@ export type InstallStatus =
   | { kind: "installing"; progress: number }
   | { kind: "failed"; message: string };
 
+export type WslInstallInfo = { distro: string; path: string };
+
 export type LanguagePack = {
   id: string;
   display_name: string;
@@ -16,6 +18,7 @@ export type LanguagePack = {
   lsp_language: string;
   install_method: "github_release" | "npm_global" | "manual";
   status: InstallStatus;
+  wsl_installs: WslInstallInfo[];
 };
 
 export type PackProgressEvent =
@@ -48,7 +51,7 @@ function normalize(raw: RawPack): LanguagePack {
   } else {
     status = { kind: "failed", message: s.failed.message };
   }
-  return { ...raw, status };
+  return { ...raw, status, wsl_installs: raw.wsl_installs ?? [] };
 }
 
 export async function languagePacksList(): Promise<LanguagePack[]> {

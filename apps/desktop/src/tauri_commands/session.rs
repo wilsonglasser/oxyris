@@ -54,6 +54,10 @@ pub struct StartSessionInput {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub env_mode: crate::domain::session::EnvMode,
+    /// `structured` (default) drives the stream-json provider; `pure` creates
+    /// a metadata-only session whose conversation runs in an interactive PTY.
+    #[serde(default)]
+    pub kind: crate::domain::session::SessionKind,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +116,7 @@ pub async fn session_start(
             worktree_id,
             input.provider_id,
             input.env_mode,
+            input.kind,
             opts,
         )
         .await?;

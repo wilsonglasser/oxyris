@@ -233,16 +233,18 @@ pub async fn worktree_list(
     input: ListWorktreesInput,
     state: State<'_, AppState>,
 ) -> Result<Vec<WorktreeRow>, TauriWorktreeError> {
+    reconcile_existing_worktrees(&state, input.project_id).await;
     let mut rows = state
         .projections
         .list_worktrees(input.project_id, input.include_removed)?;
-    // Always prepend a synthetic primary so the UI has something to scope
-    // sessions to even on projects that the user hasn't created any
-    // worktrees on. Best-effort: if git can't tell us the current branch
-    // (empty repo, broken state) we still emit a card with an empty branch.
+    // Dedup by name in the response (defends against any leftover duplicate
+    // rows from earlier races without writing Remove events).
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|r| seen.insert(r.name.clone()));
     if let Ok(primary) = synthesize_primary(&state, input.project_id).await {
         rows.insert(0, primary);
     }
+    tracing::info!(project_id = %input.project_id, count = rows.len(), "worktree_list returning");
     Ok(rows)
 }
 
@@ -304,6 +306,88 @@ pub async fn git_list_worktrees(
 ) -> Result<Vec<git::WorktreeRef>, TauriWorktreeError> {
     let project = find_project(&state, project_id)?;
     Ok(git::list_worktrees(&project.environment, &state.agent_pool, &project.root_path).await?)
+}
+
+/// Best-effort import of git worktrees that exist on disk but aren't yet
+/// in the event store. Called by `worktree_list` so projects added with
+/// pre-existing worktrees (e.g. cloned with `git worktree add` outside
+/// Oxyris) surface them automatically. Silently no-ops on git errors —
+/// the caller still gets whatever the projection has.
+async fn reconcile_existing_worktrees(state: &AppState, project_id: AggregateId) {
+    let project = match find_project(state, project_id) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let on_disk = match git::list_worktrees(
+        &project.environment,
+        &state.agent_pool,
+        &project.root_path,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(%project_id, error = %e, "reconcile: git list_worktrees failed");
+            return;
+        }
+    };
+    let known = match state.projections.list_worktrees(project_id, true) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(%project_id, error = %e, "reconcile: projection list_worktrees failed");
+            return;
+        }
+    };
+    for wt in on_disk.into_iter().filter(|w| !w.is_primary) {
+        // Dedupe by name and path: git enforces unique worktree names per
+        // repo, so a name collision means we already have it. Path check
+        // covers the edge case where a row was imported with a different
+        // name (e.g. user renamed via `git worktree move`).
+        if known.iter().any(|r| r.name == wt.name)
+            || known.iter().any(|r| paths_equal(&r.path, &wt.path))
+        {
+            continue;
+        }
+        let id = AggregateId::new();
+        let cmd = WorktreeCommand::Create {
+            id,
+            project_id,
+            name: wt.name.clone(),
+            branch: wt.branch.clone().unwrap_or_default(),
+            path: wt.path.clone(),
+            is_primary: false,
+            now: Utc::now(),
+        };
+        let events = match Worktree::decide(&WorktreeState::default(), cmd) {
+            Ok(ev) => ev,
+            Err(e) => {
+                tracing::warn!(name = %wt.name, error = %e, "reconcile: decide failed");
+                continue;
+            }
+        };
+        let stored = match state.event_store.append(Worktree::KIND, id, 0, &events) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(name = %wt.name, error = %e, "reconcile: append failed");
+                continue;
+            }
+        };
+        for s in &stored {
+            if let Err(e) = state.projections.apply(s) {
+                tracing::warn!(name = %wt.name, error = %e, "reconcile: projection apply failed");
+            }
+        }
+        tracing::info!(name = %wt.name, path = %wt.path, "reconcile: imported existing worktree");
+    }
+}
+
+fn paths_equal(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.trim_end_matches(['/', '\\'])
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
 }
 
 // ────── helpers ────────────────────────────────────────────────────────────

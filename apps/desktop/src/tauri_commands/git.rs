@@ -378,6 +378,7 @@ pub async fn git_generate_commit_message(
     state: State<'_, AppState>,
 ) -> Result<GitGenerateCommitMsgOutput, TauriGitError> {
     use oxyris_core::Environment;
+    use oxyris_procutil::HideConsole;
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
@@ -395,6 +396,7 @@ pub async fn git_generate_commit_message(
             let diff_out = tokio::task::spawn_blocking(move || -> Result<String, String> {
                 let out = std::process::Command::new("git")
                     .args(["-C", &repo_path, "diff", "--cached"])
+                    .hide_console()
                     .output()
                     .map_err(|e| e.to_string())?;
                 if !out.status.success() {
@@ -428,6 +430,7 @@ pub async fn git_generate_commit_message(
                 .args(["-d", distro.as_str(), "--", "bash", "-lc", &script])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .hide_console()
                 .output()
                 .await
                 .map_err(|e| TauriGitError::Backend(format!("spawn wsl: {e}")))?;
@@ -470,7 +473,8 @@ pub async fn git_generate_commit_message(
         .arg(prompt)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .hide_console();
 
     let mut child = cmd
         .spawn()

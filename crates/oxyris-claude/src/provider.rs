@@ -4,6 +4,7 @@
 use std::process::Stdio;
 
 use oxyris_core::Environment;
+use oxyris_procutil::HideConsole;
 use oxyris_provider::{
     Provider, ProviderCommand, ProviderError, ProviderEvent, ProviderSession, SessionOptions,
 };
@@ -328,6 +329,7 @@ fn build_command(opts: &SessionOptions) -> Result<Command, ProviderError> {
         cmd.args(["--mcp-config", mcp_path]);
     }
 
+    cmd.hide_console();
     Ok(cmd)
 }
 

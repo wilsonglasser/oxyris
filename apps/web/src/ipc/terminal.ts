@@ -16,6 +16,20 @@ export async function terminalSpawn(input: {
   return invoke("terminal_spawn", { input });
 }
 
+/**
+ * Spawn the interactive `claude` TUI in a PTY for a Pure-mode session
+ * ("Claude Code puro"). Same event/attach plumbing as a regular terminal —
+ * use {@link onTerminalOutput}/{@link terminalAttach}/{@link terminalWrite}
+ * with the returned id.
+ */
+export async function claudePtySpawn(input: {
+  session_id: string;
+  cols: number;
+  rows: number;
+}): Promise<TerminalInfo> {
+  return invoke("claude_pty_spawn", { input });
+}
+
 export async function terminalWrite(input: {
   id: string;
   data: string;
