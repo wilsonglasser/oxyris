@@ -19,9 +19,11 @@ import {
 } from "~/ipc/session.ts";
 import {
   isPrimaryWorktreeId,
+  PRIMARY_WORKTREE_ID,
   type WorktreeRow,
   worktreeList,
 } from "~/ipc/worktree.ts";
+import { fsOpenExternal } from "~/ipc/fs.ts";
 import {
   claudePtySpawn,
   claudePureRefreshTitle,
@@ -33,12 +35,15 @@ import {
   playTurnCompleteChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
+import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import {
   toSpeechLocale,
   useSpeechRecognition,
 } from "~/hooks/useSpeechRecognition.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
+import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import { TerminalView } from "~/components/TerminalPanel.tsx";
+import { FileViewerModal } from "~/components/FileViewerModal.tsx";
 
 // Strip ANSI escape sequences (CSI + OSC) from raw PTY bytes so prompt text
 // matches across redraws. Char-code based to keep raw control bytes out of
@@ -71,6 +76,36 @@ function stripAnsi(s: string): string {
     }
   }
   return out;
+}
+
+/**
+ * Turn a path token clicked in the terminal into a worktree-relative path the
+ * fs IPC accepts (it rejects absolute paths and `..`). `cwd` is the PTY's
+ * working directory, which equals the worktree root for pure sessions. Returns
+ * null when the path escapes the worktree (can't be opened via worktree-scoped
+ * fs ops) or can't be resolved.
+ */
+function resolveRelPath(raw: string, cwd: string): string | null {
+  // Drop a trailing :line[:col] locator, then normalize separators.
+  let p = raw.replace(/:\d+(?::\d+)?$/, "").replace(/\\/g, "/");
+  let base = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  // A WSL UNC cwd (\\wsl.localhost\<distro>\home\…) maps to the POSIX path the
+  // distro — and claude's output — actually use.
+  const unc = base.match(/^\/\/(?:wsl\.localhost|wsl\$)\/[^/]+(.*)$/);
+  if (unc) base = unc[1] || "/";
+
+  const isAbs = /^[A-Za-z]:\//.test(p) || p.startsWith("/");
+  if (isAbs) {
+    const pl = p.toLowerCase();
+    const bl = base.toLowerCase();
+    if (pl === bl) return null; // the worktree root itself, not a file
+    if (pl.startsWith(`${bl}/`)) return p.slice(base.length + 1);
+    return null; // outside the worktree
+  }
+  // Relative → already worktree-root-relative (cwd == root). Reject escapes.
+  p = p.replace(/^\.\//, "");
+  if (p === ".." || p.startsWith("../")) return null;
+  return p || null;
 }
 
 interface Attachment {
@@ -319,8 +354,24 @@ function PureSessionView({
 }) {
   const { t } = useTranslation("chat");
   const [termId, setTermId] = useState<string | null>(null);
+  const [cwd, setCwd] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
+  // Ctrl/Cmd+click target when opening a terminal file path in the in-app modal.
+  const [openRelPath, setOpenRelPath] = useState<string | null>(null);
+  const openFilesExternally = useAppSettingsStore((s) => s.openFilesExternally);
+  // The fs ops a file-open uses must be scoped to the SESSION's own project +
+  // worktree, not whatever project is selected in the sidebar (`project`). A
+  // pure session can run against a different project than the active one — using
+  // `project.id` joined the session's relative path onto the wrong root (the
+  // "Windows cannot find …" error). Fall back to the prop only if the snapshot
+  // hasn't hydrated yet.
+  const openProjectId = useSessionStore(
+    (s) => s.snapshots[sessionId]?.project_id ?? project.id,
+  );
+  const worktreeId = useSessionStore(
+    (s) => s.snapshots[sessionId]?.worktree_id ?? PRIMARY_WORKTREE_ID,
+  );
   // Attachments shown as chips ([Image #N] / [File #N]); the raw `@path` is
   // only assembled at send time, never shown in the textarea.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -356,7 +407,10 @@ function PureSessionView({
     outTailRef.current = tail;
     if (PROMPT_RE.test(tail) && !promptOpenRef.current) {
       promptOpenRef.current = true;
-      if (shouldNotify()) playTurnCompleteChime();
+      if (shouldNotify()) {
+        playTurnCompleteChime();
+        bumpBadge();
+      }
     }
   }, []);
 
@@ -402,7 +456,10 @@ function PureSessionView({
         armedRef.current = false;
         // If a permission/input prompt is on screen the prompt chime already
         // rang — don't double-ring as a "turn done".
-        if (!promptOpenRef.current && shouldNotify()) playTurnCompleteChime();
+        if (!promptOpenRef.current && shouldNotify()) {
+          playTurnCompleteChime();
+          bumpBadge();
+        }
         // Turn settled → claude has flushed the user message (and maybe a
         // summary) to its transcript; try to title from it.
         refreshTitle();
@@ -430,6 +487,7 @@ function PureSessionView({
         const claudePty = existing.find((tinfo) => tinfo.kind === "claude");
         if (claudePty) {
           setTermId(claudePty.id);
+          setCwd(claudePty.cwd);
           return;
         }
         const info = await claudePtySpawn({
@@ -438,6 +496,7 @@ function PureSessionView({
           rows: 24,
         });
         setTermId(info.id);
+        setCwd(info.cwd);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         // Allow a retry on the next mount/session change.
@@ -466,6 +525,28 @@ function PureSessionView({
         .catch(() => {});
     },
     [termId],
+  );
+
+  // Ctrl/Cmd+click on a file path in the TUI. Resolve it against the PTY cwd,
+  // then either hand off to the external editor or pop the in-app modal.
+  const onOpenPath = useCallback(
+    (raw: string) => {
+      if (!cwd) return;
+      const rel = resolveRelPath(raw, cwd);
+      if (!rel) return;
+      if (openFilesExternally) {
+        void fsOpenExternal({
+          projectId: openProjectId,
+          worktreeId,
+          relPath: rel,
+        }).catch((e) =>
+          setError(e instanceof Error ? e.message : String(e)),
+        );
+      } else {
+        setOpenRelPath(rel);
+      }
+    },
+    [cwd, openFilesExternally, openProjectId, worktreeId],
   );
 
   const speech = useSpeechRecognition({
@@ -639,6 +720,7 @@ function PureSessionView({
             onImagePaste={onTerminalImagePaste}
             onInput={onPtyInput}
             onOutput={onPtyOutput}
+            onOpenPath={onOpenPath}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-[11px] text-neutral-500">
@@ -753,6 +835,15 @@ function PureSessionView({
         </button>
         </div>
       </div>
+
+      {openRelPath && (
+        <FileViewerModal
+          projectId={openProjectId}
+          worktreeId={worktreeId}
+          relPath={openRelPath}
+          onClose={() => setOpenRelPath(null)}
+        />
+      )}
     </section>
   );
 }

@@ -15,6 +15,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { php } from "@codemirror/lang-php";
 import { python } from "@codemirror/lang-python";
 import { rust } from "@codemirror/lang-rust";
+import { sql } from "@codemirror/lang-sql";
 import { yaml } from "@codemirror/lang-yaml";
 
 export function languageForPath(path: string): Extension | null {
@@ -57,6 +58,10 @@ export function languageForPath(path: string): Extension | null {
       return markdown();
     case "php":
       return php();
+    case "sql":
+    case "mysql":
+    case "pgsql":
+      return sql();
     case "yaml":
     case "yml":
       return yaml();

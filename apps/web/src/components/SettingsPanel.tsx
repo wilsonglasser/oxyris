@@ -96,6 +96,10 @@ function GeneralTab() {
   );
   const pureMode = useAppSettingsStore((s) => s.pureMode);
   const setPureMode = useAppSettingsStore((s) => s.setPureMode);
+  const openFilesExternally = useAppSettingsStore((s) => s.openFilesExternally);
+  const setOpenFilesExternally = useAppSettingsStore(
+    (s) => s.setOpenFilesExternally,
+  );
 
   useEffect(() => {
     void getVersion().then(setVersion).catch(() => {});
@@ -261,6 +265,28 @@ function GeneralTab() {
             </span>
             <span className="block text-neutral-500">
               {t("pure_mode_desc")}
+            </span>
+          </span>
+        </label>
+      </Section>
+
+      <Section
+        icon={<FileText className="size-3.5" strokeWidth={1.75} />}
+        title={t("section_files")}
+      >
+        <label className="flex items-start gap-2 text-[11px] text-neutral-400">
+          <input
+            type="checkbox"
+            checked={openFilesExternally}
+            onChange={(e) => setOpenFilesExternally(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span>
+            <span className="font-medium text-neutral-200">
+              {t("open_external_title")}
+            </span>
+            <span className="block text-neutral-500">
+              {t("open_external_desc")}
             </span>
           </span>
         </label>

@@ -21,6 +21,7 @@ import { TitleBar } from "~/components/TitleBar.tsx";
 import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
+import { clearBadge } from "~/lib/taskbarBadge.ts";
 import { useIndexingStore } from "~/stores/indexingStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { useLspStatusStore } from "~/stores/lspStatusStore.ts";
@@ -58,6 +59,16 @@ export function App() {
   );
   const setActiveSession = useSessionStore((s) => s.setActive);
   const pureMode = useAppSettingsStore((s) => s.pureMode);
+
+  // Clear the taskbar unread badge whenever the window regains focus — the
+  // badge counts turns that completed while the user was away (see
+  // `taskbarBadge.ts` / the `bumpBadge` calls on turn completion).
+  useEffect(() => {
+    const onFocus = () => clearBadge();
+    window.addEventListener("focus", onFocus);
+    if (document.hasFocus()) clearBadge();
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
   const bindings = useKeybindingsStore((s) => s.bindings);
   const loadBindings = useKeybindingsStore((s) => s.load);
   const backgroundCheckUpdate = useUpdaterStore((s) => s.backgroundCheck);
@@ -185,6 +196,14 @@ export function App() {
     setNewChatOpen(false);
   };
 
+  // "New thread": drop into the empty composer AND jump to the chat tab — the
+  // sidebar is visible from Files/Git too, so starting a thread there must
+  // leave that tab and show the composer.
+  const startNewSession = () => {
+    setActiveSession(null);
+    setTab("chat");
+  };
+
   const center =
     projects.length > 0 ? (
       <ProjectSwitcher onNewChat={() => setNewChatOpen(true)} />
@@ -219,7 +238,7 @@ export function App() {
             <Sidebar
               onNewProject={() => setProjectModalOpen(true)}
               onOpenSettings={() => setTab("settings")}
-              onNewSession={() => setActiveSession(null)}
+              onNewSession={startNewSession}
               onOpenProjectSettings={(id) => setProjectSettingsId(id)}
             />
             <div className="flex min-h-0 flex-1 flex-col bg-neutral-950">
@@ -280,7 +299,7 @@ export function App() {
             <Sidebar
               onNewProject={() => setProjectModalOpen(true)}
               onOpenSettings={() => setTab("settings")}
-              onNewSession={() => setActiveSession(null)}
+              onNewSession={startNewSession}
               onOpenProjectSettings={(id) => setProjectSettingsId(id)}
             />
             <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">
@@ -293,7 +312,7 @@ export function App() {
             <Sidebar
               onNewProject={() => setProjectModalOpen(true)}
               onOpenSettings={() => setTab("settings")}
-              onNewSession={() => setActiveSession(null)}
+              onNewSession={startNewSession}
               onOpenProjectSettings={(id) => setProjectSettingsId(id)}
             />
             <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">
@@ -306,7 +325,7 @@ export function App() {
             <Sidebar
               onNewProject={() => setProjectModalOpen(true)}
               onOpenSettings={() => setTab("settings")}
-              onNewSession={() => setActiveSession(null)}
+              onNewSession={startNewSession}
               onOpenProjectSettings={(id) => setProjectSettingsId(id)}
             />
             <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">

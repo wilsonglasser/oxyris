@@ -19,6 +19,7 @@ import {
 } from "~/ipc/worktree.ts";
 import {
   joinPath,
+  scopeKey,
   useFileEditorStore,
 } from "~/stores/fileEditorStore.ts";
 import type { FsEntry } from "~/ipc/fs.ts";
@@ -42,11 +43,10 @@ export function FileTreePanel({
 }: Props) {
   const { t } = useTranslation("files");
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
-  const tree = useFileEditorStore(
-    (s) => s.trees[worktreeId] ?? EMPTY_TREE,
-  );
+  const key = scopeKey(projectId, worktreeId);
+  const tree = useFileEditorStore((s) => s.trees[key] ?? EMPTY_TREE);
   const expanded = useFileEditorStore(
-    (s) => s.expanded[worktreeId] ?? EMPTY_EXPANDED,
+    (s) => s.expanded[key] ?? EMPTY_EXPANDED,
   );
   const loadDir = useFileEditorStore((s) => s.loadDir);
   const toggleExpand = useFileEditorStore((s) => s.toggleExpand);

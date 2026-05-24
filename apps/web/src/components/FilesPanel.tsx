@@ -34,8 +34,13 @@ export function FilesPanel({ projectId }: Props) {
 
   const sessionWorktreeId = useMemo(() => {
     if (!sessionSnapshot) return null;
+    // Only adopt the active session's worktree when that session actually
+    // belongs to the project being viewed — otherwise the tree would try to
+    // load another project's worktree under this project (root mismatch / the
+    // wrong files showing). Fall back to PRIMARY for the selected project.
+    if (sessionSnapshot.project_id !== projectId) return null;
     return sessionSnapshot.worktree_id ?? PRIMARY_WORKTREE_ID;
-  }, [sessionSnapshot]);
+  }, [sessionSnapshot, projectId]);
 
   const worktreeId =
     (projectId && overrides[projectId]) ||

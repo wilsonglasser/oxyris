@@ -8,6 +8,7 @@ import {
   playTurnCompleteChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
+import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { getDraft, setDraft } from "~/stores/drafts.ts";
 import {
@@ -263,7 +264,10 @@ export function ChatPanel({
       if (terminal) {
         // Any pending approval for this turn is moot once it ends.
         setApprovals([]);
-        if (shouldNotify()) playTurnCompleteChime();
+        if (shouldNotify()) {
+        playTurnCompleteChime();
+        bumpBadge();
+      }
       }
     }).then((fn) => {
       if (cancelled) fn();
@@ -285,7 +289,10 @@ export function ChatPanel({
     void onSessionApproval(activeId, (req) => {
       if (cancelled) return;
       // Chime when the window is backgrounded — a prompt needs the user.
-      if (shouldNotify()) playTurnCompleteChime();
+      if (shouldNotify()) {
+        playTurnCompleteChime();
+        bumpBadge();
+      }
       setApprovals((prev) =>
         prev.some((p) => p.request_id === req.request_id) ? prev : [...prev, req],
       );

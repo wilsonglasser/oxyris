@@ -377,6 +377,7 @@ mod open_external {
         ("vscode", "Visual Studio Code", &["code.cmd", "code"]),
         ("cursor", "Cursor", &["cursor.cmd", "cursor"]),
         ("windsurf", "Windsurf", &["windsurf.cmd", "windsurf"]),
+        ("zed", "Zed", &["zed.exe", "zed"]),
         ("sublime", "Sublime Text", &["subl.exe", "sublime_text.exe"]),
         ("notepad++", "Notepad++", &["notepad++.exe"]),
     ];

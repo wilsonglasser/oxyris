@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   ChevronDown,
   ChevronRight,
@@ -70,6 +71,15 @@ export function Sidebar({
   const [worktreesByProject, setWorktreesByProject] =
     useState<WorktreesByProject>({});
   const hasUpdate = useHasUpdate();
+
+  // App version read from the bundle at runtime (Tauri injects it from
+  // tauri.conf.json), so the footer always matches the installed build.
+  const [version, setVersion] = useState<string>("");
+  useEffect(() => {
+    void getVersion()
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
 
   // User-resizable sidebar width, persisted across reloads. Bounds keep the
   // chrome usable.
@@ -408,7 +418,9 @@ export function Sidebar({
             <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-emerald-400" />
           )}
         </button>
-        <span className="pr-1 text-[10px] text-neutral-600">v0.1.0</span>
+        {version && (
+          <span className="pr-1 text-[10px] text-neutral-600">v{version}</span>
+        )}
       </footer>
 
       {/*

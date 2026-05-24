@@ -7,7 +7,11 @@ import { islandDark } from "~/lib/codemirror-theme.ts";
 import { languageForPath } from "~/lib/codemirror-language.ts";
 import { Eye, FileText } from "lucide-react";
 import { fsExternalEditors, fsOpenExternal } from "~/ipc/fs.ts";
-import { useFileEditorStore, type Tab } from "~/stores/fileEditorStore.ts";
+import {
+  scopeKey,
+  useFileEditorStore,
+  type Tab,
+} from "~/stores/fileEditorStore.ts";
 import {
   ImagePreview,
   MarkdownPreview,
@@ -25,11 +29,10 @@ const EMPTY_TABS: Record<string, Tab> = {};
 
 export function FileEditorTabs({ projectId, worktreeId }: Props) {
   const { t } = useTranslation("files");
-  const order = useFileEditorStore(
-    (s) => s.openOrder[worktreeId] ?? EMPTY_ORDER,
-  );
-  const tabs = useFileEditorStore((s) => s.tabs[worktreeId] ?? EMPTY_TABS);
-  const active = useFileEditorStore((s) => s.active[worktreeId] ?? null);
+  const key = scopeKey(projectId, worktreeId);
+  const order = useFileEditorStore((s) => s.openOrder[key] ?? EMPTY_ORDER);
+  const tabs = useFileEditorStore((s) => s.tabs[key] ?? EMPTY_TABS);
+  const active = useFileEditorStore((s) => s.active[key] ?? null);
   const setActive = useFileEditorStore((s) => s.setActive);
   const closeTab = useFileEditorStore((s) => s.closeTab);
   const closeOthers = useFileEditorStore((s) => s.closeOthers);
@@ -104,7 +107,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col bg-neutral-950">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-neutral-950">
       <div className="flex h-8 shrink-0 items-stretch border-b border-neutral-800">
         {overflow && (
           <button
@@ -119,7 +122,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
         <div
           ref={tabStripRef}
           role="tablist"
-          className="flex min-w-0 flex-1 items-stretch overflow-x-auto"
+          className="flex min-w-0 flex-1 items-stretch overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {order.map((relPath) => {
             // After a persist-restored boot, `tab` may be undefined for
@@ -150,7 +153,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
                 <button
                   type="button"
                   onClick={() => {
-                    setActive(worktreeId, relPath);
+                    setActive(projectId, worktreeId, relPath);
                     if (!tab) {
                       void openFile(projectId, worktreeId, relPath);
                     }
@@ -167,7 +170,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => closeTab(worktreeId, relPath)}
+                  onClick={() => closeTab(projectId, worktreeId, relPath)}
                   className="rounded p-0.5 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
                   aria-label={t("close_tab")}
                 >
@@ -198,7 +201,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           <button
             type="button"
             onClick={() => {
-              closeTab(worktreeId, menu.relPath);
+              closeTab(projectId, worktreeId, menu.relPath);
               setMenu(null);
             }}
             className="block w-full px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
@@ -208,7 +211,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           <button
             type="button"
             onClick={() => {
-              closeOthers(worktreeId, menu.relPath);
+              closeOthers(projectId, worktreeId, menu.relPath);
               setMenu(null);
             }}
             className="block w-full px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
@@ -218,7 +221,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           <button
             type="button"
             onClick={() => {
-              closeAll(worktreeId);
+              closeAll(projectId, worktreeId);
               setMenu(null);
             }}
             className="block w-full px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
@@ -251,7 +254,7 @@ interface EditorPaneProps {
   tab: Tab;
 }
 
-function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
+export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
   const { t } = useTranslation("files");
   const setBuffer = useFileEditorStore((s) => s.setBuffer);
   const saveTab = useFileEditorStore((s) => s.saveTab);
@@ -280,6 +283,17 @@ function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
     };
   }, []);
 
+  // Editors actually installed (plus the always-available system default).
+  // Missing ones are never surfaced.
+  const availableEditors = useMemo(
+    () => editors.filter((e) => e.available),
+    [editors],
+  );
+  const openWith = (id: string) => {
+    setEditorPickerOpen(false);
+    void fsOpenExternal({ projectId, worktreeId, relPath: tab.relPath, editor: id });
+  };
+
   // Build the CodeMirror view once per (worktreeId, relPath); buffer updates
   // flow back into the store via the updateListener below.
   useEffect(() => {
@@ -301,7 +315,7 @@ function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
       ]),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) {
-          setBuffer(worktreeId, tab.relPath, u.state.doc.toString());
+          setBuffer(projectId, worktreeId, tab.relPath, u.state.doc.toString());
         }
       }),
       EditorView.lineWrapping,
@@ -393,36 +407,32 @@ function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
           <div className="relative">
             <button
               type="button"
-              onClick={() => setEditorPickerOpen((v) => !v)}
+              onClick={() => {
+                // Only the system default is available → no point in a menu,
+                // open it straight away. Otherwise toggle the picker.
+                if (availableEditors.length <= 1) {
+                  openWith(availableEditors[0]?.id ?? "default");
+                } else {
+                  setEditorPickerOpen((v) => !v);
+                }
+              }}
               className="flex items-center gap-1 rounded px-1.5 py-0.5 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
             >
               <ExternalLink size={11} />
               {t("open_external")}
             </button>
-            {editorPickerOpen && (
+            {editorPickerOpen && availableEditors.length > 1 && (
               <div className="absolute right-0 top-full z-10 mt-1 min-w-[160px] rounded border border-neutral-800 bg-neutral-950 p-1 shadow-lg">
-                {editors.map((ed) => (
+                {/* Only installed editors are listed (plus the always-present
+                    system default) — nothing missing is shown. */}
+                {availableEditors.map((ed) => (
                   <button
                     key={ed.id}
                     type="button"
-                    disabled={!ed.available}
-                    onClick={() => {
-                      setEditorPickerOpen(false);
-                      void fsOpenExternal({
-                        projectId,
-                        worktreeId,
-                        relPath: tab.relPath,
-                        editor: ed.id,
-                      });
-                    }}
-                    className="block w-full rounded px-2 py-1 text-left text-[11px] enabled:hover:bg-neutral-900 disabled:text-neutral-600"
+                    onClick={() => openWith(ed.id)}
+                    className="block w-full rounded px-2 py-1 text-left text-[11px] hover:bg-neutral-900"
                   >
                     {ed.label}
-                    {!ed.available && (
-                      <span className="ml-1 text-neutral-600">
-                        ({t("not_installed")})
-                      </span>
-                    )}
                   </button>
                 ))}
               </div>

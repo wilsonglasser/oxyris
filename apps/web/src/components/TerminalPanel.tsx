@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Pencil, Plus, X } from "lucide-react";
-import { Terminal, type IDisposable } from "@xterm/xterm";
+import { Terminal, type IDisposable, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
@@ -33,6 +33,11 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
   const [tabs, setTabs] = useState<TerminalInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Session id this dock has finished loading existing terminals for. Gates the
+  // auto-spawn below so it can't fire against the initial empty `tabs` before
+  // `refresh` returns surviving shells (which would spawn a fresh terminal on
+  // every reopen, since this component unmounts when the dock is hidden).
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -47,6 +52,7 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
         if (cur && rows.some((r) => r.id === cur)) return cur;
         return rows[0]?.id ?? null;
       });
+      setLoadedFor(sessionId);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -72,14 +78,23 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
     }
   }, [sessionId]);
 
-  // Auto-spawn the first terminal if the dock opens with none.
+  // Auto-spawn a terminal only the *first* time a session's dock opens with no
+  // existing shells. Gated on `loadedFor === sessionId` so it waits for
+  // `refresh` to confirm there are genuinely none (vs. the pre-load empty
+  // state) — otherwise reopening the dock spawns a duplicate every time. Once
+  // spawned (or once the user has terminals), `autoSpawnedRef` keeps it from
+  // respawning even if they close every tab — they use the `+` button after.
   const autoSpawnedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (tabs.length === 0 && autoSpawnedRef.current !== sessionId) {
+    if (
+      loadedFor === sessionId &&
+      tabs.length === 0 &&
+      autoSpawnedRef.current !== sessionId
+    ) {
       autoSpawnedRef.current = sessionId;
       void spawnNew();
     }
-  }, [tabs.length, sessionId, spawnNew]);
+  }, [loadedFor, tabs.length, sessionId, spawnNew]);
 
   const closeTab = (id: string) => {
     setTabs((prev) => {
@@ -215,7 +230,20 @@ interface ViewProps {
   onInput?: (data: string) => void;
   /** Fired on each *live* PTY output chunk (not during the attach replay). */
   onOutput?: (data: string) => void;
+  /**
+   * Ctrl/Cmd+click on a detected file path in the terminal. Receives the raw
+   * matched token (may carry a trailing `:line[:col]`); the host resolves it
+   * against the PTY's cwd and opens it. When omitted, paths are not linkified.
+   */
+  onOpenPath?: (rawPath: string) => void;
 }
+
+// Path-like tokens: require at least one separator and a trailing extension so
+// version strings ("v2.1.150") and prose ("Opus 4.7") aren't linkified. Allows
+// an optional drive ("C:\"), leading "./" / "../" / "/", and a ":line[:col]"
+// suffix. `g` flag → reset `lastIndex` is implicit since we re-run per line.
+const PATH_RE =
+  /(?:[A-Za-z]:[\\/])?(?:\.{0,2}[\\/])?(?:[\w.@~+-]+[\\/])+[\w.@+-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?/g;
 
 /**
  * Renders one xterm bound to an already-spawned PTY. Stays mounted across
@@ -229,6 +257,7 @@ export function TerminalView({
   onImagePaste,
   onInput,
   onOutput,
+  onOpenPath,
 }: ViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -238,11 +267,13 @@ export function TerminalView({
   const onImagePasteRef = useRef(onImagePaste);
   const onInputRef = useRef(onInput);
   const onOutputRef = useRef(onOutput);
+  const onOpenPathRef = useRef(onOpenPath);
   useEffect(() => {
     onImagePasteRef.current = onImagePaste;
     onInputRef.current = onInput;
     onOutputRef.current = onOutput;
-  }, [onImagePaste, onInput, onOutput]);
+    onOpenPathRef.current = onOpenPath;
+  }, [onImagePaste, onInput, onOutput, onOpenPath]);
 
   useEffect(() => {
     const mount = containerRef.current;
@@ -287,6 +318,37 @@ export function TerminalView({
     } catch {
       /* no WebGL — DOM renderer stays in place */
     }
+
+    // Linkify file paths so Ctrl/Cmd+click opens them (the host resolves the
+    // token against the PTY's cwd). Decorations are only emitted when a handler
+    // is wired, so plain dock terminals show no spurious underlines.
+    const linkProvider = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        if (!onOpenPathRef.current) return callback(undefined);
+        const line = term.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) return callback(undefined);
+        const text = line.translateToString(true);
+        const links: ILink[] = [];
+        PATH_RE.lastIndex = 0;
+        for (let m = PATH_RE.exec(text); m; m = PATH_RE.exec(text)) {
+          const start = m.index + 1;
+          const raw = m[0];
+          links.push({
+            text: raw,
+            range: {
+              start: { x: start, y: bufferLineNumber },
+              end: { x: start + raw.length - 1, y: bufferLineNumber },
+            },
+            decorations: { pointerCursor: true, underline: true },
+            activate: (event: MouseEvent, token: string) => {
+              if (!(event.ctrlKey || event.metaKey)) return;
+              onOpenPathRef.current?.(token);
+            },
+          });
+        }
+        callback(links.length ? links : undefined);
+      },
+    });
 
     // Ctrl+C in a terminal is SIGINT (interrupts claude), so it can't be copy.
     // Bind the conventional terminal shortcuts instead: Ctrl+Shift+C copies the
@@ -468,6 +530,11 @@ export function TerminalView({
       }
       if (unlistenOut) unlistenOut();
       if (unlistenExit) unlistenExit();
+      try {
+        linkProvider.dispose();
+      } catch {
+        /* noop */
+      }
       try {
         term.dispose();
       } catch {

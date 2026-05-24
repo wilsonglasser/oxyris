@@ -15,14 +15,20 @@ import {
 } from "~/ipc/fs.ts";
 
 /**
- * Worktree-scoped state for the file tree + editor.
+ * Project- and worktree-scoped state for the file tree + editor.
  *
- * Every map below is keyed by `worktreeId` so switching between worktrees
- * (or between sessions on different worktrees) preserves expanded folders,
- * open tabs, and dirty buffers per scope. The active worktree is tracked
- * outside this store (`sessionStore`) — readers select state via
- * `useFileEditorStore((s) => s.<map>[worktreeId])`.
+ * Every map below is keyed by {@link scopeKey} — `"<projectId>::<worktreeId>"`.
+ * The worktree id alone is NOT enough: the primary checkout uses the same
+ * nil-UUID sentinel for *every* project, so keying by worktree id alone made
+ * two projects' primary trees collide (project A's files showing under project
+ * B). The composite key keeps each project's primary checkout isolated while
+ * still preserving per-worktree state within a project.
  */
+
+/** Composite store key — see the module doc. */
+export function scopeKey(projectId: string, worktreeId: string): string {
+  return `${projectId}::${worktreeId}`;
+}
 
 export type DirNode = {
   /** Path relative to worktree root, "" for root itself. */
@@ -49,15 +55,15 @@ export type Tab = {
 };
 
 interface FileEditorState {
-  /** worktreeId → relPath → DirNode (expanded folders). */
+  /** scopeKey → relPath → DirNode (expanded folders). */
   trees: Record<string, Record<string, DirNode>>;
-  /** worktreeId → set of expanded relPaths (preserves user expand state). */
+  /** scopeKey → set of expanded relPaths (preserves user expand state). */
   expanded: Record<string, Record<string, boolean>>;
-  /** worktreeId → ordered list of open tabs (by relPath). */
+  /** scopeKey → ordered list of open tabs (by relPath). */
   openOrder: Record<string, string[]>;
-  /** worktreeId → relPath → Tab. */
+  /** scopeKey → relPath → Tab. */
   tabs: Record<string, Record<string, Tab>>;
-  /** worktreeId → currently focused tab relPath (or null). */
+  /** scopeKey → currently focused tab relPath (or null). */
   active: Record<string, string | null>;
 
   loadDir: (
@@ -75,11 +81,24 @@ interface FileEditorState {
     worktreeId: string,
     relPath: string,
   ) => Promise<void>;
-  closeTab: (worktreeId: string, relPath: string) => void;
-  closeOthers: (worktreeId: string, keepRelPath: string) => void;
-  closeAll: (worktreeId: string) => void;
-  setActive: (worktreeId: string, relPath: string | null) => void;
-  setBuffer: (worktreeId: string, relPath: string, buffer: string) => void;
+  closeTab: (projectId: string, worktreeId: string, relPath: string) => void;
+  closeOthers: (
+    projectId: string,
+    worktreeId: string,
+    keepRelPath: string,
+  ) => void;
+  closeAll: (projectId: string, worktreeId: string) => void;
+  setActive: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string | null,
+  ) => void;
+  setBuffer: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+    buffer: string,
+  ) => void;
   saveTab: (
     projectId: string,
     worktreeId: string,
@@ -116,6 +135,23 @@ interface FileEditorState {
   subscribeFsChanged: (projectIdResolver: () => string | null) => Promise<UnlistenFn>;
 }
 
+/** Best-effort string from a thrown value — Tauri rejections are often plain
+ *  objects/strings, not `Error`s, so `String(e)` would yield "[object Object]". */
+function errMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object") {
+    const m = (e as { message?: unknown }).message;
+    if (typeof m === "string") return m;
+    try {
+      return JSON.stringify(e);
+    } catch {
+      /* fall through */
+    }
+  }
+  return String(e);
+}
+
 export const useFileEditorStore = create<FileEditorState>()(
   persist(
     (set, get) => ({
@@ -126,8 +162,9 @@ export const useFileEditorStore = create<FileEditorState>()(
   active: {},
 
   loadDir: async (projectId, worktreeId, relPath) => {
+    const key = scopeKey(projectId, worktreeId);
     set((state) => {
-      const wtTrees = { ...(state.trees[worktreeId] ?? {}) };
+      const wtTrees = { ...(state.trees[key] ?? {}) };
       const prev = wtTrees[relPath];
       wtTrees[relPath] = {
         relPath,
@@ -135,24 +172,24 @@ export const useFileEditorStore = create<FileEditorState>()(
         loading: true,
         error: null,
       };
-      return { trees: { ...state.trees, [worktreeId]: wtTrees } };
+      return { trees: { ...state.trees, [key]: wtTrees } };
     });
     try {
       const result = await fsListDir({ projectId, worktreeId, relPath });
       set((state) => {
-        const wtTrees = { ...(state.trees[worktreeId] ?? {}) };
+        const wtTrees = { ...(state.trees[key] ?? {}) };
         wtTrees[relPath] = {
           relPath,
           children: result.entries,
           loading: false,
           error: null,
         };
-        return { trees: { ...state.trees, [worktreeId]: wtTrees } };
+        return { trees: { ...state.trees, [key]: wtTrees } };
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = errMessage(e);
       set((state) => {
-        const wtTrees = { ...(state.trees[worktreeId] ?? {}) };
+        const wtTrees = { ...(state.trees[key] ?? {}) };
         const prev = wtTrees[relPath];
         wtTrees[relPath] = {
           relPath,
@@ -160,22 +197,23 @@ export const useFileEditorStore = create<FileEditorState>()(
           loading: false,
           error: message,
         };
-        return { trees: { ...state.trees, [worktreeId]: wtTrees } };
+        return { trees: { ...state.trees, [key]: wtTrees } };
       });
     }
   },
 
   toggleExpand: async (projectId, worktreeId, relPath) => {
-    const wtExpanded = get().expanded[worktreeId] ?? {};
+    const key = scopeKey(projectId, worktreeId);
+    const wtExpanded = get().expanded[key] ?? {};
     const next = !wtExpanded[relPath];
     set((state) => ({
       expanded: {
         ...state.expanded,
-        [worktreeId]: { ...wtExpanded, [relPath]: next },
+        [key]: { ...wtExpanded, [relPath]: next },
       },
     }));
     if (next) {
-      const cached = get().trees[worktreeId]?.[relPath]?.children;
+      const cached = get().trees[key]?.[relPath]?.children;
       if (!cached) {
         await get().loadDir(projectId, worktreeId, relPath);
       }
@@ -183,24 +221,25 @@ export const useFileEditorStore = create<FileEditorState>()(
   },
 
   openFile: async (projectId, worktreeId, relPath) => {
-    const existing = get().tabs[worktreeId]?.[relPath];
+    const key = scopeKey(projectId, worktreeId);
+    const existing = get().tabs[key]?.[relPath];
     if (existing) {
-      get().setActive(worktreeId, relPath);
+      get().setActive(projectId, worktreeId, relPath);
       return;
     }
     const kind = previewKindFor(relPath);
     const isBinary = kind === "image" || kind === "pdf";
     set((state) => {
-      const order = state.openOrder[worktreeId] ?? [];
-      const tabs = state.tabs[worktreeId] ?? {};
+      const order = state.openOrder[key] ?? [];
+      const tabs = state.tabs[key] ?? {};
       return {
         openOrder: {
           ...state.openOrder,
-          [worktreeId]: order.includes(relPath) ? order : [...order, relPath],
+          [key]: order.includes(relPath) ? order : [...order, relPath],
         },
         tabs: {
           ...state.tabs,
-          [worktreeId]: {
+          [key]: {
             ...tabs,
             [relPath]: {
               relPath,
@@ -217,14 +256,14 @@ export const useFileEditorStore = create<FileEditorState>()(
             },
           },
         },
-        active: { ...state.active, [worktreeId]: relPath },
+        active: { ...state.active, [key]: relPath },
       };
     });
     if (isBinary) return;
     try {
       const result = await fsReadFile({ projectId, worktreeId, relPath });
       set((state) => {
-        const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+        const tabs = { ...(state.tabs[key] ?? {}) };
         const prev = tabs[relPath];
         tabs[relPath] = {
           relPath,
@@ -239,12 +278,12 @@ export const useFileEditorStore = create<FileEditorState>()(
             ? { buffer: prev.buffer }
             : {}),
         };
-        return { tabs: { ...state.tabs, [worktreeId]: tabs } };
+        return { tabs: { ...state.tabs, [key]: tabs } };
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = errMessage(e);
       set((state) => {
-        const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+        const tabs = { ...(state.tabs[key] ?? {}) };
         tabs[relPath] = {
           relPath,
           baseContent: "",
@@ -255,69 +294,76 @@ export const useFileEditorStore = create<FileEditorState>()(
           truncated: false,
           kind,
         };
-        return { tabs: { ...state.tabs, [worktreeId]: tabs } };
+        return { tabs: { ...state.tabs, [key]: tabs } };
       });
     }
   },
 
-  closeTab: (worktreeId, relPath) =>
+  closeTab: (projectId, worktreeId, relPath) =>
     set((state) => {
-      const order = (state.openOrder[worktreeId] ?? []).filter(
-        (p) => p !== relPath,
-      );
-      const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+      const key = scopeKey(projectId, worktreeId);
+      const order = (state.openOrder[key] ?? []).filter((p) => p !== relPath);
+      const tabs = { ...(state.tabs[key] ?? {}) };
       delete tabs[relPath];
-      const wasActive = state.active[worktreeId] === relPath;
+      const wasActive = state.active[key] === relPath;
       const nextActive = wasActive
         ? (order[order.length - 1] ?? null)
-        : state.active[worktreeId];
+        : state.active[key];
       return {
-        openOrder: { ...state.openOrder, [worktreeId]: order },
-        tabs: { ...state.tabs, [worktreeId]: tabs },
-        active: { ...state.active, [worktreeId]: nextActive ?? null },
+        openOrder: { ...state.openOrder, [key]: order },
+        tabs: { ...state.tabs, [key]: tabs },
+        active: { ...state.active, [key]: nextActive ?? null },
       };
     }),
 
-  closeOthers: (worktreeId, keepRelPath) =>
-    set((state) => ({
-      openOrder: { ...state.openOrder, [worktreeId]: [keepRelPath] },
-      tabs: {
-        ...state.tabs,
-        [worktreeId]: state.tabs[worktreeId]?.[keepRelPath]
-          ? { [keepRelPath]: state.tabs[worktreeId]![keepRelPath]! }
-          : {},
-      },
-      active: { ...state.active, [worktreeId]: keepRelPath },
-    })),
-
-  closeAll: (worktreeId) =>
-    set((state) => ({
-      openOrder: { ...state.openOrder, [worktreeId]: [] },
-      tabs: { ...state.tabs, [worktreeId]: {} },
-      active: { ...state.active, [worktreeId]: null },
-    })),
-
-  setActive: (worktreeId, relPath) =>
-    set((state) => ({
-      active: { ...state.active, [worktreeId]: relPath },
-    })),
-
-  setBuffer: (worktreeId, relPath, buffer) =>
+  closeOthers: (projectId, worktreeId, keepRelPath) =>
     set((state) => {
-      const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+      const key = scopeKey(projectId, worktreeId);
+      return {
+        openOrder: { ...state.openOrder, [key]: [keepRelPath] },
+        tabs: {
+          ...state.tabs,
+          [key]: state.tabs[key]?.[keepRelPath]
+            ? { [keepRelPath]: state.tabs[key]![keepRelPath]! }
+            : {},
+        },
+        active: { ...state.active, [key]: keepRelPath },
+      };
+    }),
+
+  closeAll: (projectId, worktreeId) =>
+    set((state) => {
+      const key = scopeKey(projectId, worktreeId);
+      return {
+        openOrder: { ...state.openOrder, [key]: [] },
+        tabs: { ...state.tabs, [key]: {} },
+        active: { ...state.active, [key]: null },
+      };
+    }),
+
+  setActive: (projectId, worktreeId, relPath) =>
+    set((state) => ({
+      active: { ...state.active, [scopeKey(projectId, worktreeId)]: relPath },
+    })),
+
+  setBuffer: (projectId, worktreeId, relPath, buffer) =>
+    set((state) => {
+      const key = scopeKey(projectId, worktreeId);
+      const tabs = { ...(state.tabs[key] ?? {}) };
       const prev = tabs[relPath];
       if (!prev) return state;
       tabs[relPath] = { ...prev, buffer };
-      return { tabs: { ...state.tabs, [worktreeId]: tabs } };
+      return { tabs: { ...state.tabs, [key]: tabs } };
     }),
 
   saveTab: async (projectId, worktreeId, relPath) => {
-    const tab = get().tabs[worktreeId]?.[relPath];
+    const key = scopeKey(projectId, worktreeId);
+    const tab = get().tabs[key]?.[relPath];
     if (!tab || tab.saving) return;
     set((state) => {
-      const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+      const tabs = { ...(state.tabs[key] ?? {}) };
       tabs[relPath] = { ...tab, saving: true, error: null };
-      return { tabs: { ...state.tabs, [worktreeId]: tabs } };
+      return { tabs: { ...state.tabs, [key]: tabs } };
     });
     try {
       await fsWriteFile({
@@ -327,7 +373,7 @@ export const useFileEditorStore = create<FileEditorState>()(
         content: tab.buffer,
       });
       set((state) => {
-        const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+        const tabs = { ...(state.tabs[key] ?? {}) };
         const cur = tabs[relPath];
         if (!cur) return state;
         tabs[relPath] = {
@@ -336,16 +382,16 @@ export const useFileEditorStore = create<FileEditorState>()(
           saving: false,
           error: null,
         };
-        return { tabs: { ...state.tabs, [worktreeId]: tabs } };
+        return { tabs: { ...state.tabs, [key]: tabs } };
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = errMessage(e);
       set((state) => {
-        const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+        const tabs = { ...(state.tabs[key] ?? {}) };
         const cur = tabs[relPath];
         if (!cur) return state;
         tabs[relPath] = { ...cur, saving: false, error: message };
-        return { tabs: { ...state.tabs, [worktreeId]: tabs } };
+        return { tabs: { ...state.tabs, [key]: tabs } };
       });
     }
   },
@@ -375,20 +421,21 @@ export const useFileEditorStore = create<FileEditorState>()(
     }
     // If the renamed file was open, swap its tab key.
     set((state) => {
-      const order = state.openOrder[worktreeId] ?? [];
+      const key = scopeKey(projectId, worktreeId);
+      const order = state.openOrder[key] ?? [];
       if (!order.includes(fromRel)) return state;
       const newOrder = order.map((p) => (p === fromRel ? toRel : p));
-      const tabs = { ...(state.tabs[worktreeId] ?? {}) };
+      const tabs = { ...(state.tabs[key] ?? {}) };
       const oldTab = tabs[fromRel];
       if (oldTab) {
         tabs[toRel] = { ...oldTab, relPath: toRel };
         delete tabs[fromRel];
       }
-      const active = state.active[worktreeId] === fromRel ? toRel : state.active[worktreeId];
+      const active = state.active[key] === fromRel ? toRel : state.active[key];
       return {
-        openOrder: { ...state.openOrder, [worktreeId]: newOrder },
-        tabs: { ...state.tabs, [worktreeId]: tabs },
-        active: { ...state.active, [worktreeId]: active ?? null },
+        openOrder: { ...state.openOrder, [key]: newOrder },
+        tabs: { ...state.tabs, [key]: tabs },
+        active: { ...state.active, [key]: active ?? null },
       };
     });
   },
@@ -397,9 +444,10 @@ export const useFileEditorStore = create<FileEditorState>()(
     await fsDelete({ projectId, worktreeId, relPath, recursive });
     await get().loadDir(projectId, worktreeId, parentDir(relPath));
     // If the deleted file was open, drop its tab.
-    const order = get().openOrder[worktreeId] ?? [];
+    const key = scopeKey(projectId, worktreeId);
+    const order = get().openOrder[key] ?? [];
     if (order.includes(relPath)) {
-      get().closeTab(worktreeId, relPath);
+      get().closeTab(projectId, worktreeId, relPath);
     }
   },
 
@@ -408,13 +456,14 @@ export const useFileEditorStore = create<FileEditorState>()(
       "fs:changed",
       (e) => {
         const { worktree_id, paths } = e.payload;
+        const projectId = projectIdResolver();
+        if (!projectId) return;
+        const key = scopeKey(projectId, worktree_id);
         // Refresh each unique parent dir that we already have loaded —
         // skip dirs the user never expanded so we don't fetch the whole
         // tree on every save.
-        const trees = get().trees[worktree_id];
+        const trees = get().trees[key];
         if (!trees) return;
-        const projectId = projectIdResolver();
-        if (!projectId) return;
         const seen = new Set<string>();
         for (const p of paths) {
           const parent = parentDir(p);
