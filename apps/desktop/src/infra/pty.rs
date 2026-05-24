@@ -29,12 +29,23 @@ pub enum PtyError {
     UnknownTerminal(String),
 }
 
+/// What program a PTY is running. The dock (auxiliary shells) filters out
+/// `Claude` PTYs because the pure-mode claude TUI is already its own main
+/// pane — surfacing it again as a dock tab is just confusing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKind {
+    Shell,
+    Claude,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalInfo {
     pub id: String,
     pub session_id: AggregateId,
     pub title: String,
     pub cwd: String,
+    pub kind: TerminalKind,
 }
 
 struct LiveTerminal {
@@ -45,6 +56,7 @@ struct LiveTerminal {
     session_id: AggregateId,
     title: String,
     cwd: String,
+    kind: TerminalKind,
     replay: Arc<Mutex<ReplayBuffer>>,
 }
 
@@ -87,12 +99,23 @@ impl PtyProgram {
             PtyProgram::Claude(_) => "Claude",
         }
     }
+
+    fn kind(&self) -> TerminalKind {
+        match self {
+            PtyProgram::Shell => TerminalKind::Shell,
+            PtyProgram::Claude(_) => TerminalKind::Claude,
+        }
+    }
 }
 
 /// Flags handed to the interactive `claude` process in pure mode. Mirrors the
 /// subset of the stream-json adapter's options that make sense for a TUI.
 #[derive(Debug, Clone, Default)]
 pub struct ClaudePtyOpts {
+    /// `--session-id <uuid>`. Pinning it to our session aggregate id makes
+    /// claude write its transcript at a path we can find (`<id>.jsonl`), which
+    /// is how pure-mode sessions get an auto-title. Empty → claude picks one.
+    pub session_id: String,
     /// Empty → let claude pick its default model.
     pub model: String,
     /// e.g. "default" | "acceptEdits" | "bypassPermissions" | "plan". Empty →
@@ -211,6 +234,10 @@ fn wsl_exe() -> String {
 
 fn claude_args(opts: &ClaudePtyOpts) -> Vec<String> {
     let mut args = Vec::new();
+    if !opts.session_id.trim().is_empty() {
+        args.push("--session-id".into());
+        args.push(opts.session_id.clone());
+    }
     if !opts.model.trim().is_empty() {
         args.push("--model".into());
         args.push(opts.model.clone());
@@ -352,6 +379,7 @@ impl PtySupervisor {
             .map_err(|e| PtyError::Other(e.to_string()))?;
 
         let title_prefix = program.title_prefix();
+        let kind = program.kind();
         let cmd = build_cmd(env, cwd, extra_env, &program)?;
         let child = pair
             .slave
@@ -430,11 +458,12 @@ impl PtySupervisor {
             }
         });
 
-        // Pick a per-session sequential title (Terminal 1, Terminal 2, ...).
+        // Pick a per-session, per-kind sequential title so shells number from
+        // 1 (Terminal 1, Terminal 2, …) independently of the claude PTY.
         let mut terminals = self.terminals.lock().expect("pty mutex poisoned");
         let next_index = terminals
             .values()
-            .filter(|t| t.session_id == session_id)
+            .filter(|t| t.session_id == session_id && t.kind == kind)
             .count()
             + 1;
         let title = format!("{title_prefix} {next_index}");
@@ -448,6 +477,7 @@ impl PtySupervisor {
                 session_id,
                 title: title.clone(),
                 cwd: cwd_owned.clone(),
+                kind,
                 replay,
             },
         );
@@ -457,6 +487,7 @@ impl PtySupervisor {
             session_id,
             title,
             cwd: cwd_owned,
+            kind,
         })
     }
 
@@ -489,6 +520,7 @@ impl PtySupervisor {
                 session_id: t.session_id,
                 title: t.title.clone(),
                 cwd: t.cwd.clone(),
+                kind: t.kind,
             })
             .collect()
     }

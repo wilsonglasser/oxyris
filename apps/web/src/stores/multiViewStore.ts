@@ -54,6 +54,8 @@ interface MultiViewState {
   setCols: (cols: MvCols) => void;
   /** Replace all panes (used by autofill). */
   setPanes: (sessionIds: string[]) => void;
+  /** Reorder: pull `fromPaneId` out and drop it at `toPaneId`'s slot. */
+  movePane: (fromPaneId: string, toPaneId: string) => void;
 }
 
 function persistPanes(panes: Pane[]): Pane[] {
@@ -98,6 +100,17 @@ export const useMultiViewStore = create<MultiViewState>((set) => ({
           ? capped.map((sid) => ({ paneId: newPaneId(), sessionId: sid }))
           : [{ paneId: newPaneId(), sessionId: null }];
       return { panes: persistPanes(panes) };
+    }),
+  movePane: (fromPaneId, toPaneId) =>
+    set((s) => {
+      if (fromPaneId === toPaneId) return s;
+      const from = s.panes.findIndex((p) => p.paneId === fromPaneId);
+      const to = s.panes.findIndex((p) => p.paneId === toPaneId);
+      if (from < 0 || to < 0) return s;
+      const next = [...s.panes];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved!);
+      return { panes: persistPanes(next) };
     }),
 }));
 

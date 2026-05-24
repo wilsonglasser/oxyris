@@ -17,6 +17,7 @@ pub mod op_name {
     pub const FS_RENAME: &str = "fs.rename";
     pub const FS_DELETE: &str = "fs.delete";
     pub const FS_READ_BYTES: &str = "fs.read_bytes";
+    pub const FS_WRITE_BYTES: &str = "fs.write_bytes";
     pub const FS_SEARCH_PATHS: &str = "fs.search_paths";
     pub const GIT_LIST_BRANCHES: &str = "git.list_branches";
     pub const GIT_LIST_WORKTREES: &str = "git.list_worktrees";
@@ -124,6 +125,17 @@ pub struct FsWriteArgs {
 pub struct FsWriteResult {
     pub path: String,
     pub bytes_written: u64,
+}
+
+// ────── fs.write_bytes ─────────────────────────────────────────────────────
+
+/// Binary write. Used for attachments (pasted/dropped images) that must land
+/// inside the distro so a WSL-hosted `claude` can resolve the `@path` ref.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsWriteBytesArgs {
+    pub path: String,
+    /// Base64-encoded file bytes (no data-URL prefix). Reuses `FsWriteResult`.
+    pub bytes_b64: String,
 }
 
 // ────── fs.walk (streaming) ────────────────────────────────────────────────

@@ -4,6 +4,7 @@
 //! thread.
 
 use oxyris_core::{AggregateId, Environment};
+use oxyris_ipc::ops::op_name;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
@@ -175,6 +176,7 @@ pub async fn claude_pty_spawn(
     };
 
     let opts = crate::infra::pty::ClaudePtyOpts {
+        session_id: input.session_id.to_string(),
         model: snap.data.model.clone(),
         permission_mode: runtime_to_permission_mode(snap.data.runtime).to_owned(),
         mcp_config_path,
@@ -291,4 +293,201 @@ pub fn terminal_attach(
     state: State<'_, AppState>,
 ) -> Result<TerminalAttachSnapshot, TauriTerminalError> {
     Ok(state.pty.attach_snapshot(&input.id)?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PureTitleInput {
+    pub session_id: AggregateId,
+}
+
+/// Best-effort auto-title for a pure-mode session, derived from claude's own
+/// transcript. Pure sessions have no turn-event stream to title from (that's
+/// structured mode), so the frontend calls this after a turn settles. Because
+/// we spawn claude with `--session-id <session>`, its transcript is named
+/// `<session>.jsonl`; we locate it under `~/.claude/projects/`, read the head,
+/// and prefer claude's own summary, falling back to the first user message.
+///
+/// Returns the applied title, or `None` when the session is already titled, no
+/// transcript exists yet, or nothing usable was found. Never clobbers a title
+/// that's already set (auto or manual).
+#[tauri::command]
+pub async fn claude_pure_refresh_title(
+    input: PureTitleInput,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, TauriTerminalError> {
+    let session_id = input.session_id;
+    let snap = state
+        .projections
+        .get_session(session_id)
+        .map_err(|e| TauriTerminalError::Pty(e.to_string()))?
+        .ok_or(TauriTerminalError::NotFound)?;
+    if snap.data.title.is_some() {
+        return Ok(None);
+    }
+    let projects = state
+        .projections
+        .list_projects()
+        .map_err(|e| TauriTerminalError::Pty(e.to_string()))?;
+    let project = projects
+        .into_iter()
+        .find(|p| p.id == snap.data.project_id)
+        .ok_or(TauriTerminalError::NotFound)?;
+
+    let Some(text) =
+        read_claude_transcript(&project.environment, &state.agent_pool, session_id).await
+    else {
+        return Ok(None);
+    };
+    let Some(title) = derive_title_from_transcript(&text) else {
+        return Ok(None);
+    };
+
+    state
+        .session_supervisor
+        .rename_session(session_id, title.clone())
+        .await
+        .map_err(|e| TauriTerminalError::Pty(e.to_string()))?;
+    Ok(Some(title))
+}
+
+/// Read the head of claude's transcript JSONL for `session_id`. The file is
+/// `~/.claude/projects/<cwd-slug>/<session_id>.jsonl`; we don't reconstruct the
+/// slug — we just look for the uniquely-named file (Windows: scan the one-level
+/// project dirs; WSL: the agent's path search). Only the head is read — the
+/// summary and first user message both live near the top.
+async fn read_claude_transcript(
+    env: &Environment,
+    agent: &crate::infra::agent_pool::AgentPool,
+    session_id: AggregateId,
+) -> Option<String> {
+    const HEAD_CAP: u64 = 512 * 1024;
+    let filename = format!("{session_id}.jsonl");
+    match env {
+        Environment::Windows => {
+            let home = std::env::var_os("USERPROFILE")?;
+            let projects = std::path::Path::new(&home).join(".claude").join("projects");
+            for entry in std::fs::read_dir(&projects).ok()?.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    let candidate = entry.path().join(&filename);
+                    if candidate.is_file() {
+                        return read_head(&candidate, HEAD_CAP);
+                    }
+                }
+            }
+            None
+        }
+        Environment::Wsl { distro } => {
+            let info = agent
+                .call(distro, op_name::SYSTEM_INFO, serde_json::json!({}))
+                .await
+                .ok()?;
+            let home = info
+                .get("home")
+                .and_then(|v| v.as_str())?
+                .trim_end_matches('/');
+            let root = format!("{home}/.claude/projects");
+            let found = agent
+                .call(
+                    distro,
+                    op_name::FS_SEARCH_PATHS,
+                    serde_json::json!({ "root": root, "query": filename, "limit": 5 }),
+                )
+                .await
+                .ok()?;
+            let rel = found.get("hits")?.as_array()?.iter().find_map(|h| {
+                let p = h.get("rel_path")?.as_str()?;
+                p.ends_with(&filename).then(|| p.to_owned())
+            })?;
+            let full = format!("{root}/{rel}");
+            let read = agent
+                .call(
+                    distro,
+                    op_name::FS_READ,
+                    serde_json::json!({ "path": full, "max_bytes": HEAD_CAP }),
+                )
+                .await
+                .ok()?;
+            read.get("content")?.as_str().map(|s| s.to_owned())
+        }
+    }
+}
+
+fn read_head(path: &std::path::Path, cap: u64) -> Option<String> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(cap)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Pull a title out of a claude transcript. Prefers claude's own `summary`
+/// entry (what `--resume` shows); falls back to the first user prompt.
+fn derive_title_from_transcript(text: &str) -> Option<String> {
+    let mut summary: Option<String> = None;
+    let mut first_user: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("summary") if summary.is_none() => {
+                if let Some(s) = v.get("summary").and_then(|s| s.as_str())
+                    && !s.trim().is_empty()
+                {
+                    summary = Some(s.trim().to_owned());
+                }
+            }
+            Some("user") if first_user.is_none() => {
+                if let Some(txt) = extract_user_text(&v)
+                    && !txt.trim().is_empty()
+                {
+                    first_user = Some(txt.trim().to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    let raw = summary.or(first_user)?;
+    let title = normalize_title(&raw);
+    (!title.is_empty()).then_some(title)
+}
+
+/// A user record's prompt text — `message.content` is either a bare string or
+/// an array of content blocks; take the first text block.
+fn extract_user_text(v: &serde_json::Value) -> Option<String> {
+    let content = v.get("message")?.get("content")?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_owned());
+    }
+    content.as_array()?.iter().find_map(|block| {
+        (block.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .then(|| {
+                block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_owned())
+            })
+            .flatten()
+    })
+}
+
+/// First non-empty line, trimmed, capped at 60 chars (ellipsised if longer).
+fn normalize_title(text: &str) -> String {
+    let first = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let mut out: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 {
+        out.push('…');
+    }
+    out
 }

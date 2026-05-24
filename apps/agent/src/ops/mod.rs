@@ -94,6 +94,11 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
             let result = fs::read_bytes(&args.path, args.max_bytes)?;
             Ok(serde_json::to_value(result)?)
         }
+        op_name::FS_WRITE_BYTES => {
+            let args: oxyris_ipc::ops::FsWriteBytesArgs = from_args(args)?;
+            let result = fs::write_bytes(&args.path, &args.bytes_b64)?;
+            Ok(serde_json::to_value(result)?)
+        }
         op_name::FS_SEARCH_PATHS => {
             let args: oxyris_ipc::ops::FsSearchPathsArgs = from_args(args)?;
             let result = fs::search_paths(&args.root, &args.query, args.limit)?;

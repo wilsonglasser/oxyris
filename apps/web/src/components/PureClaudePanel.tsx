@@ -24,10 +24,15 @@ import {
 } from "~/ipc/worktree.ts";
 import {
   claudePtySpawn,
+  claudePureRefreshTitle,
   terminalList,
   terminalWrite,
 } from "~/ipc/terminal.ts";
 import { attachmentSave, blobToBase64 } from "~/ipc/attachments.ts";
+import {
+  playTurnCompleteChime,
+  shouldNotify,
+} from "~/lib/notificationSound.ts";
 import {
   toSpeechLocale,
   useSpeechRecognition,
@@ -288,6 +293,56 @@ function PureSessionView({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const ensuredRef = useRef<string | null>(null);
 
+  // "Agent done" chime for pure mode. There's no turn event stream to hook
+  // (that's structured mode) — the claude TUI is opaque bytes — so we use an
+  // output-idle heuristic: once the user submits a prompt we arm, and the
+  // first stretch of PTY silence after live output declares the turn done.
+  // Only chimes when the window is unfocused, so an occasional early fire
+  // (e.g. a long quiet tool run) is harmless. Mirrors ChatPanel's chime.
+  const IDLE_DONE_MS = 2500;
+  const armedRef = useRef(false);
+  const idleTimerRef = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(idleTimerRef.current), []);
+
+  // Pure sessions get no auto-title from a turn-event stream. Instead we read
+  // claude's own transcript (it's written under our `--session-id`) once a turn
+  // settles. The backend no-ops if the session is already titled, so calling it
+  // again is cheap and idempotent; stop once it sticks.
+  const titleSetRef = useRef(false);
+  const refreshTitle = useCallback(() => {
+    if (titleSetRef.current) return;
+    void claudePureRefreshTitle({ session_id: sessionId })
+      .then((title) => {
+        if (title) titleSetRef.current = true;
+      })
+      .catch(() => {});
+  }, [sessionId]);
+
+  // One attempt shortly after mount catches resumed sessions whose transcript
+  // already exists from a previous run.
+  useEffect(() => {
+    const id = window.setTimeout(refreshTitle, 3000);
+    return () => window.clearTimeout(id);
+  }, [refreshTitle]);
+
+  const onPtyInput = useCallback((data: string) => {
+    // A submit from the user (Enter, unless Shift held for a newline) arms the
+    // done-detector. Other keystrokes (navigation, autocomplete) don't.
+    if (data.includes("\r")) armedRef.current = true;
+  }, []);
+
+  const onPtyOutput = useCallback(() => {
+    if (!armedRef.current) return;
+    window.clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = window.setTimeout(() => {
+      armedRef.current = false;
+      if (shouldNotify()) playTurnCompleteChime();
+      // Turn settled → claude has flushed the user message (and maybe a
+      // summary) to its transcript; try to title from it.
+      refreshTitle();
+    }, IDLE_DONE_MS);
+  }, [refreshTitle]);
+
   // Ensure exactly one claude PTY exists for this session: reuse an existing
   // one (survives remounts) or spawn a fresh one. Deduped via `ensuredRef`
   // rather than a cancel flag — under StrictMode the effect runs twice, and a
@@ -371,6 +426,7 @@ function PureSessionView({
     // THEN a single Enter to submit. Sending `@path\r` alone only picks the
     // autocomplete entry without submitting — the bug the chips UX fixes.
     const refs = attachments.map((a) => `@${a.path} `).join("");
+    armedRef.current = true; // arm the done-chime detector
     sendToPty(`${refs}${trimmed}`);
     setText("");
     setAttachments([]);
@@ -408,6 +464,32 @@ function PureSessionView({
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [project.root_path, addAttachment]);
+
+  // Image pasted (Ctrl/Cmd+V) directly into the xterm. Save the blob, then
+  // inject the `@path ` ref straight into claude's live prompt — the trailing
+  // space accepts claude's autocomplete and closes the popup (same trick as
+  // `submit`). No chip: the ref lands in the TUI where the user can keep typing.
+  const onTerminalImagePaste = useCallback(
+    async (file: File) => {
+      try {
+        const base64 = await blobToBase64(file);
+        const info = await attachmentSave({
+          bucket_id: sessionId,
+          mime: file.type,
+          data_base64: base64,
+          ...(file.name ? { filename: file.name } : {}),
+        });
+        if (termId) {
+          void terminalWrite({ id: termId, data: `@${info.path} ` }).catch(
+            () => {},
+          );
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [sessionId, termId],
+  );
 
   const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = e.clipboardData.items;
@@ -467,7 +549,13 @@ function PureSessionView({
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {termId ? (
-          <TerminalView terminalId={termId} visible />
+          <TerminalView
+            terminalId={termId}
+            visible
+            onImagePaste={onTerminalImagePaste}
+            onInput={onPtyInput}
+            onOutput={onPtyOutput}
+          />
         ) : (
           <div className="flex h-full items-center justify-center text-[11px] text-neutral-500">
             {t("pure_spawning")}

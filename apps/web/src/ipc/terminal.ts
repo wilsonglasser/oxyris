@@ -1,11 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+export type TerminalKind = "shell" | "claude";
+
 export type TerminalInfo = {
   id: string;
   session_id: string;
   title: string;
   cwd: string;
+  /** "claude" = the pure-mode TUI PTY (owned by its own pane, hidden in the dock). */
+  kind: TerminalKind;
 };
 
 export async function terminalSpawn(input: {
@@ -35,6 +39,17 @@ export async function terminalWrite(input: {
   data: string;
 }): Promise<void> {
   await invoke("terminal_write", { input });
+}
+
+/**
+ * Best-effort auto-title for a pure-mode session, read from claude's own
+ * transcript. Returns the applied title, or `null` when the session is already
+ * titled or no transcript/title is available yet. Safe to call repeatedly.
+ */
+export async function claudePureRefreshTitle(input: {
+  session_id: string;
+}): Promise<string | null> {
+  return invoke("claude_pure_refresh_title", { input });
 }
 
 export async function terminalResize(input: {

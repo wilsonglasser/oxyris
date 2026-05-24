@@ -84,6 +84,22 @@ pub fn write(path_str: &str, contents: &str) -> Result<FsWriteResult, OpError> {
     })
 }
 
+pub fn write_bytes(path_str: &str, bytes_b64: &str) -> Result<FsWriteResult, OpError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(bytes_b64.as_bytes())
+        .map_err(|e| OpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+    let path = Path::new(path_str);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, &bytes)?;
+    Ok(FsWriteResult {
+        path: path_str.to_owned(),
+        bytes_written: bytes.len() as u64,
+    })
+}
+
 pub fn list_dir(path_str: &str, show_hidden: bool) -> Result<FsListDirResult, OpError> {
     let path = Path::new(path_str);
     if !path.exists() {

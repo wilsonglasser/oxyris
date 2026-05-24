@@ -35,7 +35,12 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
 
   const refresh = useCallback(async () => {
     try {
-      const rows = await terminalList({ session_id: sessionId });
+      // The dock only hosts auxiliary shells. The pure-mode claude TUI PTY is
+      // owned by its own pane (PureClaudePanel) — attaching a second xterm to
+      // it here would fight over resize and garble both renders.
+      const rows = (await terminalList({ session_id: sessionId })).filter(
+        (r) => r.kind !== "claude",
+      );
       setTabs(rows);
       setActiveId((cur) => {
         if (cur && rows.some((r) => r.id === cur)) return cur;
@@ -198,6 +203,17 @@ interface ViewProps {
   terminalId: string;
   visible: boolean;
   onExit?: () => void;
+  /**
+   * Called when an image is pasted (Ctrl/Cmd+V) while the terminal is focused.
+   * xterm has no native image-paste path — claude CLI can't ingest clipboard
+   * bitmaps directly — so the host saves the blob to a file and injects the
+   * resulting `@path` ref into the PTY. Text paste is left to xterm.
+   */
+  onImagePaste?: (file: File) => void | Promise<void>;
+  /** Raw keystroke bytes the user typed into the terminal (mirrors PTY input). */
+  onInput?: (data: string) => void;
+  /** Fired on each *live* PTY output chunk (not during the attach replay). */
+  onOutput?: () => void;
 }
 
 /**
@@ -205,10 +221,27 @@ interface ViewProps {
  * tab switches (just toggles `visible`) so scrollback is preserved. Exported
  * so the Pure-mode panel can reuse the exact replay/live/resize plumbing.
  */
-export function TerminalView({ terminalId, visible, onExit }: ViewProps) {
+export function TerminalView({
+  terminalId,
+  visible,
+  onExit,
+  onImagePaste,
+  onInput,
+  onOutput,
+}: ViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Held in refs so the listeners always see the latest callbacks without
+  // rebuilding the whole terminal when their identity changes.
+  const onImagePasteRef = useRef(onImagePaste);
+  const onInputRef = useRef(onInput);
+  const onOutputRef = useRef(onOutput);
+  useEffect(() => {
+    onImagePasteRef.current = onImagePaste;
+    onInputRef.current = onInput;
+    onOutputRef.current = onOutput;
+  }, [onImagePaste, onInput, onOutput]);
 
   useEffect(() => {
     const mount = containerRef.current;
@@ -227,6 +260,73 @@ export function TerminalView({ terminalId, visible, onExit }: ViewProps) {
     term.open(mount);
     termRef.current = term;
     fitRef.current = fit;
+
+    // Ctrl+C in a terminal is SIGINT (interrupts claude), so it can't be copy.
+    // Bind the conventional terminal shortcuts instead: Ctrl+Shift+C copies the
+    // selection, Ctrl+Shift+V pastes (image → @path ref, else text). Returning
+    // false stops xterm from forwarding the keystroke to the PTY.
+    const pasteFromClipboard = async () => {
+      try {
+        if (navigator.clipboard.read) {
+          const clipItems = await navigator.clipboard.read();
+          for (const ci of clipItems) {
+            const imgType = ci.types.find((tp) => tp.startsWith("image/"));
+            if (imgType && onImagePasteRef.current) {
+              const blob = await ci.getType(imgType);
+              const ext = imgType.split("/")[1] || "png";
+              void onImagePasteRef.current(
+                new File([blob], `pasted.${ext}`, { type: imgType }),
+              );
+              return;
+            }
+          }
+        }
+      } catch {
+        /* no image / no permission — fall through to text */
+      }
+      try {
+        const txt = await navigator.clipboard.readText();
+        if (txt) void terminalWrite({ id: terminalId, data: txt }).catch(() => {});
+      } catch {
+        /* noop */
+      }
+    };
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      const combo = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+      if (!combo) return true;
+      if (e.code === "KeyC") {
+        const sel = term.getSelection();
+        if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+        return false;
+      }
+      if (e.code === "KeyV") {
+        void pasteFromClipboard();
+        return false;
+      }
+      return true;
+    });
+
+    // Intercept image paste on xterm's hidden helper textarea. Capture phase +
+    // stopPropagation so xterm's own (text-only) paste handler never sees it.
+    // Non-image clipboards fall through to xterm untouched.
+    const textarea = term.textarea;
+    const onPasteCapture = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (item && item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (!file) continue;
+          e.preventDefault();
+          e.stopPropagation();
+          void onImagePasteRef.current?.(file);
+          return;
+        }
+      }
+    };
+    textarea?.addEventListener("paste", onPasteCapture, { capture: true });
 
     const safeFit = () => {
       try {
@@ -274,6 +374,7 @@ export function TerminalView({ terminalId, visible, onExit }: ViewProps) {
       if (seq <= lastSeq) return;
       lastSeq = seq;
       safeWrite(data);
+      onOutputRef.current?.();
     }).then((fn) => {
       if (cancelled) fn();
       else unlistenOut = fn;
@@ -308,6 +409,7 @@ export function TerminalView({ terminalId, visible, onExit }: ViewProps) {
 
     dataHandlers.push(
       term.onData((data) => {
+        onInputRef.current?.(data);
         void terminalWrite({ id: terminalId, data }).catch(() => {});
       }),
     );
@@ -330,6 +432,7 @@ export function TerminalView({ terminalId, visible, onExit }: ViewProps) {
       window.clearTimeout(fitTimer);
       window.clearTimeout(resizeTimer);
       window.removeEventListener("resize", safeFit);
+      textarea?.removeEventListener("paste", onPasteCapture, { capture: true });
       ro.disconnect();
       try {
         dataHandlers.forEach((d) => d.dispose());

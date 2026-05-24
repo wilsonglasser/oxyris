@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Plus, Send, Sparkles, Terminal as TerminalIcon, X } from "lucide-react";
+import {
+  GripVertical,
+  Plus,
+  Send,
+  Sparkles,
+  Terminal as TerminalIcon,
+  X,
+} from "lucide-react";
 import type { ProjectRow } from "~/ipc/commands.ts";
 import {
   type SessionKind,
@@ -19,6 +26,8 @@ import {
   useMultiViewStore,
 } from "~/stores/multiViewStore.ts";
 import { ChatPanel } from "~/components/ChatPanel.tsx";
+import { NewChatModal } from "~/components/NewChatModal.tsx";
+import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 import { PureClaudePanel } from "~/components/PureClaudePanel.tsx";
 import { TerminalPanel } from "~/components/TerminalPanel.tsx";
 
@@ -28,16 +37,18 @@ interface PaneInfo {
   ptyId: string | null;
 }
 
+type SessionsByProject = Record<string, SessionSummary[]>;
+
 /**
  * Multi View — a grid (cols × up to 3 rows) where each pane embeds an existing
- * session (chat or pure). A broadcast bar fans the same prompt to every pane.
- * Layout persists via the multiView store.
+ * session (chat or pure). Panes are multi-project: each pane's session picker
+ * groups every project's threads under an <optgroup>, so a single grid can mix
+ * sessions from different projects. A broadcast bar fans the same prompt to
+ * every pane. Layout persists via the multiView store.
  */
 export function MultiViewPanel() {
   const { t } = useTranslation("chat");
   const projects = useProjectStore((s) => s.projects);
-  const activeProjectId = useProjectStore((s) => s.activeId);
-  const project = projects.find((p) => p.id === activeProjectId) ?? null;
 
   const panes = useMultiViewStore((s) => s.panes);
   const cols = useMultiViewStore((s) => s.cols);
@@ -46,13 +57,20 @@ export function MultiViewPanel() {
   const setPaneSession = useMultiViewStore((s) => s.setPaneSession);
   const setCols = useMultiViewStore((s) => s.setCols);
   const setPanes = useMultiViewStore((s) => s.setPanes);
+  const movePane = useMultiViewStore((s) => s.movePane);
 
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsByProject, setSessionsByProject] = useState<SessionsByProject>(
+    {},
+  );
   const [broadcast, setBroadcast] = useState("");
   // The terminal dock belongs to the Multi View (not a grid pane); it follows
   // whichever pane the user last focused.
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  // Pane awaiting a project pick for its "new session" action.
+  const [newPaneId, setNewPaneId] = useState<string | null>(null);
+  // Pane currently being dragged by its handle (logo), for reordering.
+  const [dragPaneId, setDragPaneId] = useState<string | null>(null);
 
   const focusedPane =
     panes.find((p) => p.paneId === focusedPaneId) ?? panes[0];
@@ -63,20 +81,37 @@ export function MultiViewPanel() {
   const infoRef = useRef<Map<string, PaneInfo>>(new Map());
 
   const refreshSessions = useCallback(async () => {
-    if (!project) {
-      setSessions([]);
-      return;
-    }
-    try {
-      setSessions(await sessionList({ project_id: project.id }));
-    } catch {
-      /* keep prior */
-    }
-  }, [project]);
+    const entries = await Promise.all(
+      projects.map(async (p) => {
+        try {
+          return [p.id, await sessionList({ project_id: p.id })] as const;
+        } catch {
+          return [p.id, [] as SessionSummary[]] as const;
+        }
+      }),
+    );
+    setSessionsByProject(Object.fromEntries(entries));
+  }, [projects]);
 
   useEffect(() => {
     void refreshSessions();
   }, [refreshSessions, panes]);
+
+  // sessionId → which project it belongs to, so each pane can embed the panel
+  // with the right project context regardless of the global active project.
+  const projectBySession = useMemo(() => {
+    const m = new Map<string, ProjectRow>();
+    for (const p of projects) {
+      for (const s of sessionsByProject[p.id] ?? []) m.set(s.id, p);
+    }
+    return m;
+  }, [projects, sessionsByProject]);
+
+  const allSessions = useMemo(() => {
+    const out: SessionSummary[] = [];
+    for (const p of projects) out.push(...(sessionsByProject[p.id] ?? []));
+    return out;
+  }, [projects, sessionsByProject]);
 
   const reportInfo = useCallback((paneId: string, info: PaneInfo) => {
     infoRef.current.set(paneId, info);
@@ -99,22 +134,49 @@ export function MultiViewPanel() {
     setBroadcast("");
   }, [broadcast, panes]);
 
-  // Autofill: drop the project's sessions into the grid (running first, then
+  // Autofill: drop every project's sessions into the grid (running first, then
   // most recent), capped at the current column count × 3 rows.
   const autofill = useCallback(() => {
-    const ordered = [...sessions].sort((a, b) => {
+    const ordered = [...allSessions].sort((a, b) => {
       const ar = a.status === "running" ? 0 : 1;
       const br = b.status === "running" ? 0 : 1;
       if (ar !== br) return ar - br;
       return b.last_activity_at.localeCompare(a.last_activity_at);
     });
     setPanes(ordered.map((s) => s.id));
-  }, [sessions, setPanes]);
+  }, [allSessions, setPanes]);
 
-  if (!project) {
+  // Project picked for a pane's "new session" → spin up a pure session in it
+  // and bind the pane to it.
+  const onNewPanePick = useCallback(
+    async (project: ProjectRow) => {
+      const paneId = newPaneId;
+      setNewPaneId(null);
+      if (!paneId) return;
+      try {
+        const res = await sessionStart({
+          project_id: project.id,
+          provider_id: "claude",
+          environment: project.environment,
+          cwd: project.root_path,
+          model: "",
+          runtime: "supervised",
+          env_mode: "default",
+          kind: "pure",
+        });
+        setPaneSession(paneId, res.session_id);
+        void refreshSessions();
+      } catch {
+        /* ignore — surfaced nowhere critical for v1 */
+      }
+    },
+    [newPaneId, setPaneSession, refreshSessions],
+  );
+
+  if (projects.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-[12px] text-neutral-500">
-        {t("mv_no_project")}
+        {t("mv_no_projects")}
       </div>
     );
   }
@@ -125,7 +187,7 @@ export function MultiViewPanel() {
     <section className="flex h-full min-h-0 flex-col bg-neutral-950">
       <header className="flex items-center justify-between gap-2 border-b border-neutral-800 bg-neutral-900 px-3 py-1.5">
         <span className="truncate text-[11px] font-medium text-neutral-200">
-          {t("mv_title")} · {project.name}
+          {t("mv_title")}
         </span>
         <div className="flex items-center gap-1.5">
           <button
@@ -160,7 +222,7 @@ export function MultiViewPanel() {
           <button
             type="button"
             onClick={autofill}
-            disabled={sessions.length === 0}
+            disabled={allSessions.length === 0}
             className="inline-flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
           >
             <Sparkles className="size-3" strokeWidth={1.75} />
@@ -190,35 +252,31 @@ export function MultiViewPanel() {
           <PaneCard
             key={pane.paneId}
             sessionId={pane.sessionId}
-            sessions={sessions}
-            project={project}
+            projects={projects}
+            sessionsByProject={sessionsByProject}
+            paneProject={
+              pane.sessionId ? projectBySession.get(pane.sessionId) ?? null : null
+            }
             canRemove={panes.length > 1}
             isFocused={focusedPane?.paneId === pane.paneId}
+            dragActive={dragPaneId !== null}
+            isDragSource={dragPaneId === pane.paneId}
             onFocus={() => setFocusedPaneId(pane.paneId)}
             onPick={(sid) => setPaneSession(pane.paneId, sid)}
-            onNew={async () => {
-              try {
-                const res = await sessionStart({
-                  project_id: project.id,
-                  provider_id: "claude",
-                  environment: project.environment,
-                  cwd: project.root_path,
-                  model: "",
-                  runtime: "supervised",
-                  env_mode: "default",
-                  kind: "pure",
-                });
-                setPaneSession(pane.paneId, res.session_id);
-                void refreshSessions();
-              } catch {
-                /* ignore — surfaced nowhere critical for v1 */
-              }
-            }}
+            onNew={() => setNewPaneId(pane.paneId)}
             onRemove={() => {
               infoRef.current.delete(pane.paneId);
               removePane(pane.paneId);
             }}
             onInfo={(info) => reportInfo(pane.paneId, info)}
+            onDragStartPane={() => setDragPaneId(pane.paneId)}
+            onDragEndPane={() => setDragPaneId(null)}
+            onDropPane={() => {
+              if (dragPaneId && dragPaneId !== pane.paneId) {
+                movePane(dragPaneId, pane.paneId);
+              }
+              setDragPaneId(null);
+            }}
           />
         ))}
       </div>
@@ -258,35 +316,57 @@ export function MultiViewPanel() {
           {t("mv_broadcast")}
         </button>
       </div>
+
+      <NewChatModal
+        open={newPaneId !== null}
+        onClose={() => setNewPaneId(null)}
+        onPick={onNewPanePick}
+      />
     </section>
   );
 }
 
 function PaneCard({
   sessionId,
-  sessions,
-  project,
+  projects,
+  sessionsByProject,
+  paneProject,
   canRemove,
   isFocused,
+  dragActive,
+  isDragSource,
   onFocus,
   onPick,
   onNew,
   onRemove,
   onInfo,
+  onDragStartPane,
+  onDragEndPane,
+  onDropPane,
 }: {
   sessionId: string | null;
-  sessions: SessionSummary[];
-  project: ProjectRow;
+  projects: ProjectRow[];
+  sessionsByProject: SessionsByProject;
+  paneProject: ProjectRow | null;
   canRemove: boolean;
   isFocused: boolean;
+  dragActive: boolean;
+  isDragSource: boolean;
   onFocus: () => void;
   onPick: (sessionId: string | null) => void;
   onNew: () => void;
   onRemove: () => void;
   onInfo: (info: PaneInfo) => void;
+  onDragStartPane: () => void;
+  onDragEndPane: () => void;
+  onDropPane: () => void;
 }) {
   const { t } = useTranslation("chat");
   const [kind, setKind] = useState<SessionKind | null>(null);
+  const [isOver, setIsOver] = useState(false);
+
+  // Only foreign drags (another pane) are valid drop targets here.
+  const canDrop = dragActive && !isDragSource;
 
   // Resolve the session's kind so we know which panel to embed, and seed the
   // broadcast registry. Pure panes also report their pty id via onPtyReady.
@@ -315,11 +395,51 @@ function PaneCard({
     // lands inside the embedded panel, without swallowing the inner handlers.
     <div
       onMouseDownCapture={onFocus}
-      className={`flex min-h-0 flex-col overflow-hidden ${
-        isFocused ? "bg-neutral-950 ring-1 ring-inset ring-blue-600/60" : "bg-neutral-950"
-      }`}
+      onDragOver={(e) => {
+        if (canDrop) e.preventDefault();
+      }}
+      onDragEnter={() => canDrop && setIsOver(true)}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setIsOver(false);
+        }
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsOver(false);
+        onDropPane();
+      }}
+      className={`flex min-h-0 flex-col overflow-hidden bg-neutral-950 ${
+        canDrop && isOver
+          ? "ring-2 ring-inset ring-emerald-500/70"
+          : isFocused
+            ? "ring-1 ring-inset ring-blue-600/60"
+            : ""
+      } ${isDragSource ? "opacity-40" : ""}`}
     >
       <div className="flex items-center gap-1.5 border-b border-neutral-800 bg-neutral-900 px-2 py-1">
+        <span
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = "move";
+            onDragStartPane();
+          }}
+          onDragEnd={onDragEndPane}
+          title={t("mv_drag_hint")}
+          aria-label={t("mv_drag_hint")}
+          className="flex shrink-0 cursor-grab items-center text-neutral-600 hover:text-neutral-300 active:cursor-grabbing"
+        >
+          {paneProject ? (
+            <ProjectBadge
+              name={paneProject.name}
+              projectId={paneProject.id}
+              logoPath={paneProject.logo_path}
+              size={16}
+            />
+          ) : (
+            <GripVertical className="size-4" strokeWidth={1.75} />
+          )}
+        </span>
         <select
           value={sessionId ?? ""}
           onChange={(e) => onPick(e.target.value || null)}
@@ -328,11 +448,19 @@ function PaneCard({
           <option value="" className="bg-neutral-900">
             {t("mv_pick_session")}
           </option>
-          {sessions.map((s) => (
-            <option key={s.id} value={s.id} className="bg-neutral-900">
-              {s.title || t("mv_untitled")}
-            </option>
-          ))}
+          {projects.map((p) => {
+            const rows = sessionsByProject[p.id] ?? [];
+            if (rows.length === 0) return null;
+            return (
+              <optgroup key={p.id} label={p.name} className="bg-neutral-900">
+                {rows.map((s) => (
+                  <option key={s.id} value={s.id} className="bg-neutral-900">
+                    {s.title || t("mv_untitled")}
+                  </option>
+                ))}
+              </optgroup>
+            );
+          })}
         </select>
         <button
           type="button"
@@ -369,16 +497,20 @@ function PaneCard({
               {t("mv_new_session")}
             </button>
           </div>
+        ) : !paneProject ? (
+          <div className="flex h-full items-center justify-center text-[11px] text-neutral-600">
+            {t("mv_pick_session")}
+          </div>
         ) : kind === "pure" ? (
           <PureClaudePanel
             key={sessionId}
-            project={project}
+            project={paneProject}
             sessionId={sessionId}
             embedded
             onPtyReady={(ptyId) => onInfo({ sessionId, kind: "pure", ptyId })}
           />
         ) : (
-          <ChatPanel key={sessionId} project={project} sessionId={sessionId} />
+          <ChatPanel key={sessionId} project={paneProject} sessionId={sessionId} />
         )}
       </div>
     </div>

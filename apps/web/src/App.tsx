@@ -9,7 +9,9 @@ import { GitPanel } from "~/components/GitPanel.tsx";
 import { Modal } from "~/components/Modal.tsx";
 import { QuickFileSearch } from "~/components/QuickFileSearch.tsx";
 import { PRIMARY_WORKTREE_ID } from "~/ipc/worktree.ts";
-import { ProjectBadge } from "~/components/ProjectBadge.tsx";
+import type { ProjectRow } from "~/ipc/commands.ts";
+import { NewChatModal } from "~/components/NewChatModal.tsx";
+import { ProjectSwitcher } from "~/components/ProjectSwitcher.tsx";
 import { ProjectPanel } from "~/components/ProjectPanel.tsx";
 import { ProjectSettingsModal } from "~/components/ProjectSettingsModal.tsx";
 import { SettingsPanel } from "~/components/SettingsPanel.tsx";
@@ -38,11 +40,13 @@ export function App() {
   const { t } = useTranslation("common");
   const projects = useProjectStore((s) => s.projects);
   const activeId = useProjectStore((s) => s.activeId);
+  const setActiveProject = useProjectStore((s) => s.setActive);
   const refresh = useProjectStore((s) => s.refresh);
   const active = projects.find((p) => p.id === activeId) ?? null;
 
   const [tab, setTab] = useState<Tab>("chat");
   const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
   const [projectSettingsId, setProjectSettingsId] = useState<string | null>(
     null,
   );
@@ -128,11 +132,11 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (matchesKey(e, bindings.new_thread)) {
         e.preventDefault();
-        // "New thread" now means "leave the active session and land on the
-        // empty state for the active project". If there's no project yet,
-        // fall back to creating one — the user has nothing to scope to.
-        if (activeId) {
-          setActiveSession(null);
+        // "New thread" asks which project to scope the chat to (the app is no
+        // longer pinned to a single project). With no projects yet, fall back
+        // to creating one — there's nothing to scope to.
+        if (useProjectStore.getState().projects.length > 0) {
+          setNewChatOpen(true);
         } else {
           setProjectModalOpen(true);
         }
@@ -172,17 +176,19 @@ export function App() {
   const quickWorktreeId =
     sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
 
-  const center = active ? (
-    <div className="flex items-center gap-2">
-      <ProjectBadge
-        name={active.name}
-        projectId={active.id}
-        logoPath={active.logo_path}
-        size={16}
-      />
-      <span className="text-neutral-200">{active.name}</span>
-    </div>
-  ) : null;
+  // Picking a project for a new chat: switch to it, drop into the empty
+  // composer, and make sure we're on the chat tab.
+  const handleNewChatPick = (project: ProjectRow) => {
+    setActiveProject(project.id);
+    setActiveSession(null);
+    setTab("chat");
+    setNewChatOpen(false);
+  };
+
+  const center =
+    projects.length > 0 ? (
+      <ProjectSwitcher onNewChat={() => setNewChatOpen(true)} />
+    ) : null;
 
   const titleBarActions = (
     <div className="flex items-center gap-1 pr-2">
@@ -330,6 +336,12 @@ export function App() {
       >
         <ProjectPanel onCreated={() => setProjectModalOpen(false)} />
       </Modal>
+
+      <NewChatModal
+        open={newChatOpen}
+        onClose={() => setNewChatOpen(false)}
+        onPick={handleNewChatPick}
+      />
 
       <Modal
         open={projectSettingsId !== null}

@@ -11,6 +11,16 @@
     "git": "Git",
     "settings": "Settings"
   },
+  "project_switcher": {
+    "label": "Switch project",
+    "new_chat": "New chat"
+  },
+  "new_chat": {
+    "title": "New chat",
+    "subtitle": "Choose a project for this conversation.",
+    "search_placeholder": "Search projects…",
+    "empty": "No projects. Create one first."
+  },
   "sidebar": {
     "projects": "Projects",
     "sessions": "Sessions",

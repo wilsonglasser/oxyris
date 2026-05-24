@@ -164,6 +164,7 @@
   "pure_chip_file": "[File #{{n}}]",
   "pure_chip_remove": "Remove attachment",
   "mv_no_project": "Select a project to use Multi View.",
+  "mv_no_projects": "Create a project to use Multi View.",
   "mv_title": "Multi View",
   "mv_add_pane": "Add pane",
   "mv_remove_pane": "Remove pane",
@@ -176,5 +177,6 @@
   "mv_autofill": "Autofill",
   "mv_max_reached": "Maximum panes reached",
   "mv_new_session": "New Claude Code",
-  "mv_terminal": "Terminal"
+  "mv_terminal": "Terminal",
+  "mv_drag_hint": "Drag to reorder"
 }

@@ -68,6 +68,7 @@ pub fn run() {
             tauri_commands::terminal::terminal_list,
             tauri_commands::terminal::terminal_rename,
             tauri_commands::terminal::terminal_attach,
+            tauri_commands::terminal::claude_pure_refresh_title,
             tauri_commands::attachments::attachment_save,
             tauri_commands::action::action_list,
             tauri_commands::action::action_upsert,
