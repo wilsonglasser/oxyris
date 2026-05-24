@@ -252,8 +252,21 @@ export function TerminalView({
       fontFamily:
         '"JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace',
       fontSize: 12,
-      theme: { background: "#19191c", foreground: "#dfe1e5", cursor: "#3574f0" },
-      cursorBlink: true,
+      theme: {
+        background: "#19191c",
+        foreground: "#dfe1e5",
+        // Muted, thin, non-blinking cursor. The claude TUI repaints its spinner
+        // line ~10×/sec and the old blinking blue *block* (#3574f0) got smeared
+        // along it as a flickering square — and showed as a fat block at the
+        // input tail. A dim bar reads as a caret, not a square, and
+        // `cursorInactiveStyle: "none"` removes it entirely while focus is in
+        // the composer (the common case during a "thinking" turn).
+        cursor: "#5b6270",
+        cursorAccent: "#19191c",
+      },
+      cursorBlink: false,
+      cursorStyle: "bar",
+      cursorInactiveStyle: "none",
       scrollback: 5000,
     });
     const fit = new FitAddon();
