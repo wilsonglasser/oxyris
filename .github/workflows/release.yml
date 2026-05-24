@@ -96,27 +96,49 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Collect installers
+      - name: Collect installers + build updater manifest
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
           # Cargo workspace puts the build dir at the repo root, not under
-          # `apps/desktop/target/`. Tauri also ships `latest.json` for the
-          # updater plugin — pick it up alongside the installers.
+          # `apps/desktop/target/`. With `bundle.createUpdaterArtifacts` on,
+          # tauri build emits a `.sig` next to each installer.
           $bundleDir = "target/release/bundle"
           $patterns = @("msi/*.msi", "msi/*.msi.sig", "nsis/*.exe", "nsis/*.exe.sig")
           foreach ($pat in $patterns) {
               Get-ChildItem -Path (Join-Path $bundleDir $pat) -ErrorAction SilentlyContinue |
                   ForEach-Object { Copy-Item -Force $_.FullName -Destination release }
           }
-          # Also surface the updater manifest if it landed in the bundle dir.
-          Get-ChildItem -Path (Join-Path $bundleDir "*.json") -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -eq "latest.json" } |
-              ForEach-Object { Copy-Item -Force $_.FullName -Destination release }
-          Get-ChildItem release | ForEach-Object { Write-Host "  - $($_.Name)" }
           if ((Get-ChildItem release -ErrorAction SilentlyContinue).Count -eq 0) {
               Write-Error "No installers were produced — see the build step above."
           }
+
+          # `tauri build` emits only the per-installer .sig files; the updater
+          # manifest (latest.json) is ours to assemble. The Windows updater
+          # installs through the NSIS setup, so the platform entry points there.
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          $repo = "${{ github.repository }}"
+          $setup = Get-ChildItem release -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $setup) {
+              Write-Error "no NSIS -setup.exe produced; cannot build latest.json"
+          }
+          $sigPath = Join-Path release "$($setup.Name).sig"
+          if (-not (Test-Path $sigPath)) {
+              Write-Error "missing $($setup.Name).sig — is bundle.createUpdaterArtifacts enabled?"
+          }
+          $signature = (Get-Content $sigPath -Raw).Trim()
+          $url = "https://github.com/$repo/releases/download/$tag/$($setup.Name)"
+          $manifest = [ordered]@{
+              version   = $version
+              pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+              platforms = [ordered]@{
+                  "windows-x86_64" = [ordered]@{ signature = $signature; url = $url }
+              }
+          }
+          $manifest | ConvertTo-Json -Depth 5 |
+              Set-Content -Path (Join-Path release "latest.json") -Encoding utf8
+          Get-ChildItem release | ForEach-Object { Write-Host "  - $($_.Name)" }
 
       - name: Upload installers (artifact)
         uses: actions/upload-artifact@v4
