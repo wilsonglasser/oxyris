@@ -421,9 +421,15 @@ function PureSessionView({
     ensuredRef.current = sessionId;
     void (async () => {
       try {
+        // Only ever reuse THIS session's claude PTY — never a shell. The dock
+        // spawns `kind: "shell"` PTYs against the same session id, and
+        // `terminalList` returns every kind in arbitrary (HashMap) order, so
+        // grabbing `existing[0]` blindly could mount a plain terminal here
+        // instead of the claude TUI.
         const existing = await terminalList({ session_id: sessionId });
-        if (existing.length > 0 && existing[0]) {
-          setTermId(existing[0].id);
+        const claudePty = existing.find((tinfo) => tinfo.kind === "claude");
+        if (claudePty) {
+          setTermId(claudePty.id);
           return;
         }
         const info = await claudePtySpawn({
@@ -448,8 +454,16 @@ function PureSessionView({
   const sendToPty = useCallback(
     (value: string) => {
       if (!termId) return;
-      // Carriage return submits the line to claude's prompt.
-      void terminalWrite({ id: termId, data: `${value}\r` }).catch(() => {});
+      const id = termId;
+      // Send the text, then the Enter as a SEPARATE write after a short pause.
+      // claude's TUI has paste-burst detection: text + "\r" in one write is
+      // read as a paste, so the trailing carriage return becomes a literal
+      // newline instead of submitting — the intermittent "didn't submit" bug.
+      // A standalone "\r" arriving after the burst window submits reliably.
+      void terminalWrite({ id, data: value })
+        .then(() => new Promise((r) => setTimeout(r, 60)))
+        .then(() => terminalWrite({ id, data: "\r" }))
+        .catch(() => {});
     },
     [termId],
   );

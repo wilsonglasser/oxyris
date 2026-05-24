@@ -116,6 +116,11 @@ pub struct ClaudePtyOpts {
     /// claude write its transcript at a path we can find (`<id>.jsonl`), which
     /// is how pure-mode sessions get an auto-title. Empty → claude picks one.
     pub session_id: String,
+    /// When the transcript for `session_id` already exists on disk (a resumed
+    /// session — e.g. after an app restart), claude rejects `--session-id`
+    /// with "Session ID … is already in use". Resume it with `--resume <id>`
+    /// instead, which keeps writing to the same `<id>.jsonl`.
+    pub resume: bool,
     /// Empty → let claude pick its default model.
     pub model: String,
     /// e.g. "default" | "acceptEdits" | "bypassPermissions" | "plan". Empty →
@@ -235,7 +240,13 @@ fn wsl_exe() -> String {
 fn claude_args(opts: &ClaudePtyOpts) -> Vec<String> {
     let mut args = Vec::new();
     if !opts.session_id.trim().is_empty() {
-        args.push("--session-id".into());
+        // Existing transcript → resume it; fresh → pin the id so the transcript
+        // lands at the path we auto-title from. See `ClaudePtyOpts::resume`.
+        args.push(if opts.resume {
+            "--resume".into()
+        } else {
+            "--session-id".into()
+        });
         args.push(opts.session_id.clone());
     }
     if !opts.model.trim().is_empty() {

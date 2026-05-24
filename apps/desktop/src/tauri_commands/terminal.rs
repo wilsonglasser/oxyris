@@ -175,8 +175,14 @@ pub async fn claude_pty_spawn(
         (None, None)
     };
 
+    // If claude already wrote a transcript under this id (resumed session, e.g.
+    // after an app restart), spawn with `--resume` instead of `--session-id` —
+    // the latter is rejected as "already in use".
+    let resume = claude_transcript_exists(&env, &state.agent_pool, input.session_id).await;
+
     let opts = crate::infra::pty::ClaudePtyOpts {
         session_id: input.session_id.to_string(),
+        resume,
         model: snap.data.model.clone(),
         permission_mode: runtime_to_permission_mode(snap.data.runtime).to_owned(),
         mcp_config_path,
@@ -348,6 +354,68 @@ pub async fn claude_pure_refresh_title(
         .await
         .map_err(|e| TauriTerminalError::Pty(e.to_string()))?;
     Ok(Some(title))
+}
+
+/// Whether claude has already written a transcript for `session_id`. Same
+/// lookup as `read_claude_transcript` (Windows: scan one-level project dirs;
+/// WSL: agent path search) but stops at first hit and reads no content — it
+/// only decides `--resume` vs `--session-id` at spawn. Any failure → `false`
+/// (treat as fresh; worst case claude itself reports the collision).
+async fn claude_transcript_exists(
+    env: &Environment,
+    agent: &crate::infra::agent_pool::AgentPool,
+    session_id: AggregateId,
+) -> bool {
+    let filename = format!("{session_id}.jsonl");
+    match env {
+        Environment::Windows => {
+            let Some(home) = std::env::var_os("USERPROFILE") else {
+                return false;
+            };
+            let projects = std::path::Path::new(&home).join(".claude").join("projects");
+            let Ok(entries) = std::fs::read_dir(&projects) else {
+                return false;
+            };
+            entries.flatten().any(|entry| {
+                entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && entry.path().join(&filename).is_file()
+            })
+        }
+        Environment::Wsl { distro } => {
+            let Ok(info) = agent
+                .call(distro, op_name::SYSTEM_INFO, serde_json::json!({}))
+                .await
+            else {
+                return false;
+            };
+            let Some(home) = info.get("home").and_then(|v| v.as_str()) else {
+                return false;
+            };
+            let root = format!("{}/.claude/projects", home.trim_end_matches('/'));
+            let Ok(found) = agent
+                .call(
+                    distro,
+                    op_name::FS_SEARCH_PATHS,
+                    serde_json::json!({ "root": root, "query": filename, "limit": 5 }),
+                )
+                .await
+            else {
+                return false;
+            };
+            found
+                .get("hits")
+                .and_then(|h| h.as_array())
+                .map(|hits| {
+                    hits.iter().any(|h| {
+                        h.get("rel_path")
+                            .and_then(|p| p.as_str())
+                            .map(|p| p.ends_with(&filename))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        }
+    }
 }
 
 /// Read the head of claude's transcript JSONL for `session_id`. The file is
