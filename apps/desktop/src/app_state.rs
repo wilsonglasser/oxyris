@@ -143,6 +143,11 @@ impl AppState {
         // off the boot path so a hung docker daemon doesn't block startup.
         spawn_docker_cleanup(projections.clone(), app_for_cleanup);
 
+        // Boot-time prune of orphaned `pending-*` attachment buckets (pastes
+        // that never got linked to a session). Session-id buckets are cleaned
+        // on thread delete; this catches the ones delete can't reach.
+        spawn_pending_attachment_sweep(data_dir.clone());
+
         let indexing = Arc::new(IndexingService::new(data_dir.clone(), agent_pool.clone()));
         let fs_watcher = Arc::new(FsWatchService::new());
         let app_for_packs = app_for_lsp.clone();
@@ -259,6 +264,16 @@ fn spawn_docker_cleanup(projections: Arc<Projections>, app: AppHandle) {
         if !report.orphan_projects.is_empty() {
             let _ = app.emit("docker:cleanup", &report);
         }
+    });
+}
+
+fn spawn_pending_attachment_sweep(data_dir: std::path::PathBuf) {
+    tauri::async_runtime::spawn(async move {
+        // std::fs work — keep it off the async runtime's worker thread.
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            crate::tauri_commands::attachments::sweep_stale_pending(&data_dir);
+        })
+        .await;
     });
 }
 

@@ -265,10 +265,19 @@ pub async fn session_delete(
     input: DeleteSessionInput,
     state: State<'_, AppState>,
 ) -> Result<(), TauriSessionError> {
+    // Capture the environment *before* deletion — `delete_session` drops the
+    // projection row that environment resolution reads.
+    let bucket = input.session_id.to_string();
+    let env = crate::tauri_commands::attachments::resolve_environment(&state, &bucket);
     state
         .session_supervisor
         .delete_session(input.session_id)
         .await?;
+    // Best-effort: remove this session's attachment bucket so pasted/dropped
+    // images are cleaned up with the thread. Never fails the delete.
+    if let Some(env) = env {
+        crate::tauri_commands::attachments::delete_bucket(&state, &env, &bucket).await;
+    }
     Ok(())
 }
 

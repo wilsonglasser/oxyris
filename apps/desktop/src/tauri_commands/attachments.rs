@@ -119,10 +119,77 @@ pub async fn attachment_save(
     }
 }
 
+/// `pending-*` paste buckets are never linked to a session (the paste happened
+/// before one existed), so delete-with-thread can't reach them. Prune them once
+/// older than this — long enough not to clobber a paste still being composed,
+/// short enough that abandoned ones don't pile up.
+const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Best-effort boot-time prune of orphaned `pending-<uuid>` attachment buckets
+/// from the local store. Only `pending-*` dirs are touched — real session-id
+/// buckets are cleaned on thread delete via [`delete_bucket`]. Errors (missing
+/// root, unreadable entry) are ignored. Sync (`std::fs`); call off the hot path.
+pub(crate) fn sweep_stale_pending(data_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir.join("attachments")) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with("pending-") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .map(|age| age >= PENDING_TTL)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Best-effort removal of a bucket's attachment directory — called when the
+/// session (the bucket) is deleted so pasted/dropped images don't accumulate
+/// on disk forever. All errors are swallowed: a missing dir (the session never
+/// had attachments) or an unreachable WSL agent must never block the delete.
+/// `env` must be resolved by the caller *before* the session is removed, since
+/// resolution reads the soon-to-be-deleted projection row.
+pub(crate) async fn delete_bucket(state: &AppState, env: &Environment, bucket_id: &str) {
+    let Some(bucket) = sanitize_bucket(bucket_id) else {
+        return;
+    };
+    // Local Windows store. Always attempted — also catches files saved under a
+    // local fallback before the bucket's environment could be resolved.
+    let _ = std::fs::remove_dir_all(state.data_dir.join("attachments").join(&bucket));
+    // WSL projects keep the bytes inside the distro; delete them via the agent.
+    if let Environment::Wsl { distro } = env
+        && let Ok(home) = agent_home(state, distro).await
+    {
+        let path = format!("{home}/.oxyris/attachments/{bucket}");
+        let _ = state
+            .agent_pool
+            .call(
+                distro,
+                op_name::FS_DELETE,
+                serde_json::json!({ "path": path, "recursive": true }),
+            )
+            .await;
+    }
+}
+
 /// Resolve the project environment for a bucket id. The bucket is a session id
 /// for real attachments; transient `pending-<uuid>` buckets (and anything that
 /// doesn't parse to a known session) return `None` so the caller stores locally.
-fn resolve_environment(state: &AppState, bucket_id: &str) -> Option<Environment> {
+pub(crate) fn resolve_environment(state: &AppState, bucket_id: &str) -> Option<Environment> {
     let session_id = AggregateId(uuid::Uuid::parse_str(bucket_id).ok()?);
     let snap = state.projections.get_session(session_id).ok()??;
     let projects = state.projections.list_projects().ok()?;
