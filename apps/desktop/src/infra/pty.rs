@@ -167,25 +167,22 @@ fn build_cmd(
         }
         (Environment::Wsl { distro }, PtyProgram::Claude(opts)) => {
             // Run through a login shell inside the distro, mirroring the
-            // stream-json adapter. Two reasons we can't pass `wsl -- claude
-            // <args>` directly: (1) the cwd is a Windows UNC path that must be
-            // translated to POSIX, and (2) the system-prompt nudge is a
-            // multiline string with backticks — handed to wsl bare it gets
-            // interpreted by the shell. `sh -lc` with single-quote escaping
-            // neutralises both, and `-l` puts claude on PATH.
-            let posix_cwd = crate::infra::path_translator::to_posix(distro, cwd)
-                .unwrap_or_else(|_| cwd.to_owned());
-            let mut translated = opts.clone();
-            if let Some(p) = &opts.mcp_config_path {
-                translated.mcp_config_path =
-                    crate::infra::path_translator::to_posix(distro, p).ok();
-            }
-            let args = claude_args(&translated)
+            // stream-json adapter. We can't pass `wsl -- claude <args>`
+            // directly because the system-prompt nudge is a multiline string
+            // with backticks — handed to wsl bare it gets interpreted by the
+            // shell. `sh -lc` with single-quote escaping neutralises that, and
+            // `-l` puts claude on PATH.
+            //
+            // The cwd is already a POSIX path for WSL projects (worktree paths
+            // are created inside the distro), so it is used verbatim — running
+            // it through `wslpath -u` would double-translate `/home/...` into
+            // `/mnt/c/home/...` and break `cd`.
+            let args = claude_args(opts)
                 .iter()
                 .map(|a| shell_escape(a))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let script = format!("cd {} && exec claude {}", shell_escape(&posix_cwd), args);
+            let script = format!("cd {} && exec claude {}", shell_escape(cwd), args);
             let mut cmd = CommandBuilder::new(wsl_exe());
             cmd.args(["-d", distro, "--", "sh", "-lc", &script]);
             apply_wslenv(&mut cmd, extra_env);
