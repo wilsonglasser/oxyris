@@ -141,6 +141,27 @@ export function Sidebar({
     void refreshProjectSessions(activeProjectId);
   }, [activeProjectId, activeSessionId, refreshProjectSessions]);
 
+  // The active thread's events stream to ChatPanel, not here, so a rename
+  // (notably the auto-generated title after the first turn) never refreshes
+  // the sidebar's cached summaries on its own. Listen for it directly.
+  useEffect(() => {
+    if (!activeSessionId || !activeProjectId) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void onSessionEvent(activeSessionId, (payload) => {
+      if (payload.event.kind === "SessionRenamed") {
+        void refreshProjectSessions(activeProjectId);
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [activeSessionId, activeProjectId, refreshProjectSessions]);
+
   // Flag background threads that finish while the user is elsewhere. Session
   // events arrive on a per-session channel and only the *active* thread is
   // subscribed in ChatPanel, so we listen here for every running, non-active
@@ -171,6 +192,12 @@ export function Sidebar({
     for (const s of targets) {
       void onSessionEvent(s.id, (payload) => {
         const kind = payload.event.kind;
+        // A rename (e.g. auto-title) only needs the cached summary refreshed,
+        // not an attention flag.
+        if (kind === "SessionRenamed") {
+          void refreshProjectSessions(s.project_id);
+          return;
+        }
         if (
           kind === "TurnCompleted" ||
           kind === "TurnFailed" ||
