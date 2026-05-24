@@ -9,14 +9,17 @@ import {
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
+import { getDraft, setDraft } from "~/stores/drafts.ts";
 import {
   ArrowDown,
   ArrowUp,
   Brain,
+  Check,
   ChevronsUpDown,
   Clock,
   Cpu,
   GitBranch,
+  ShieldAlert,
   Mic,
   MicOff,
   MessageSquarePlus,
@@ -35,10 +38,14 @@ import {
   type RuntimeMode,
   type SessionSnapshot,
   type ThinkingMode,
+  type ToolApprovalRequest,
   type TurnEntry,
+  onSessionApproval,
   onSessionEvent,
+  sessionApproveTool,
   sessionGet,
   sessionInterrupt,
+  sessionRejectTool,
   sessionResume,
   sessionSendMessage,
   sessionStart,
@@ -135,6 +142,9 @@ export function ChatPanel({
   const [envStatus, setEnvStatus] = useState<EnvStatus | null>(null);
   const [dotenvStatus, setDotenvStatus] = useState<DotenvStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Pending tool-approval prompts for the active session (supervised mode).
+  // FIFO: claude asks one at a time, but we keep an array to be safe.
+  const [approvals, setApprovals] = useState<ToolApprovalRequest[]>([]);
 
   // Worktrees for the workspace picker. Keyed on `project?.id` (string) so
   // switching projects always retriggers the fetch even if the row object
@@ -250,8 +260,10 @@ export function ChatPanel({
         kind === "TurnCompleted" ||
         kind === "TurnFailed" ||
         kind === "TurnInterrupted";
-      if (terminal && shouldNotify()) {
-        playTurnCompleteChime();
+      if (terminal) {
+        // Any pending approval for this turn is moot once it ends.
+        setApprovals([]);
+        if (shouldNotify()) playTurnCompleteChime();
       }
     }).then((fn) => {
       if (cancelled) fn();
@@ -262,6 +274,60 @@ export function ChatPanel({
       if (unlisten) unlisten();
     };
   }, [activeId, applyEvent]);
+
+  // Subscribe to the active session's tool-approval prompts. A pending prompt
+  // means the turn is paused waiting on the user. Cleared on session switch.
+  useEffect(() => {
+    setApprovals([]);
+    if (!activeId) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void onSessionApproval(activeId, (req) => {
+      if (cancelled) return;
+      // Chime when the window is backgrounded — a prompt needs the user.
+      if (shouldNotify()) playTurnCompleteChime();
+      setApprovals((prev) =>
+        prev.some((p) => p.request_id === req.request_id) ? prev : [...prev, req],
+      );
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [activeId]);
+
+  const onApprove = useCallback(
+    async (req: ToolApprovalRequest) => {
+      setApprovals((prev) => prev.filter((p) => p.request_id !== req.request_id));
+      try {
+        await sessionApproveTool({
+          session_id: req.session_id,
+          request_id: req.request_id,
+        });
+      } catch (e) {
+        setError(extractError(e));
+      }
+    },
+    [],
+  );
+
+  const onReject = useCallback(
+    async (req: ToolApprovalRequest) => {
+      setApprovals((prev) => prev.filter((p) => p.request_id !== req.request_id));
+      try {
+        await sessionRejectTool({
+          session_id: req.session_id,
+          request_id: req.request_id,
+        });
+      } catch (e) {
+        setError(extractError(e));
+      }
+    },
+    [],
+  );
 
   const activeSnapshot = activeId ? snapshots[activeId] : undefined;
   const isRunning = activeSnapshot?.status === "running";
@@ -652,6 +718,14 @@ export function ChatPanel({
         />
       )}
 
+      {approvals.length > 0 && (
+        <ApprovalBar
+          requests={approvals}
+          onApprove={(r) => void onApprove(r)}
+          onReject={(r) => void onReject(r)}
+        />
+      )}
+
       <Composer
         onSend={onSendOrStart}
         onInterrupt={
@@ -802,6 +876,76 @@ function Thread({
             : t("scroll_to_bottom")}
         </button>
       )}
+    </div>
+  );
+}
+
+// Pull a human one-liner out of a tool's input (command / path / url), falling
+// back to compact JSON so the user can see what they're approving.
+function approvalDetail(input: unknown): string {
+  if (input && typeof input === "object") {
+    const o = input as Record<string, unknown>;
+    const v = o.command ?? o.file_path ?? o.path ?? o.url ?? o.pattern;
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return "";
+  }
+}
+
+function ApprovalBar({
+  requests,
+  onApprove,
+  onReject,
+}: {
+  requests: ToolApprovalRequest[];
+  onApprove: (req: ToolApprovalRequest) => void;
+  onReject: (req: ToolApprovalRequest) => void;
+}) {
+  const { t } = useTranslation("chat");
+  return (
+    <div className="border-t border-amber-900/40 bg-amber-950/20 px-4 py-2">
+      <div className="mx-auto flex max-w-3xl flex-col gap-2">
+        {requests.map((req) => (
+          <div
+            key={req.request_id}
+            className="flex items-start gap-3 rounded-lg border border-amber-800/50 bg-amber-950/30 px-3 py-2"
+          >
+            <ShieldAlert
+              className="mt-0.5 size-4 shrink-0 text-amber-300"
+              strokeWidth={1.75}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-medium text-amber-100">
+                {t("approval_heading", { tool: req.tool_name })}
+              </div>
+              <pre className="mt-0.5 max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-amber-200/80">
+                {approvalDetail(req.input)}
+              </pre>
+            </div>
+            <div className="flex shrink-0 gap-1.5">
+              <button
+                type="button"
+                onClick={() => onReject(req)}
+                className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800"
+              >
+                <X className="size-3" strokeWidth={2} />
+                {t("approval_deny")}
+              </button>
+              <button
+                type="button"
+                onClick={() => onApprove(req)}
+                className="flex items-center gap-1 rounded bg-amber-400 px-2 py-1 text-[11px] font-medium text-amber-950 hover:bg-amber-300"
+              >
+                <Check className="size-3" strokeWidth={2.5} />
+                {t("approval_allow")}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1049,7 +1193,9 @@ function Composer({
   bottomBar,
 }: ComposerProps) {
   const { t, i18n } = useTranslation("chat");
-  const [text, setText] = useState("");
+  // Seed from the per-session draft store so a remount (triggered by switching
+  // conversations) restores what the user had typed instead of clearing it.
+  const [text, setText] = useState(() => getDraft(sessionKey));
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -1099,6 +1245,12 @@ function Composer({
     const capped = Math.min(el.scrollHeight, 240);
     el.style.height = `${capped}px`;
   }, [text]);
+
+  // Mirror the draft into the per-session store on every change so it survives
+  // the remount that happens when the user switches conversations and back.
+  useEffect(() => {
+    setDraft(sessionKey, text);
+  }, [sessionKey, text]);
 
   // Release preview blob URLs when the composer unmounts or the set of
   // attachments shrinks.

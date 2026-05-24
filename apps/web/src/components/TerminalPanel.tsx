@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Pencil, Plus, X } from "lucide-react";
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import {
   type TerminalInfo,
@@ -213,7 +214,7 @@ interface ViewProps {
   /** Raw keystroke bytes the user typed into the terminal (mirrors PTY input). */
   onInput?: (data: string) => void;
   /** Fired on each *live* PTY output chunk (not during the attach replay). */
-  onOutput?: () => void;
+  onOutput?: (data: string) => void;
 }
 
 /**
@@ -260,6 +261,19 @@ export function TerminalView({
     term.open(mount);
     termRef.current = term;
     fitRef.current = fit;
+
+    // GPU renderer. The claude TUI repaints its spinner/status block ~10×/sec;
+    // xterm's default DOM renderer tears colored spans on those rapid redraws
+    // (visible flicker on the blue "thinking" text). WebGL repaints atomically,
+    // killing the flicker. Guarded: if WebGL is unavailable (or the GL context
+    // is later lost) we dispose the addon and fall back to the DOM renderer.
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch {
+      /* no WebGL — DOM renderer stays in place */
+    }
 
     // Ctrl+C in a terminal is SIGINT (interrupts claude), so it can't be copy.
     // Bind the conventional terminal shortcuts instead: Ctrl+Shift+C copies the
@@ -374,7 +388,7 @@ export function TerminalView({
       if (seq <= lastSeq) return;
       lastSeq = seq;
       safeWrite(data);
-      onOutputRef.current?.();
+      onOutputRef.current?.(data);
     }).then((fn) => {
       if (cancelled) fn();
       else unlistenOut = fn;

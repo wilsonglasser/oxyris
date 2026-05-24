@@ -35,6 +35,15 @@ pub enum StreamEvent {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
+    /// Claude is asking permission to run a tool (`--permission-prompt-tool
+    /// stdio`). We must reply with a `control_response` on stdin keyed by
+    /// `request_id`, or the turn blocks forever.
+    CanUseTool {
+        request_id: String,
+        tool_use_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
     Unknown(serde_json::Value),
 }
 
@@ -121,6 +130,40 @@ pub fn parse_stream_line(line: &str) -> Option<StreamEvent> {
                     .and_then(|u| u.get("output_tokens"))
                     .and_then(|v| v.as_u64()),
             })
+        }
+        "control_request" => {
+            let request = value.get("request");
+            let subtype = request
+                .and_then(|r| r.get("subtype"))
+                .and_then(|s| s.as_str());
+            if subtype == Some("can_use_tool") {
+                let request_id = value
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let request = request.unwrap_or(&serde_json::Value::Null);
+                return Some(StreamEvent::CanUseTool {
+                    request_id,
+                    tool_use_id: request
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    tool_name: request
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    input: request
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                });
+            }
+            // Other control subtypes (e.g. the response to our `initialize`)
+            // aren't actionable here — keep them as Unknown.
+            Some(StreamEvent::Unknown(value))
         }
         _ => Some(StreamEvent::Unknown(value)),
     }
@@ -240,6 +283,36 @@ mod tests {
             }
             _ => panic!("wrong event"),
         }
+    }
+
+    #[test]
+    fn parses_can_use_tool_control_request() {
+        let line = r#"{"type":"control_request","request_id":"req-9","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"a.txt"},"tool_use_id":"toolu_1"}}"#;
+        let ev = parse_stream_line(line).unwrap();
+        match ev {
+            StreamEvent::CanUseTool {
+                request_id,
+                tool_use_id,
+                tool_name,
+                input,
+            } => {
+                assert_eq!(request_id, "req-9");
+                assert_eq!(tool_use_id, "toolu_1");
+                assert_eq!(tool_name, "Write");
+                assert_eq!(input["file_path"], "a.txt");
+            }
+            _ => panic!("wrong event"),
+        }
+    }
+
+    #[test]
+    fn other_control_request_subtype_is_unknown() {
+        let line =
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1"}}"#;
+        assert!(matches!(
+            parse_stream_line(line).unwrap(),
+            StreamEvent::Unknown(_)
+        ));
     }
 
     #[test]

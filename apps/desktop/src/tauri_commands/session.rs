@@ -147,6 +147,49 @@ pub async fn session_interrupt(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ApproveToolInput {
+    pub session_id: AggregateId,
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RejectToolInput {
+    pub session_id: AggregateId,
+    pub request_id: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn session_approve_tool(
+    input: ApproveToolInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriSessionError> {
+    state
+        .session_supervisor
+        .approve_tool_use(input.session_id, input.request_id)
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn session_reject_tool(
+    input: RejectToolInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriSessionError> {
+    let message = if input.message.trim().is_empty() {
+        "The user declined this tool call.".to_owned()
+    } else {
+        input.message
+    };
+    state
+        .session_supervisor
+        .reject_tool_use(input.session_id, input.request_id, message)
+        .await?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn session_stop(
     input: StopSessionInput,

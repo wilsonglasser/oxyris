@@ -293,6 +293,39 @@ impl SessionSupervisor {
         Ok(())
     }
 
+    /// Answer a pending tool-approval prompt. `request_id` comes from the
+    /// `session:{id}:approval` event. No event is persisted — the decision
+    /// only unblocks the provider's in-flight turn.
+    pub async fn approve_tool_use(
+        &self,
+        session_id: AggregateId,
+        request_id: String,
+    ) -> Result<(), SupervisorError> {
+        let live = self.live.lock().await;
+        if let Some(live) = live.get(&session_id) {
+            let _ = live
+                .commands
+                .send(ProviderCommand::ApproveToolUse { request_id });
+        }
+        Ok(())
+    }
+
+    pub async fn reject_tool_use(
+        &self,
+        session_id: AggregateId,
+        request_id: String,
+        message: String,
+    ) -> Result<(), SupervisorError> {
+        let live = self.live.lock().await;
+        if let Some(live) = live.get(&session_id) {
+            let _ = live.commands.send(ProviderCommand::RejectToolUse {
+                request_id,
+                message,
+            });
+        }
+        Ok(())
+    }
+
     pub async fn stop_session(&self, session_id: AggregateId) -> Result<(), SupervisorError> {
         let (state, version) = self.load_session(session_id)?;
         let events = Session::decide(&state, SessionCommand::Stop { now: Utc::now() })?;
@@ -539,6 +572,39 @@ async fn handle_provider_event_core(
     event: ProviderEvent,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), SupervisorError> {
+    // Tool-approval prompts are transient UI state, not session history — we
+    // surface them to the frontend on a side channel rather than persisting
+    // them to the event log. The turn stays paused until the user answers via
+    // `approve_tool_use` / `reject_tool_use`.
+    if let ProviderEvent::ToolApprovalRequested {
+        turn_id,
+        request_id,
+        tool_use_id,
+        tool_name,
+        input,
+    } = &event
+    {
+        #[derive(Serialize, Clone)]
+        struct ApprovalPayload<'a> {
+            session_id: AggregateId,
+            turn_id: &'a str,
+            request_id: &'a str,
+            tool_use_id: &'a str,
+            tool_name: &'a str,
+            input: &'a serde_json::Value,
+        }
+        let payload = ApprovalPayload {
+            session_id,
+            turn_id,
+            request_id,
+            tool_use_id,
+            tool_name,
+            input,
+        };
+        let _ = app.emit(&format!("session:{session_id}:approval"), payload);
+        return Ok(());
+    }
+
     let cmd = match event {
         ProviderEvent::SessionReady {
             provider_session_id: Some(provider_session_id),
@@ -573,6 +639,8 @@ async fn handle_provider_event_core(
             message,
             now,
         },
+        // Handled by the early return above; here only to satisfy the match.
+        ProviderEvent::ToolApprovalRequested { .. } => return Ok(()),
         ProviderEvent::SessionEnded => SessionCommand::Stop { now },
     };
 

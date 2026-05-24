@@ -14,6 +14,8 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  onSessionApproval,
+  onSessionEvent,
   sessionDelete,
   sessionList,
   sessionRename,
@@ -58,6 +60,7 @@ export function Sidebar({
   const setWorkspaceFilter = useProjectStore((s) => s.setWorkspaceFilter);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const setActiveSession = useSessionStore((s) => s.setActive);
+  const markAttention = useSessionStore((s) => s.markAttention);
 
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -137,6 +140,63 @@ export function Sidebar({
     if (!activeProjectId) return;
     void refreshProjectSessions(activeProjectId);
   }, [activeProjectId, activeSessionId, refreshProjectSessions]);
+
+  // Flag background threads that finish while the user is elsewhere. Session
+  // events arrive on a per-session channel and only the *active* thread is
+  // subscribed in ChatPanel, so we listen here for every running, non-active
+  // thread: when its turn reaches a terminal outcome (or it errors) we mark it
+  // for attention. Opening the thread clears the flag (see store `setActive`).
+  const allSessions = useMemo(
+    () => Object.values(sessionsByProject).flat(),
+    [sessionsByProject],
+  );
+  const sessionsRef = useRef<SessionSummary[]>([]);
+  sessionsRef.current = allSessions;
+  // Re-subscribe only when the watched set actually changes (not on every poll).
+  const watchKey = useMemo(
+    () =>
+      allSessions
+        .filter((s) => s.status === "running" && s.id !== activeSessionId)
+        .map((s) => s.id)
+        .sort()
+        .join(","),
+    [allSessions, activeSessionId],
+  );
+  useEffect(() => {
+    if (!watchKey) return;
+    const ids = new Set(watchKey.split(","));
+    const targets = sessionsRef.current.filter((s) => ids.has(s.id));
+    const unlistens: Array<() => void> = [];
+    let cancelled = false;
+    for (const s of targets) {
+      void onSessionEvent(s.id, (payload) => {
+        const kind = payload.event.kind;
+        if (
+          kind === "TurnCompleted" ||
+          kind === "TurnFailed" ||
+          kind === "TurnInterrupted" ||
+          kind === "SessionErrored"
+        ) {
+          markAttention(s.id);
+          void refreshProjectSessions(s.project_id);
+        }
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlistens.push(fn);
+      });
+      // A pending tool-approval is the strongest "needs you" signal.
+      void onSessionApproval(s.id, () => {
+        markAttention(s.id);
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlistens.push(fn);
+      });
+    }
+    return () => {
+      cancelled = true;
+      for (const fn of unlistens) fn();
+    };
+  }, [watchKey, markAttention, refreshProjectSessions]);
 
   // Auto-expand the active project so the user always sees its threads.
   useEffect(() => {
@@ -516,6 +576,9 @@ function SessionEntry({
   const { t } = useTranslation("common");
   const label = session.title || session.model || t("sidebar.untitled_session");
   const pinned = !!session.pinned_at;
+  // Orange highlight when this background thread finished/errored and the user
+  // hasn't opened it yet. Active threads are being viewed, so never flagged.
+  const needsAttention = useSessionStore((s) => !!s.attention[session.id]);
 
   const onRename = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -569,10 +632,12 @@ function SessionEntry({
         className={`group flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-[11px] transition ${
           isActive
             ? "bg-[#2e436e]/40 text-neutral-100"
-            : "text-neutral-400 hover:bg-neutral-800/40"
+            : needsAttention
+              ? "bg-orange-500/20 text-orange-100 hover:bg-orange-500/30"
+              : "text-neutral-400 hover:bg-neutral-800/40"
         }`}
       >
-        <StatusDot status={session.status} />
+        <StatusDot status={session.status} attention={needsAttention} />
         <button
           type="button"
           onClick={onSelect}
@@ -636,9 +701,16 @@ function SessionEntry({
   );
 }
 
-function StatusDot({ status }: { status: string }) {
-  const color =
-    status === "running"
+function StatusDot({
+  status,
+  attention,
+}: {
+  status: string;
+  attention?: boolean;
+}) {
+  const color = attention
+    ? "bg-orange-400"
+    : status === "running"
       ? "bg-emerald-400"
       : status === "errored"
         ? "bg-red-400"

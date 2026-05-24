@@ -163,6 +163,21 @@ export async function sessionInterrupt(input: {
   await invoke("session_interrupt", { input });
 }
 
+export async function sessionApproveTool(input: {
+  session_id: string;
+  request_id: string;
+}): Promise<void> {
+  await invoke("session_approve_tool", { input });
+}
+
+export async function sessionRejectTool(input: {
+  session_id: string;
+  request_id: string;
+  message?: string;
+}): Promise<void> {
+  await invoke("session_reject_tool", { input });
+}
+
 export async function sessionStop(input: {
   session_id: string;
 }): Promise<void> {
@@ -250,6 +265,30 @@ export async function onSessionEvent(
   cb: (ev: EmittedSessionEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<EmittedSessionEvent>(`session:${sessionId}:event`, (event) => {
+    cb(event.payload);
+  });
+}
+
+/**
+ * A pending tool-approval prompt (supervised / accept-edits). The turn is
+ * paused until the user answers via {@link sessionApproveTool} /
+ * {@link sessionRejectTool}, keyed by `request_id`.
+ */
+export type ToolApprovalRequest = {
+  session_id: string;
+  turn_id: string;
+  request_id: string;
+  tool_use_id: string;
+  tool_name: string;
+  input: unknown;
+};
+
+/** Subscribe to tool-approval prompts for one session. Returns the unsub fn. */
+export async function onSessionApproval(
+  sessionId: string,
+  cb: (req: ToolApprovalRequest) => void,
+): Promise<UnlistenFn> {
+  return listen<ToolApprovalRequest>(`session:${sessionId}:approval`, (event) => {
     cb(event.payload);
   });
 }

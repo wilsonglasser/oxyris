@@ -9,7 +9,14 @@ import type {
 interface SessionStoreState {
   snapshots: Record<string, SessionSnapshot>;
   activeSessionId: string | null;
+  /**
+   * Background threads (not the active one) whose turn finished or errored —
+   * flagged so the sidebar can highlight them until the user opens them.
+   */
+  attention: Record<string, boolean>;
   setActive: (id: string | null) => void;
+  /** Flag a background thread as needing attention (no-op for the active one). */
+  markAttention: (id: string) => void;
   hydrate: (snapshot: SessionSnapshot) => void;
   applyEvent: (ev: EmittedSessionEvent) => void;
   clear: (id: string) => void;
@@ -19,8 +26,26 @@ interface SessionStoreState {
 export const useSessionStore = create<SessionStoreState>((set) => ({
   snapshots: {},
   activeSessionId: null,
+  attention: {},
 
-  setActive: (id) => set({ activeSessionId: id }),
+  setActive: (id) =>
+    set((state) => {
+      // Opening a thread clears its attention flag.
+      if (id && state.attention[id]) {
+        const { [id]: _seen, ...rest } = state.attention;
+        return { activeSessionId: id, attention: rest };
+      }
+      return { activeSessionId: id };
+    }),
+
+  markAttention: (id) =>
+    set((state) =>
+      // Never flag the thread the user is already looking at, and skip a
+      // redundant write if it's already flagged.
+      id === state.activeSessionId || state.attention[id]
+        ? {}
+        : { attention: { ...state.attention, [id]: true } },
+    ),
 
   hydrate: (snapshot) =>
     set((state) => ({
@@ -36,8 +61,10 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   drop: (id) =>
     set((state) => {
       const { [id]: _removed, ...rest } = state.snapshots;
+      const { [id]: _seen, ...attRest } = state.attention;
       return {
         snapshots: rest,
+        attention: attRest,
         activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
       };
     }),

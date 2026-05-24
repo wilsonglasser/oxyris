@@ -129,6 +129,19 @@ pub enum ProviderEvent {
     },
     /// The current turn failed before completing.
     TurnFailed { turn_id: String, message: String },
+    /// The provider is asking the user to approve a tool invocation before it
+    /// runs (supervised / accept-edits). The turn is paused until the backend
+    /// answers with [`ProviderCommand::ApproveToolUse`] or
+    /// [`ProviderCommand::RejectToolUse`], keyed by `request_id`.
+    ToolApprovalRequested {
+        turn_id: String,
+        /// Provider-assigned id for this approval round-trip. Echoed back in
+        /// the approve/reject command — distinct from `tool_use_id`.
+        request_id: String,
+        tool_use_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
     /// The session exited — the supervisor should tear it down.
     SessionEnded,
 }
@@ -141,10 +154,12 @@ pub enum ProviderCommand {
     SendMessage { turn_id: String, text: String },
     /// Interrupt the in-flight turn.
     Interrupt,
-    /// Approve a pending tool-use (supervised mode).
-    ApproveToolUse { tool_use_id: String },
-    /// Reject a pending tool-use.
-    RejectToolUse { tool_use_id: String, reason: String },
+    /// Approve a pending tool-use (supervised mode). `request_id` is the id
+    /// from the matching [`ProviderEvent::ToolApprovalRequested`].
+    ApproveToolUse { request_id: String },
+    /// Reject a pending tool-use. `message` is fed back to the model as the
+    /// reason the call was denied.
+    RejectToolUse { request_id: String, message: String },
     /// Ask the provider to shut down cleanly.
     Stop,
 }

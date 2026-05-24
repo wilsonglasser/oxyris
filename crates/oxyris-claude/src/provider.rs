@@ -32,6 +32,12 @@ impl Provider for ClaudeProvider {
     }
 
     fn start_session(&self, opts: SessionOptions) -> Result<ProviderSession, ProviderError> {
+        // Modes that route tool approvals over stdio (see `build_command`)
+        // need the control-protocol handshake in the writer task.
+        let permission_stdio = matches!(
+            opts.runtime,
+            oxyris_provider::RuntimeMode::Supervised | oxyris_provider::RuntimeMode::AcceptEdits
+        );
         let mut cmd = build_command(&opts)?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -95,6 +101,18 @@ impl Provider for ClaudeProvider {
         let turn_ref = active_turn.clone();
         tokio::spawn(async move {
             let mut stdin = stdin;
+            // When permission prompts are routed over stdio, claude expects the
+            // control protocol to be live: announce it with one `initialize`
+            // control_request before any user input. The CLI's control_response
+            // is parsed as Unknown and dropped.
+            if permission_stdio {
+                let init = serde_json::json!({
+                    "type": "control_request",
+                    "request_id": "oxyris-init-1",
+                    "request": { "subtype": "initialize", "hooks": serde_json::Value::Null }
+                });
+                let _ = write_line(&mut stdin, &init).await;
+            }
             while let Some(cmd) = commands_rx.recv().await {
                 match cmd {
                     ProviderCommand::SendMessage { turn_id, text } => {
@@ -121,10 +139,36 @@ impl Provider for ClaudeProvider {
                         // Stop reading commands; the session is going down.
                         break;
                     }
-                    ProviderCommand::ApproveToolUse { .. }
-                    | ProviderCommand::RejectToolUse { .. } => {
-                        // Supervised-mode approvals. Wiring lands in Sprint 11
-                        // when we surface approval prompts end-to-end.
+                    ProviderCommand::ApproveToolUse { request_id } => {
+                        // Allow with no `updatedInput` → claude runs the tool
+                        // with the original input it asked about.
+                        let line = serde_json::json!({
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": { "behavior": "allow" }
+                            }
+                        });
+                        if write_line(&mut stdin, &line).await.is_err() {
+                            break;
+                        }
+                    }
+                    ProviderCommand::RejectToolUse {
+                        request_id,
+                        message,
+                    } => {
+                        let line = serde_json::json!({
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": { "behavior": "deny", "message": message }
+                            }
+                        });
+                        if write_line(&mut stdin, &line).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -225,6 +269,20 @@ fn translate_and_emit(
                 });
             }
         }
+        StreamEvent::CanUseTool {
+            request_id,
+            tool_use_id,
+            tool_name,
+            input,
+        } => {
+            let _ = tx.send(ProviderEvent::ToolApprovalRequested {
+                turn_id,
+                request_id,
+                tool_use_id,
+                tool_name,
+                input,
+            });
+        }
         StreamEvent::Unknown(_) => {}
     }
 }
@@ -302,15 +360,30 @@ fn build_command(opts: &SessionOptions) -> Result<Command, ProviderError> {
     // Runtime mode → Claude policy flags. We use the public switches exposed
     // via `--permission-mode` (claude 2.x+). Anything unknown falls back to
     // the CLI default.
+    // `--permission-prompt-tool stdio` routes "would prompt" decisions back to
+    // us as `can_use_tool` control_requests instead of auto-denying in
+    // non-interactive mode. Enabled for the modes that ask (Supervised always;
+    // AcceptEdits for non-edit tools). FullAccess bypasses; Plan keeps the
+    // CLI's own plan-approval flow.
     match opts.runtime {
         oxyris_provider::RuntimeMode::FullAccess => {
             cmd.args(["--permission-mode", "bypassPermissions"]);
         }
         oxyris_provider::RuntimeMode::AcceptEdits => {
-            cmd.args(["--permission-mode", "acceptEdits"]);
+            cmd.args([
+                "--permission-mode",
+                "acceptEdits",
+                "--permission-prompt-tool",
+                "stdio",
+            ]);
         }
         oxyris_provider::RuntimeMode::Supervised => {
-            cmd.args(["--permission-mode", "default"]);
+            cmd.args([
+                "--permission-mode",
+                "default",
+                "--permission-prompt-tool",
+                "stdio",
+            ]);
         }
         oxyris_provider::RuntimeMode::Plan => {
             cmd.args(["--permission-mode", "plan"]);

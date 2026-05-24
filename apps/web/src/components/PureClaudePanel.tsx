@@ -40,6 +40,39 @@ import {
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { TerminalView } from "~/components/TerminalPanel.tsx";
 
+// Strip ANSI escape sequences (CSI + OSC) from raw PTY bytes so prompt text
+// matches across redraws. Char-code based to keep raw control bytes out of
+// source. ESC = 27, BEL = 7.
+function stripAnsi(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; i += 1) {
+    if (s.charCodeAt(i) !== 27) {
+      out += s[i];
+      continue;
+    }
+    const next = s[i + 1];
+    if (next === "[") {
+      // CSI: skip until a final byte in @–~ (0x40–0x7e).
+      i += 2;
+      while (i < s.length) {
+        const c = s.charCodeAt(i);
+        if (c >= 0x40 && c <= 0x7e) break;
+        i += 1;
+      }
+    } else if (next === "]") {
+      // OSC: skip until BEL or ESC (start of the ST terminator).
+      i += 2;
+      while (i < s.length && s.charCodeAt(i) !== 7 && s.charCodeAt(i) !== 27) {
+        i += 1;
+      }
+    } else {
+      // Lone ESC or a 2-byte escape — drop ESC and the following byte.
+      i += 1;
+    }
+  }
+  return out;
+}
+
 interface Attachment {
   id: string;
   /** Path as claude should see it (POSIX inside WSL). */
@@ -304,6 +337,29 @@ function PureSessionView({
   const idleTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(idleTimerRef.current), []);
 
+  // Permission / input-request chime. The claude TUI renders a numbered menu
+  // ("Do you want to proceed?" + "❯ 1. Yes" / "…don't ask again") whenever it
+  // needs the user to approve a tool or answer a question. We sniff the raw PTY
+  // bytes for that menu and ring once, immediately, when the window is
+  // unfocused — separate from the done-idle chime below. A rolling, ANSI-
+  // stripped tail handles the prompt being split across output chunks.
+  const PROMPT_RE =
+    /(do you want to (proceed|make this edit|create|run|continue))|(❯\s*\d+\.\s*yes)|(yes, and don'?t ask again)|(no, and tell claude)/i;
+  const outTailRef = useRef("");
+  // Latched true while a prompt is on screen so we chime once per request, not
+  // once per redraw. Cleared when the user submits a response (see onPtyInput).
+  const promptOpenRef = useRef(false);
+
+  const detectPrompt = useCallback((data: string) => {
+    const stripped = stripAnsi(data);
+    const tail = (outTailRef.current + stripped).slice(-2000);
+    outTailRef.current = tail;
+    if (PROMPT_RE.test(tail) && !promptOpenRef.current) {
+      promptOpenRef.current = true;
+      if (shouldNotify()) playTurnCompleteChime();
+    }
+  }, []);
+
   // Pure sessions get no auto-title from a turn-event stream. Instead we read
   // claude's own transcript (it's written under our `--session-id`) once a turn
   // settles. The backend no-ops if the session is already titled, so calling it
@@ -328,20 +384,32 @@ function PureSessionView({
   const onPtyInput = useCallback((data: string) => {
     // A submit from the user (Enter, unless Shift held for a newline) arms the
     // done-detector. Other keystrokes (navigation, autocomplete) don't.
-    if (data.includes("\r")) armedRef.current = true;
+    if (data.includes("\r")) {
+      armedRef.current = true;
+      // The user just answered a prompt (or started a turn): release the latch
+      // and reset the sniff buffer so the next request can chime again.
+      promptOpenRef.current = false;
+      outTailRef.current = "";
+    }
   }, []);
 
-  const onPtyOutput = useCallback(() => {
-    if (!armedRef.current) return;
-    window.clearTimeout(idleTimerRef.current);
-    idleTimerRef.current = window.setTimeout(() => {
-      armedRef.current = false;
-      if (shouldNotify()) playTurnCompleteChime();
-      // Turn settled → claude has flushed the user message (and maybe a
-      // summary) to its transcript; try to title from it.
-      refreshTitle();
-    }, IDLE_DONE_MS);
-  }, [refreshTitle]);
+  const onPtyOutput = useCallback(
+    (data: string) => {
+      detectPrompt(data);
+      if (!armedRef.current) return;
+      window.clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = window.setTimeout(() => {
+        armedRef.current = false;
+        // If a permission/input prompt is on screen the prompt chime already
+        // rang — don't double-ring as a "turn done".
+        if (!promptOpenRef.current && shouldNotify()) playTurnCompleteChime();
+        // Turn settled → claude has flushed the user message (and maybe a
+        // summary) to its transcript; try to title from it.
+        refreshTitle();
+      }, IDLE_DONE_MS);
+    },
+    [refreshTitle, detectPrompt],
+  );
 
   // Ensure exactly one claude PTY exists for this session: reuse an existing
   // one (survives remounts) or spawn a fresh one. Deduped via `ensuredRef`
@@ -427,6 +495,8 @@ function PureSessionView({
     // autocomplete entry without submitting — the bug the chips UX fixes.
     const refs = attachments.map((a) => `@${a.path} `).join("");
     armedRef.current = true; // arm the done-chime detector
+    promptOpenRef.current = false; // fresh turn → re-arm the prompt chime
+    outTailRef.current = "";
     sendToPty(`${refs}${trimmed}`);
     setText("");
     setAttachments([]);

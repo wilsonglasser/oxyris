@@ -39,6 +39,8 @@ pub fn run() {
             tauri_commands::session::session_start,
             tauri_commands::session::session_send_message,
             tauri_commands::session::session_interrupt,
+            tauri_commands::session::session_approve_tool,
+            tauri_commands::session::session_reject_tool,
             tauri_commands::session::session_stop,
             tauri_commands::session::session_resume,
             tauri_commands::session::session_rename,
