@@ -94,6 +94,13 @@
     "body": "{{count}} projeto(s) · {{containers}} containers · {{volumes}} volumes · {{networks}} networks",
     "dismiss": "Dispensar"
   },
+  "update_banner": {
+    "title": "Atualização disponível",
+    "body": "Versão {{version}} pronta pra instalar.",
+    "action": "Atualizar e reiniciar",
+    "applying": "Atualizando…",
+    "dismiss": "Depois"
+  },
   "indexing": {
     "in_progress": "Indexando {{indexed}}/{{total}}",
     "done": "Indexado · {{symbols}} símbolos",

@@ -16,6 +16,7 @@ import { SettingsPanel } from "~/components/SettingsPanel.tsx";
 import { Sidebar } from "~/components/Sidebar.tsx";
 import { TerminalPanel } from "~/components/TerminalPanel.tsx";
 import { TitleBar } from "~/components/TitleBar.tsx";
+import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { useIndexingStore } from "~/stores/indexingStore.ts";
@@ -371,6 +372,8 @@ export function App() {
           </button>
         </div>
       )}
+
+      <UpdateBanner />
     </div>
   );
 }
