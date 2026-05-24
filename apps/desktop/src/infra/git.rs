@@ -16,11 +16,11 @@ use oxyris_git::{
     status as git_status, tag as git_tag, worktree as wt,
 };
 use oxyris_ipc::ops::{
-    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCommitArgs,
-    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitDiffRevsArgs,
-    GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs,
-    GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs,
-    GitTagCreateArgs, GitTagNameArgs, op_name,
+    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCloneArgs,
+    GitCommitArgs, GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs,
+    GitDiffRevsArgs, GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs,
+    GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs,
+    GitStashSaveArgs, GitTagCreateArgs, GitTagNameArgs, op_name,
 };
 use thiserror::Error;
 
@@ -53,6 +53,41 @@ impl From<AgentError> for GitError {
             return GitError::EmptyRepo;
         }
         GitError::Agent(e.to_string())
+    }
+}
+
+/// `git clone <url> <target_dir>`. WSL projects clone inside the distro via the
+/// agent (target_dir is a POSIX path there); Windows clones in-process. Routed
+/// like every other git op — never crosses the 9p bridge for WSL.
+pub async fn clone(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    url: &str,
+    target_dir: &str,
+) -> Result<RemoteOpResult, GitError> {
+    match env {
+        Environment::Windows => {
+            let url = url.to_owned();
+            let target = target_dir.to_owned();
+            tokio::task::spawn_blocking(move || git_remote::clone(&url, &target))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_CLONE,
+                    serde_json::to_value(GitCloneArgs {
+                        url: url.to_owned(),
+                        target_dir: target_dir.to_owned(),
+                    })
+                    .map_err(|e| GitError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
     }
 }
 

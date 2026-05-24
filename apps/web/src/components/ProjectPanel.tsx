@@ -6,6 +6,7 @@ import {
   type Environment,
   type PathValidation,
   ProjectCommandError,
+  projectClone,
   projectCreate,
   projectValidatePath,
 } from "~/ipc/commands.ts";
@@ -44,7 +45,10 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
   const [distro, setDistro] = useState("Ubuntu");
   const [rootPath, setRootPath] = useState("");
   const [workspace, setWorkspace] = useState("");
+  // Optional: clone this URL into `rootPath` before creating the project.
+  const [gitUrl, setGitUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [cloning, setCloning] = useState(false);
   const [validation, setValidation] = useState<PathValidation | null>(null);
 
   // Debounced path validation — avoid hammering the agent on every keystroke.
@@ -96,6 +100,17 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
     try {
       const environment: Environment =
         envKind === "windows" ? { kind: "windows" } : { kind: "wsl", distro };
+      // When a git URL is supplied, clone into the selected folder first; the
+      // project is then created pointing at that freshly-cloned tree.
+      const url = gitUrl.trim();
+      if (url) {
+        setCloning(true);
+        try {
+          await projectClone({ environment, url, target_dir: rootPath });
+        } finally {
+          setCloning(false);
+        }
+      }
       const created = await projectCreate({
         name,
         environment,
@@ -104,6 +119,7 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
       });
       setName("");
       setRootPath("");
+      setGitUrl("");
       await refresh();
       setActive(created.id);
       onCreated?.();
@@ -207,13 +223,30 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
           )}
         </label>
 
+        <label className="flex flex-col gap-1 text-xs text-neutral-400 sm:col-span-2">
+          {t("create.git_url")}
+          <input
+            value={gitUrl}
+            onChange={(e) => setGitUrl(e.target.value)}
+            placeholder={t("create.git_url_placeholder")}
+            className="rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+          />
+          <span className="text-[11px] text-neutral-500">
+            {t("create.git_url_hint")}
+          </span>
+        </label>
+
         <div className="sm:col-span-2">
           <button
             type="submit"
             disabled={submitting}
             className="rounded-md bg-neutral-200 px-4 py-2 text-sm font-medium text-neutral-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {submitting ? t("create.submitting") : t("create.submit")}
+            {cloning
+              ? t("create.cloning")
+              : submitting
+                ? t("create.submitting")
+                : t("create.submit")}
           </button>
         </div>
       </form>
@@ -274,6 +307,8 @@ function formatError(err: unknown, t: TFunction<"project">): string {
         return t("error.storage", { message: err.tauri.message });
       case "projection":
         return t("error.projection", { message: err.tauri.message });
+      case "git":
+        return t("error.git", { message: err.tauri.message });
     }
   }
   return t("error.unknown", {

@@ -16,8 +16,12 @@
     "root_path_placeholder_windows": "C:\\dev\\my-repo",
     "root_path_placeholder_wsl": "/home/you/my-repo",
     "browse": "Browse…",
+    "git_url": "Git URL (optional)",
+    "git_url_placeholder": "https://github.com/user/repo.git",
+    "git_url_hint": "If set, the repo is cloned into the root path before the project is created.",
     "submit": "Create",
     "submitting": "Creating…",
+    "cloning": "Cloning…",
     "validation_ok": "Directory exists · git repo",
     "validation_ok_no_git": "Directory exists (not a git repo yet)",
     "validation_missing": "Path does not exist",
@@ -38,6 +42,7 @@
     "concurrency": "Stale state — reload and try again.",
     "storage": "Storage error: {{message}}",
     "projection": "Projection error: {{message}}",
+    "git": "Clone failed: {{message}}",
     "unknown": "Unexpected error: {{message}}"
   }
 }

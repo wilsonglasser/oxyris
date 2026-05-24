@@ -59,7 +59,8 @@ export type ProjectError =
   | { code: "domain"; message: string }
   | { code: "concurrency" }
   | { code: "storage"; message: string }
-  | { code: "projection"; message: string };
+  | { code: "projection"; message: string }
+  | { code: "git"; message: string };
 
 /**
  * Tauri rejects commands by returning the serialized error. We surface it as
@@ -99,6 +100,23 @@ export async function projectCreate(input: {
 }): Promise<{ id: string }> {
   try {
     return await invoke<{ id: string }>("project_create", { input });
+  } catch (err) {
+    wrapError(err);
+  }
+}
+
+/**
+ * Clone a remote git repo into `target_dir` before creating the project.
+ * Routed by environment in the backend (WSL clones inside the distro). Call
+ * this first, then {@link projectCreate} pointing at the same path.
+ */
+export async function projectClone(input: {
+  environment: Environment;
+  url: string;
+  target_dir: string;
+}): Promise<void> {
+  try {
+    await invoke<void>("project_clone", { input });
   } catch (err) {
     wrapError(err);
   }

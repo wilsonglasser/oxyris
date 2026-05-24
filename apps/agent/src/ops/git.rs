@@ -13,11 +13,11 @@ use oxyris_git::types::{CheckpointPhase, DiffMode};
 use oxyris_git::worktree;
 use oxyris_ipc::ops::{
     GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs,
-    GitCheckpointCaptureArgs, GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCommitArgs,
-    GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitDiffRevsArgs,
-    GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitRemoveWorktreeArgs,
-    GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs, GitStashSaveArgs,
-    GitTagCreateArgs, GitTagNameArgs,
+    GitCheckpointCaptureArgs, GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCloneArgs,
+    GitCommitArgs, GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs,
+    GitDiffRevsArgs, GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs,
+    GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs,
+    GitStashSaveArgs, GitTagCreateArgs, GitTagNameArgs,
 };
 
 use super::OpError;
@@ -97,6 +97,11 @@ pub fn unstage(args: GitPathsArgs) -> Result<serde_json::Value, OpError> {
 
 pub fn commit(args: GitCommitArgs) -> Result<serde_json::Value, OpError> {
     let result = git_status::commit(&args.repo_path, &args.message, args.amend)?;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub fn clone(args: GitCloneArgs) -> Result<serde_json::Value, OpError> {
+    let result = remote::clone(&args.url, &args.target_dir)?;
     Ok(serde_json::to_value(result)?)
 }
 

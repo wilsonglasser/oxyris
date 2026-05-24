@@ -19,6 +19,14 @@ pub struct RemoteOpResult {
     pub stderr: String,
 }
 
+/// `git clone <url> <target_dir>`. Shelled out (not git2) for the same
+/// credential-helper reason as fetch/pull/push. `target_dir` is the directory
+/// the working tree lands in — git creates it (and missing parents) and
+/// refuses if it already exists and is non-empty.
+pub fn clone(url: &str, target_dir: &str) -> Result<RemoteOpResult, GitError> {
+    run(&["clone", url, target_dir])
+}
+
 pub fn fetch(repo_path: &str, remote: Option<&str>) -> Result<RemoteOpResult, GitError> {
     let mut args = vec!["-C", repo_path, "fetch"];
     if let Some(r) = remote {

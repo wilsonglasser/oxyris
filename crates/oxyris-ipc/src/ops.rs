@@ -31,6 +31,7 @@ pub mod op_name {
     pub const GIT_STAGE: &str = "git.stage";
     pub const GIT_UNSTAGE: &str = "git.unstage";
     pub const GIT_COMMIT: &str = "git.commit";
+    pub const GIT_CLONE: &str = "git.clone";
     pub const GIT_FETCH: &str = "git.fetch";
     pub const GIT_PULL: &str = "git.pull";
     pub const GIT_PUSH: &str = "git.push";
@@ -346,6 +347,16 @@ pub struct GitCommitArgs {
     pub message: String,
     #[serde(default)]
     pub amend: bool,
+}
+
+// ────── git.clone ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCloneArgs {
+    pub url: String,
+    /// Absolute target dir (inside the distro for WSL). Result reuses
+    /// `RemoteOpResult` from `oxyris-git`.
+    pub target_dir: String,
 }
 
 // ────── git.fetch / pull / push ────────────────────────────────────────────

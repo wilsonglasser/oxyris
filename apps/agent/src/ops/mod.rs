@@ -116,6 +116,7 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         op_name::GIT_STAGE => git::stage(from_args(args)?),
         op_name::GIT_UNSTAGE => git::unstage(from_args(args)?),
         op_name::GIT_COMMIT => git::commit(from_args(args)?),
+        op_name::GIT_CLONE => git::clone(from_args(args)?),
         op_name::GIT_FETCH => git::fetch(from_args(args)?),
         op_name::GIT_PULL => git::pull(from_args(args)?),
         op_name::GIT_PUSH => git::push(from_args(args)?),

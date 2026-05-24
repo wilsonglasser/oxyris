@@ -57,6 +57,14 @@ pub enum TauriProjectError {
     Storage(String),
     #[error("projection: {0}")]
     Projection(String),
+    #[error("git: {0}")]
+    Git(String),
+}
+
+impl From<crate::infra::git::GitError> for TauriProjectError {
+    fn from(e: crate::infra::git::GitError) -> Self {
+        TauriProjectError::Git(e.to_string())
+    }
 }
 
 impl From<ProjectError> for TauriProjectError {
@@ -128,6 +136,35 @@ pub fn project_create(
     let events = Project::decide(&ProjectState::default(), cmd)?;
     dispatch(&state, id, 0, events)?;
     Ok(ProjectCreateResponse { id })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloneProjectInput {
+    pub environment: Environment,
+    /// Remote git URL to clone.
+    pub url: String,
+    /// Destination directory (Windows path, or POSIX inside the distro for
+    /// WSL). git creates it; must be empty/non-existent.
+    pub target_dir: String,
+}
+
+/// Clone a remote repo into `target_dir`, routed by environment (WSL → agent,
+/// Windows → in-process). Separate from `project_create`: the frontend clones
+/// first, then creates the Project aggregate pointing at the cloned dir, so the
+/// pure ES create path stays free of network/IO side effects.
+#[tauri::command]
+pub async fn project_clone(
+    input: CloneProjectInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriProjectError> {
+    crate::infra::git::clone(
+        &input.environment,
+        &state.agent_pool,
+        &input.url,
+        &input.target_dir,
+    )
+    .await?;
+    Ok(())
 }
 
 #[tauri::command]

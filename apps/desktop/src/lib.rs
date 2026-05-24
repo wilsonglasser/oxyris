@@ -23,6 +23,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             tauri_commands::greet,
             tauri_commands::project::project_create,
+            tauri_commands::project::project_clone,
             tauri_commands::project::project_rename,
             tauri_commands::project::project_delete,
             tauri_commands::project::project_list,
