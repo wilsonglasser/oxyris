@@ -9,11 +9,65 @@ mod domain;
 mod infra;
 mod tauri_commands;
 
+use oxyris_procutil::HideConsole;
 use tauri::Manager;
 
 use crate::app_state::AppState;
 
+/// Claude Code ships a preview PowerShell tool gated behind
+/// `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`. When the host has PowerShell 7+, set it
+/// in our own process environment so every `claude` we spawn inherits it — the
+/// pure-mode PTY and the structured provider alike (both inherit our env; only
+/// WSL sessions don't, since the var doesn't cross the `wsl.exe` boundary, which
+/// is correct — the tool is for the Windows host shell). A user who already set
+/// the var wins; we never override an explicit choice.
+fn enable_powershell_tool_if_available() {
+    if std::env::var_os("CLAUDE_CODE_USE_POWERSHELL_TOOL").is_some() {
+        return;
+    }
+    if !host_has_pwsh7() {
+        return;
+    }
+    // SAFETY: called at the very top of `run()`, before the Tauri builder or any
+    // worker thread exists. The process is single-threaded here, so mutating the
+    // environment cannot race another thread reading it.
+    unsafe {
+        std::env::set_var("CLAUDE_CODE_USE_POWERSHELL_TOOL", "1");
+    }
+}
+
+/// True when `pwsh` resolves on PATH and reports major version >= 7. The `pwsh`
+/// binary is PowerShell 6+, but the tool requires 7+, so verify the major once.
+fn host_has_pwsh7() -> bool {
+    let Ok(path) = which::which("pwsh.exe").or_else(|_| which::which("pwsh")) else {
+        return false;
+    };
+    let Ok(out) = std::process::Command::new(&path)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$PSVersionTable.PSVersion.Major",
+        ])
+        .hide_console()
+        .output()
+    else {
+        return false;
+    };
+    out.status.success()
+        && String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u32>()
+            .map(|major| major >= 7)
+            .unwrap_or(false)
+}
+
 pub fn run() {
+    // Enable Claude Code's PowerShell tool for every `claude` we spawn when the
+    // host has PowerShell 7+. Done first, while the process is single-threaded
+    // (set_var). See `enable_powershell_tool_if_available`.
+    enable_powershell_tool_if_available();
+
     // Logging is installed inside AppState::initialize once we know the
     // data dir. Until then, stdlib println!/eprintln! are the only channel —
     // that's fine, we don't do anything interesting before setup().
