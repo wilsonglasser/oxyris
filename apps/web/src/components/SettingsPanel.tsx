@@ -44,13 +44,6 @@ async function settingsProviderDiscover(): Promise<DiscoveredInstall[]> {
 }
 
 type Tab = "general" | "languages" | "advanced";
-type UpdateTrack = "stable" | "nightly";
-const UPDATE_TRACK_KEY = "oxyris.updateTrack";
-
-function loadUpdateTrack(): UpdateTrack {
-  const raw = window.localStorage.getItem(UPDATE_TRACK_KEY);
-  return raw === "nightly" ? "nightly" : "stable";
-}
 
 export function SettingsPanel() {
   const { t } = useTranslation("settings");
@@ -94,7 +87,6 @@ function GeneralTab() {
   const { t } = useTranslation("settings");
   const [installs, setInstalls] = useState<DiscoveredInstall[]>([]);
   const [loading, setLoading] = useState(false);
-  const [updateTrack, setUpdateTrack] = useState<UpdateTrack>(loadUpdateTrack());
   const [version, setVersion] = useState<string>("0.0.0");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
@@ -216,31 +208,6 @@ function GeneralTab() {
             {t("update_error", { message: updateStatus.message ?? "" })}
           </p>
         )}
-
-        <div className="flex flex-col gap-2 text-[11px] text-neutral-400">
-          {(["stable", "nightly"] as const).map((track) => (
-            <label key={track} className="flex items-start gap-2">
-              <input
-                type="radio"
-                name="track"
-                checked={updateTrack === track}
-                onChange={() => {
-                  setUpdateTrack(track);
-                  window.localStorage.setItem(UPDATE_TRACK_KEY, track);
-                }}
-                className="mt-0.5"
-              />
-              <span>
-                <span className="font-medium text-neutral-200">
-                  {t(`update_${track}_title`)}
-                </span>
-                <span className="block text-neutral-500">
-                  {t(`update_${track}_desc`)}
-                </span>
-              </span>
-            </label>
-          ))}
-        </div>
       </Section>
 
       <Section
