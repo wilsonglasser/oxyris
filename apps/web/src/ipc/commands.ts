@@ -22,6 +22,8 @@ export type ProjectRow = {
   environment: Environment;
   root_path: string;
   logo_path: string | null;
+  /** Workspace/vault label for sidebar grouping; null = ungrouped. */
+  workspace: string | null;
   session_count: number;
   created_at: string;
   last_activity_at: string;
@@ -32,6 +34,13 @@ export async function projectSetLogo(input: {
   logo_path?: string | null;
 }): Promise<void> {
   await invoke("project_set_logo", { input });
+}
+
+export async function projectSetWorkspace(input: {
+  id: string;
+  workspace?: string | null;
+}): Promise<void> {
+  await invoke("project_set_workspace", { input });
 }
 
 export async function projectAutodetectLogo(input: {
@@ -86,6 +95,7 @@ export async function projectCreate(input: {
   name: string;
   environment: Environment;
   root_path: string;
+  workspace?: string | null;
 }): Promise<{ id: string }> {
   try {
     return await invoke<{ id: string }>("project_create", { input });

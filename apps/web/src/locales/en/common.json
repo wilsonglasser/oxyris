@@ -20,6 +20,8 @@
     "no_results": "No matches",
     "search_placeholder": "Search projects…",
     "open_settings": "Settings",
+    "workspace_filter": "Filter by workspace",
+    "workspace_all": "All workspaces",
     "update_available": "Update available — open Settings",
     "new_thread": "New thread",
     "close": "Close",
@@ -68,7 +70,11 @@
     "logo_pick": "Pick file…",
     "logo_autodetect": "Auto-detect",
     "logo_clear": "Clear",
-    "logo_autodetect_empty": "No logo found in common locations. Pick a file manually."
+    "logo_autodetect_empty": "No logo found in common locations. Pick a file manually.",
+    "workspace_heading": "Workspace",
+    "workspace_help": "Group this project under a workspace/vault (e.g. Personal, Acme Corp). Leave empty to keep it ungrouped. The sidebar selector filters by these.",
+    "workspace_placeholder": "e.g. Personal, Acme Corp",
+    "workspace_save": "Save"
   },
   "language": {
     "label": "Language",

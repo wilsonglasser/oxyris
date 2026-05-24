@@ -25,7 +25,11 @@ import {
   type WorktreeRow,
   worktreeList,
 } from "~/ipc/worktree.ts";
-import { useProjectStore } from "~/stores/projectStore.ts";
+import {
+  ALL_WORKSPACES,
+  useProjectStore,
+  workspacesOf,
+} from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
@@ -50,6 +54,8 @@ export function Sidebar({
   const projects = useProjectStore((s) => s.projects);
   const activeProjectId = useProjectStore((s) => s.activeId);
   const setActiveProject = useProjectStore((s) => s.setActive);
+  const workspaceFilter = useProjectStore((s) => s.workspaceFilter);
+  const setWorkspaceFilter = useProjectStore((s) => s.setWorkspaceFilter);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const setActiveSession = useSessionStore((s) => s.setActive);
 
@@ -144,16 +150,26 @@ export function Sidebar({
   const q = query.trim().toLowerCase();
   const searching = q.length > 0;
 
+  const workspaces = useMemo(() => workspacesOf(projects), [projects]);
+
+  // Apply the workspace filter first, then the search filter. The empty
+  // string is never a stored label, so a stale filter (workspace deleted)
+  // simply yields no projects until the user switches back to "All".
+  const inWorkspace = useMemo(() => {
+    if (workspaceFilter === ALL_WORKSPACES) return projects;
+    return projects.filter((p) => (p.workspace ?? "") === workspaceFilter);
+  }, [projects, workspaceFilter]);
+
   const visibleProjects = useMemo(() => {
-    if (!searching) return projects;
-    return projects.filter((p) => {
+    if (!searching) return inWorkspace;
+    return inWorkspace.filter((p) => {
       if (p.name.toLowerCase().includes(q)) return true;
       const rows = sessionsByProject[p.id] ?? [];
       return rows.some((row) =>
         (row.title ?? row.model ?? "").toLowerCase().includes(q),
       );
     });
-  }, [projects, sessionsByProject, q, searching]);
+  }, [inWorkspace, sessionsByProject, q, searching]);
 
   const toggle = (id: string) =>
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -200,10 +216,28 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="px-3 pb-1">
+      <div className="flex items-center justify-between gap-2 px-3 pb-1">
         <span className="text-[9px] font-medium uppercase tracking-wider text-neutral-500">
           {t("sidebar.projects")}
         </span>
+        {workspaces.length > 0 && (
+          <select
+            value={workspaceFilter}
+            onChange={(e) => setWorkspaceFilter(e.target.value)}
+            aria-label={t("sidebar.workspace_filter")}
+            title={t("sidebar.workspace_filter")}
+            className="max-w-[55%] truncate rounded bg-transparent py-0.5 text-[10px] text-neutral-400 outline-none hover:text-neutral-200 focus:text-neutral-200"
+          >
+            <option value={ALL_WORKSPACES} className="bg-neutral-900">
+              {t("sidebar.workspace_all")}
+            </option>
+            {workspaces.map((ws) => (
+              <option key={ws} value={ws} className="bg-neutral-900">
+                {ws}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 pb-2">

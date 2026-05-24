@@ -26,6 +26,12 @@ pub struct ProjectData {
     /// `assets/logo.png`) or `None` when no custom logo is set.
     #[serde(default)]
     pub logo_path: Option<String>,
+    /// Free-text workspace/vault label used to group projects in the sidebar
+    /// (e.g. "Personal", "Acme Corp"). `None` means ungrouped. Workspaces are
+    /// derived from the distinct set of these labels — there is no separate
+    /// workspace aggregate.
+    #[serde(default)]
+    pub workspace: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -36,6 +42,7 @@ pub enum ProjectCommand {
         name: String,
         environment: Environment,
         root_path: String,
+        workspace: Option<String>,
         now: DateTime<Utc>,
     },
     Rename {
@@ -44,6 +51,10 @@ pub enum ProjectCommand {
     SetLogo {
         /// `None` clears any existing logo override.
         logo_path: Option<String>,
+    },
+    SetWorkspace {
+        /// `None` (or empty) clears the workspace, making the project ungrouped.
+        workspace: Option<String>,
     },
     Delete,
 }
@@ -60,6 +71,8 @@ pub enum ProjectEvent {
         name: String,
         environment: Environment,
         root_path: String,
+        #[serde(default)]
+        workspace: Option<String>,
         created_at: DateTime<Utc>,
     },
     ProjectRenamed {
@@ -67,6 +80,9 @@ pub enum ProjectEvent {
     },
     ProjectLogoSet {
         logo_path: Option<String>,
+    },
+    ProjectWorkspaceSet {
+        workspace: Option<String>,
     },
     ProjectDeleted,
 }
@@ -77,6 +93,7 @@ impl DomainEvent for ProjectEvent {
             Self::ProjectCreated { .. } => "ProjectCreated",
             Self::ProjectRenamed { .. } => "ProjectRenamed",
             Self::ProjectLogoSet { .. } => "ProjectLogoSet",
+            Self::ProjectWorkspaceSet { .. } => "ProjectWorkspaceSet",
             Self::ProjectDeleted => "ProjectDeleted",
         }
     }
@@ -97,6 +114,11 @@ pub enum ProjectError {
 }
 
 const MAX_NAME_LEN: usize = 128;
+
+/// Trim a workspace label and collapse empties to `None` (ungrouped).
+fn normalize_workspace(ws: Option<String>) -> Option<String> {
+    ws.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
 
 fn validate_name(name: &str) -> Result<String, ProjectError> {
     let trimmed = name.trim();
@@ -123,6 +145,7 @@ impl Aggregate for Project {
                 name,
                 environment,
                 root_path,
+                workspace,
                 now,
             } => {
                 if state.inner.is_some() {
@@ -137,6 +160,7 @@ impl Aggregate for Project {
                     name,
                     environment,
                     root_path,
+                    workspace: normalize_workspace(workspace),
                     created_at: now,
                 }])
             }
@@ -159,6 +183,16 @@ impl Aggregate for Project {
                     logo_path: normalized,
                 }])
             }
+            ProjectCommand::SetWorkspace { workspace } => {
+                let current = state.inner.as_ref().ok_or(ProjectError::NotFound)?;
+                let normalized = normalize_workspace(workspace);
+                if normalized == current.workspace {
+                    return Ok(vec![]);
+                }
+                Ok(vec![ProjectEvent::ProjectWorkspaceSet {
+                    workspace: normalized,
+                }])
+            }
             ProjectCommand::Delete => {
                 if state.inner.is_none() {
                     return Err(ProjectError::NotFound);
@@ -175,6 +209,7 @@ impl Aggregate for Project {
                 name,
                 environment,
                 root_path,
+                workspace,
                 created_at,
             } => {
                 state.inner = Some(ProjectData {
@@ -183,6 +218,7 @@ impl Aggregate for Project {
                     environment: environment.clone(),
                     root_path: root_path.clone(),
                     logo_path: None,
+                    workspace: workspace.clone(),
                     created_at: *created_at,
                 });
             }
@@ -194,6 +230,11 @@ impl Aggregate for Project {
             ProjectEvent::ProjectLogoSet { logo_path } => {
                 if let Some(data) = state.inner.as_mut() {
                     data.logo_path = logo_path.clone();
+                }
+            }
+            ProjectEvent::ProjectWorkspaceSet { workspace } => {
+                if let Some(data) = state.inner.as_mut() {
+                    data.workspace = workspace.clone();
                 }
             }
             ProjectEvent::ProjectDeleted => {
@@ -222,6 +263,7 @@ mod tests {
             name: name.into(),
             environment: Environment::Windows,
             root_path: root_path.into(),
+            workspace: None,
             now: now(),
         }
     }
@@ -321,6 +363,85 @@ mod tests {
         assert_eq!(state.inner.unwrap().name, "Oxyris Code");
     }
 
+    fn created_state() -> ProjectState {
+        let mut state = ProjectState::default();
+        for e in Project::decide(&state, sample_create()).unwrap() {
+            Project::apply(&mut state, &e);
+        }
+        state
+    }
+
+    #[test]
+    fn set_workspace_emits_and_applies() {
+        let mut state = created_state();
+        let events = Project::decide(
+            &state,
+            ProjectCommand::SetWorkspace {
+                workspace: Some("  Personal  ".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            ProjectEvent::ProjectWorkspaceSet { workspace } if workspace.as_deref() == Some("Personal")
+        ));
+        for e in &events {
+            Project::apply(&mut state, e);
+        }
+        assert_eq!(state.inner.unwrap().workspace.as_deref(), Some("Personal"));
+    }
+
+    #[test]
+    fn set_workspace_same_value_is_noop() {
+        let mut state = created_state();
+        for e in Project::decide(
+            &state,
+            ProjectCommand::SetWorkspace {
+                workspace: Some("Work".into()),
+            },
+        )
+        .unwrap()
+        {
+            Project::apply(&mut state, &e);
+        }
+        let events = Project::decide(
+            &state,
+            ProjectCommand::SetWorkspace {
+                workspace: Some("Work".into()),
+            },
+        )
+        .unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn set_workspace_empty_clears_to_none() {
+        let mut state = created_state();
+        for e in Project::decide(
+            &state,
+            ProjectCommand::SetWorkspace {
+                workspace: Some("Work".into()),
+            },
+        )
+        .unwrap()
+        {
+            Project::apply(&mut state, &e);
+        }
+        let events = Project::decide(
+            &state,
+            ProjectCommand::SetWorkspace {
+                workspace: Some("   ".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        for e in &events {
+            Project::apply(&mut state, e);
+        }
+        assert!(state.inner.unwrap().workspace.is_none());
+    }
+
     #[test]
     fn delete_requires_existing_project() {
         assert_eq!(
@@ -385,6 +506,7 @@ mod tests {
             name: "x".into(),
             environment: Environment::Windows,
             root_path: "p".into(),
+            workspace: None,
             created_at: now(),
         };
         let json = serde_json::to_value(&created).unwrap();

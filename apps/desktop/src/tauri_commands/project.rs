@@ -29,6 +29,8 @@ pub struct CreateProjectInput {
     pub name: String,
     pub environment: Environment,
     pub root_path: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +121,7 @@ pub fn project_create(
         name: input.name,
         environment: input.environment,
         root_path: input.root_path,
+        workspace: input.workspace,
         now: Utc::now(),
     };
     // A fresh aggregate starts at version 0.
@@ -179,6 +182,29 @@ pub fn project_set_logo(
         &project_state,
         ProjectCommand::SetLogo {
             logo_path: input.logo_path,
+        },
+    )?;
+    dispatch(&state, input.id, version, events)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetProjectWorkspaceInput {
+    pub id: AggregateId,
+    /// Workspace label. Empty/whitespace or `None` clears it (ungrouped).
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[tauri::command]
+pub fn project_set_workspace(
+    input: SetProjectWorkspaceInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriProjectError> {
+    let (project_state, version) = load_state(&state, input.id)?;
+    let events = Project::decide(
+        &project_state,
+        ProjectCommand::SetWorkspace {
+            workspace: input.workspace,
         },
     )?;
     dispatch(&state, input.id, version, events)

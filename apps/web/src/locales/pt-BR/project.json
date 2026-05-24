@@ -5,6 +5,8 @@
     "heading": "Criar projeto",
     "name": "Nome",
     "name_placeholder": "Meu repositório",
+    "workspace": "Workspace (opcional)",
+    "workspace_placeholder": "ex. Pessoal, Acme Corp",
     "environment": "Ambiente",
     "environment_windows": "Windows",
     "environment_wsl": "WSL: {{distro}}",

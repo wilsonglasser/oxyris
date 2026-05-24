@@ -9,7 +9,7 @@ import {
   projectCreate,
   projectValidatePath,
 } from "~/ipc/commands.ts";
-import { useProjectStore } from "~/stores/projectStore.ts";
+import { useProjectStore, workspacesOf } from "~/stores/projectStore.ts";
 
 type EnvKind = Environment["kind"];
 
@@ -35,12 +35,15 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
   const { t } = useTranslation("project");
   const refresh = useProjectStore((s) => s.refresh);
   const setActive = useProjectStore((s) => s.setActive);
+  const projects = useProjectStore((s) => s.projects);
+  const knownWorkspaces = workspacesOf(projects);
   const [error, setError] = useState<string | null>(null);
 
   const [name, setName] = useState("");
   const [envKind, setEnvKind] = useState<EnvKind>("windows");
   const [distro, setDistro] = useState("Ubuntu");
   const [rootPath, setRootPath] = useState("");
+  const [workspace, setWorkspace] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [validation, setValidation] = useState<PathValidation | null>(null);
 
@@ -97,6 +100,7 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
         name,
         environment,
         root_path: rootPath,
+        workspace: workspace.trim() || null,
       });
       setName("");
       setRootPath("");
@@ -159,6 +163,22 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
             />
           </label>
         )}
+
+        <label className="flex flex-col gap-1 text-xs text-neutral-400 sm:col-span-2">
+          {t("create.workspace")}
+          <input
+            value={workspace}
+            onChange={(e) => setWorkspace(e.target.value)}
+            list="oxyris-workspaces"
+            placeholder={t("create.workspace_placeholder")}
+            className="rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100"
+          />
+          <datalist id="oxyris-workspaces">
+            {knownWorkspaces.map((ws) => (
+              <option key={ws} value={ws} />
+            ))}
+          </datalist>
+        </label>
 
         <label className="flex flex-col gap-1 text-xs text-neutral-400 sm:col-span-2">
           {t("create.root_path")}

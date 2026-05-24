@@ -38,6 +38,9 @@ pub struct ProjectRow {
     pub root_path: String,
     #[serde(default)]
     pub logo_path: Option<String>,
+    /// Free-text workspace/vault label (sidebar grouping); `None` = ungrouped.
+    #[serde(default)]
+    pub workspace: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub session_count: u32,
@@ -138,6 +141,7 @@ impl Projections {
             "ALTER TABLE projections_actions ADD COLUMN action_kind TEXT",
             "ALTER TABLE projections_actions ADD COLUMN show_in_sidebar INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE projections_projects ADD COLUMN logo_path TEXT",
+            "ALTER TABLE projections_projects ADD COLUMN workspace TEXT",
         ] {
             if let Err(e) = conn.execute(alter, []) {
                 let msg = e.to_string().to_ascii_lowercase();
@@ -274,14 +278,15 @@ impl Projections {
                 name,
                 environment,
                 root_path,
+                workspace,
                 created_at,
             } => {
                 let (kind, distro) = environment_columns(environment);
                 conn.execute(
                     "INSERT OR REPLACE INTO projections_projects
                         (id, name, environment_kind, environment_distro, root_path,
-                         session_count, created_at, last_activity_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)",
+                         session_count, created_at, last_activity_at, workspace)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
                     params![
                         id.to_string(),
                         name,
@@ -290,6 +295,7 @@ impl Projections {
                         root_path,
                         created_at.to_rfc3339(),
                         stored.timestamp.to_rfc3339(),
+                        workspace,
                     ],
                 )?;
             }
@@ -317,6 +323,18 @@ impl Projections {
                     ],
                 )?;
             }
+            ProjectEvent::ProjectWorkspaceSet { workspace } => {
+                conn.execute(
+                    "UPDATE projections_projects
+                        SET workspace = ?1, last_activity_at = ?2
+                      WHERE id = ?3",
+                    params![
+                        workspace,
+                        stored.timestamp.to_rfc3339(),
+                        stored.aggregate_id.to_string(),
+                    ],
+                )?;
+            }
             ProjectEvent::ProjectDeleted => {
                 conn.execute(
                     "DELETE FROM projections_projects WHERE id = ?1",
@@ -331,7 +349,7 @@ impl Projections {
         let conn = self.conn.lock().expect("projections mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, name, environment_kind, environment_distro, root_path,
-                    session_count, created_at, last_activity_at, logo_path
+                    session_count, created_at, last_activity_at, logo_path, workspace
                FROM projections_projects
               ORDER BY last_activity_at DESC",
         )?;
@@ -813,12 +831,14 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
     };
 
     let logo_path: Option<String> = row.get(8).unwrap_or(None);
+    let workspace: Option<String> = row.get(9).unwrap_or(None);
     Ok(ProjectRow {
         id: AggregateId(id),
         name: row.get(1)?,
         environment,
         root_path: row.get(4)?,
         logo_path,
+        workspace,
         session_count: row.get(5)?,
         created_at: parse_ts(6, &created_text)?,
         last_activity_at: parse_ts(7, &activity_text)?,
@@ -858,6 +878,7 @@ mod tests {
                 name: "Oxyris".into(),
                 environment: Environment::Windows,
                 root_path: r"C:\dev\oxyris".into(),
+                workspace: None,
                 created_at: Utc::now(),
             },
         ))
@@ -882,6 +903,7 @@ mod tests {
                     distro: "Ubuntu".into(),
                 },
                 root_path: "/home/x/p".into(),
+                workspace: None,
                 created_at: Utc::now(),
             },
         ))
@@ -917,6 +939,7 @@ mod tests {
                 name: "a".into(),
                 environment: Environment::Windows,
                 root_path: "r".into(),
+                workspace: None,
                 created_at: Utc::now(),
             },
         ))
@@ -942,6 +965,7 @@ mod tests {
                 name: "Oxyris".into(),
                 environment: Environment::Windows,
                 root_path: "C:\\oxyris".into(),
+                workspace: None,
                 now,
             },
         )
