@@ -1067,6 +1067,26 @@ function Composer({
     },
   });
 
+  // Ctrl/Cmd+click on the mic dictates and then auto-submits once recognition
+  // ends. Armed via a ref so the value survives until `onend`; mirrored to
+  // state only for the button's affordance.
+  const autoSubmitOnEndRef = useRef(false);
+  const [autoSubmitArmed, setAutoSubmitArmed] = useState(false);
+  const prevListeningRef = useRef(false);
+
+  const onMicClick = (e: React.MouseEvent) => {
+    if (speech.listening) {
+      // Second click ends the session; the listening effect handles the
+      // auto-submit when it was armed.
+      speech.stop();
+      return;
+    }
+    const auto = e.ctrlKey || e.metaKey;
+    autoSubmitOnEndRef.current = auto;
+    setAutoSubmitArmed(auto);
+    speech.start();
+  };
+
   useEffect(() => {
     textareaRef.current?.focus();
   }, [sessionKey]);
@@ -1146,6 +1166,19 @@ function Composer({
       setSending(false);
     }
   };
+
+  // When a Ctrl+click-armed dictation ends, fire the submit. Runs on the
+  // listening true→false edge so the final transcript chunk (applied in the
+  // preceding render) is already in `text`.
+  useEffect(() => {
+    const wasListening = prevListeningRef.current;
+    prevListeningRef.current = speech.listening;
+    if (wasListening && !speech.listening && autoSubmitOnEndRef.current) {
+      autoSubmitOnEndRef.current = false;
+      setAutoSubmitArmed(false);
+      void submit();
+    }
+  }, [speech.listening, submit]);
 
   const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = e.clipboardData.items;
@@ -1286,7 +1319,10 @@ function Composer({
                 <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
               </span>
               <span className="truncate text-neutral-400">
-                {speech.interim || t("speech_listening")}
+                {speech.interim ||
+                  (autoSubmitArmed
+                    ? t("speech_listening_autosubmit")
+                    : t("speech_listening"))}
               </span>
             </div>
           )}
@@ -1325,12 +1361,26 @@ function Composer({
               {speech.supported && (
                 <button
                   type="button"
-                  onClick={speech.toggle}
-                  aria-label={speech.listening ? t("speech_stop") : t("speech_start")}
-                  title={speech.listening ? t("speech_stop") : t("speech_start")}
+                  onClick={onMicClick}
+                  aria-label={
+                    speech.listening
+                      ? autoSubmitArmed
+                        ? t("speech_stop_autosubmit")
+                        : t("speech_stop")
+                      : t("speech_start")
+                  }
+                  title={
+                    speech.listening
+                      ? autoSubmitArmed
+                        ? t("speech_listening_autosubmit")
+                        : t("speech_stop")
+                      : `${t("speech_start")} · ${t("speech_autosubmit_hint")}`
+                  }
                   className={`flex size-7 items-center justify-center rounded-md border transition ${
                     speech.listening
-                      ? "border-emerald-800/60 bg-emerald-950/40 text-emerald-300"
+                      ? autoSubmitArmed
+                        ? "border-sky-700/60 bg-sky-950/40 text-sky-300"
+                        : "border-emerald-800/60 bg-emerald-950/40 text-emerald-300"
                       : "border-neutral-800 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
                   }`}
                 >

@@ -7,6 +7,7 @@ import {
   MicOff,
   Paperclip,
   Send,
+  SquareTerminal,
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
@@ -53,6 +54,10 @@ interface Props {
   onPtyReady?: (ptyId: string) => void;
   /** Hide the panel's own header (the embedding pane provides its own). */
   embedded?: boolean;
+  /** Toggle the session's shell terminal dock (non-embedded only). */
+  onToggleTerminal?: (() => void) | undefined;
+  /** Whether the shell terminal dock is currently open. */
+  terminalOpen?: boolean;
 }
 
 /**
@@ -67,6 +72,8 @@ export function PureClaudePanel({
   sessionId,
   onPtyReady,
   embedded,
+  onToggleTerminal,
+  terminalOpen,
 }: Props) {
   const { t, i18n } = useTranslation("chat");
   const activeId = useSessionStore((s) => s.activeSessionId);
@@ -100,6 +107,8 @@ export function PureClaudePanel({
       sessionId={activeId}
       project={project}
       i18nLang={i18n.language}
+      onToggleTerminal={onToggleTerminal}
+      terminalOpen={terminalOpen}
     />
   ) : (
     <PureStartView project={project} onStarted={setActive} />
@@ -259,12 +268,16 @@ function PureSessionView({
   i18nLang,
   onPtyReady,
   embedded,
+  onToggleTerminal,
+  terminalOpen,
 }: {
   sessionId: string;
   project: ProjectRow;
   i18nLang: string;
   onPtyReady?: ((ptyId: string) => void) | undefined;
   embedded?: boolean | undefined;
+  onToggleTerminal?: (() => void) | undefined;
+  terminalOpen?: boolean | undefined;
 }) {
   const { t } = useTranslation("chat");
   const [termId, setTermId] = useState<string | null>(null);
@@ -323,6 +336,23 @@ function PureSessionView({
     onFinal: (chunk) => setText((prev) => (prev ? `${prev} ${chunk}` : chunk)),
   });
 
+  // Ctrl/Cmd+click on the mic dictates then auto-submits to the PTY once
+  // recognition ends. Armed via ref so it survives until `onend`.
+  const autoSubmitOnEndRef = useRef(false);
+  const [autoSubmitArmed, setAutoSubmitArmed] = useState(false);
+  const prevListeningRef = useRef(false);
+
+  const onMicClick = (e: React.MouseEvent) => {
+    if (speech.listening) {
+      speech.stop();
+      return;
+    }
+    const auto = e.ctrlKey || e.metaKey;
+    autoSubmitOnEndRef.current = auto;
+    setAutoSubmitArmed(auto);
+    speech.start();
+  };
+
   const addAttachment = useCallback((path: string, isImage: boolean) => {
     setAttachments((prev) => [
       ...prev,
@@ -345,6 +375,17 @@ function PureSessionView({
     setText("");
     setAttachments([]);
   };
+
+  // Auto-submit when a Ctrl+click-armed dictation ends (listening true→false).
+  useEffect(() => {
+    const wasListening = prevListeningRef.current;
+    prevListeningRef.current = speech.listening;
+    if (wasListening && !speech.listening && autoSubmitOnEndRef.current) {
+      autoSubmitOnEndRef.current = false;
+      setAutoSubmitArmed(false);
+      submit();
+    }
+  }, [speech.listening, submit]);
 
   // For WSL projects a picked file comes back as a `\\wsl.localhost\<distro>\…`
   // UNC path — claude runs inside the distro and needs the POSIX form.
@@ -400,6 +441,21 @@ function PureSessionView({
           <TerminalIcon className="size-3.5" strokeWidth={1.75} />
           <span className="font-medium">{t("pure_header")}</span>
           <span className="truncate text-neutral-500">· {project.name}</span>
+          {onToggleTerminal && (
+            <button
+              type="button"
+              onClick={onToggleTerminal}
+              aria-label={t("terminal_heading")}
+              title={t("terminal_heading")}
+              className={`ml-auto flex size-6 items-center justify-center rounded transition ${
+                terminalOpen
+                  ? "bg-neutral-800 text-neutral-100"
+                  : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+              }`}
+            >
+              <SquareTerminal className="size-3.5" strokeWidth={1.75} />
+            </button>
+          )}
         </header>
       )}
 
@@ -475,12 +531,26 @@ function PureSessionView({
         {speech.supported && (
           <button
             type="button"
-            onClick={() => speech.toggle()}
-            aria-label={speech.listening ? t("voice_stop") : t("voice_start")}
-            title={speech.listening ? t("voice_stop") : t("voice_start")}
+            onClick={onMicClick}
+            aria-label={
+              speech.listening
+                ? autoSubmitArmed
+                  ? t("speech_stop_autosubmit")
+                  : t("voice_stop")
+                : t("voice_start")
+            }
+            title={
+              speech.listening
+                ? autoSubmitArmed
+                  ? t("speech_listening_autosubmit")
+                  : t("voice_stop")
+                : `${t("voice_start")} · ${t("speech_autosubmit_hint")}`
+            }
             className={`flex size-[34px] items-center justify-center rounded border ${
               speech.listening
-                ? "border-red-700 bg-red-950/40 text-red-300"
+                ? autoSubmitArmed
+                  ? "border-sky-700 bg-sky-950/40 text-sky-300"
+                  : "border-red-700 bg-red-950/40 text-red-300"
                 : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
             }`}
           >

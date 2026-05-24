@@ -231,6 +231,12 @@ export function App() {
                   <PureClaudePanel
                     key={activeSessionId ?? "new"}
                     project={active}
+                    onToggleTerminal={
+                      activeSessionId
+                        ? () => setTerminalOpen((v) => !v)
+                        : undefined
+                    }
+                    terminalOpen={terminalOpen}
                   />
                 ) : (
                   <ChatPanel
