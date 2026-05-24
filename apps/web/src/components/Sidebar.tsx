@@ -34,6 +34,7 @@ import {
   workspacesOf,
 } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
+import { useBusyStore } from "~/stores/busyStore.ts";
 import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 
@@ -62,6 +63,7 @@ export function Sidebar({
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const setActiveSession = useSessionStore((s) => s.setActive);
   const markAttention = useSessionStore((s) => s.markAttention);
+  const setBusy = useBusyStore((s) => s.setBusy);
 
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -208,12 +210,17 @@ export function Sidebar({
           void refreshProjectSessions(s.project_id);
           return;
         }
+        if (kind === "TurnStarted") {
+          setBusy(s.id, true);
+          return;
+        }
         if (
           kind === "TurnCompleted" ||
           kind === "TurnFailed" ||
           kind === "TurnInterrupted" ||
           kind === "SessionErrored"
         ) {
+          setBusy(s.id, false);
           markAttention(s.id);
           void refreshProjectSessions(s.project_id);
         }
@@ -233,7 +240,7 @@ export function Sidebar({
       cancelled = true;
       for (const fn of unlistens) fn();
     };
-  }, [watchKey, markAttention, refreshProjectSessions]);
+  }, [watchKey, markAttention, setBusy, refreshProjectSessions]);
 
   // Auto-expand the active project so the user always sees its threads.
   useEffect(() => {
@@ -618,6 +625,7 @@ function SessionEntry({
   // Orange highlight when this background thread finished/errored and the user
   // hasn't opened it yet. Active threads are being viewed, so never flagged.
   const needsAttention = useSessionStore((s) => !!s.attention[session.id]);
+  const busy = useBusyStore((s) => !!s.busy[session.id]);
 
   const onRename = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -676,7 +684,11 @@ function SessionEntry({
               : "text-neutral-400 hover:bg-neutral-800/40"
         }`}
       >
-        <StatusDot status={session.status} attention={needsAttention} />
+        <StatusDot
+          status={session.status}
+          attention={needsAttention}
+          busy={busy}
+        />
         <button
           type="button"
           onClick={onSelect}
@@ -743,10 +755,22 @@ function SessionEntry({
 function StatusDot({
   status,
   attention,
+  busy,
 }: {
   status: string;
   attention?: boolean;
+  busy?: boolean;
 }) {
+  // A turn in flight outranks everything else — pulse it amber so an
+  // in-progress thread reads as "working" at a glance.
+  if (busy) {
+    return (
+      <span className="relative inline-flex size-1.5 shrink-0">
+        <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-75" />
+        <span className="relative inline-flex size-1.5 rounded-full bg-amber-400" />
+      </span>
+    );
+  }
   const color = attention
     ? "bg-orange-400"
     : status === "running"

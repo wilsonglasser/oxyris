@@ -18,6 +18,7 @@
   "committing": "Commitando…",
   "commit_placeholder": "Mensagem do commit ({{count}} staged)",
   "staged_count": "{{count}} staged",
+  "changes_will_stage": "{{count}} mudanças · adiciona tudo no commit",
   "mode": {
     "working_vs_head": "vs HEAD",
     "staged_vs_head": "Staged",

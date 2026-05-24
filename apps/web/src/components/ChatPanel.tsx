@@ -9,6 +9,7 @@ import {
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
+import { useBusyStore } from "~/stores/busyStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { getDraft, setDraft } from "~/stores/drafts.ts";
 import {
@@ -125,6 +126,7 @@ export function ChatPanel({
   const setActive = useSessionStore((s) => s.setActive);
   const hydrate = useSessionStore((s) => s.hydrate);
   const applyEvent = useSessionStore((s) => s.applyEvent);
+  const setBusy = useBusyStore((s) => s.setBusy);
 
   const [model, setModel] = useState<string>("");
   const [runtime, setRuntime] = useState<RuntimeMode>("supervised");
@@ -254,14 +256,17 @@ export function ChatPanel({
     void onSessionEvent(activeId, (payload) => {
       if (cancelled) return;
       applyEvent(payload);
+      // Drive the sidebar's pulsing "busy" dot for the active thread.
+      const kind = payload.event.kind;
+      if (kind === "TurnStarted") setBusy(activeId, true);
       // Turn is "yours again" on any terminal outcome — chime if the user
       // has the app in the background so they know to come back.
-      const kind = payload.event.kind;
       const terminal =
         kind === "TurnCompleted" ||
         kind === "TurnFailed" ||
         kind === "TurnInterrupted";
       if (terminal) {
+        setBusy(activeId, false);
         // Any pending approval for this turn is moot once it ends.
         setApprovals([]);
         if (shouldNotify()) {
@@ -277,7 +282,7 @@ export function ChatPanel({
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [activeId, applyEvent]);
+  }, [activeId, applyEvent, setBusy]);
 
   // Subscribe to the active session's tool-approval prompts. A pending prompt
   // means the turn is paused waiting on the user. Cleared on session switch.

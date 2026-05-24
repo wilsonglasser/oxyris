@@ -908,7 +908,17 @@ function CommitBar({
     () => status?.entries.filter((e) => e.bucket === "staged").length ?? 0,
     [status],
   );
-  const canCommit = stagedCount > 0 && message.trim().length > 0 && !committing;
+  // Files that a plain Commit would sweep in (unstaged tracked + untracked).
+  // Conflicted entries are excluded — they block the commit until resolved.
+  const changedCount = useMemo(
+    () =>
+      status?.entries.filter((e) => e.bucket !== "conflicted").length ?? 0,
+    [status],
+  );
+  // With `git commit -a` style auto-staging, the gate is "is there anything
+  // to commit", not "is anything staged".
+  const canCommit =
+    changedCount > 0 && message.trim().length > 0 && !committing;
 
   return (
     <div className="border-t border-neutral-800 bg-neutral-950 p-2">
@@ -916,14 +926,16 @@ function CommitBar({
         <textarea
           value={message}
           onChange={(e) => setMessage(worktreeId, e.target.value)}
-          placeholder={t("commit_placeholder", { count: stagedCount })}
+          placeholder={t("commit_placeholder", {
+            count: stagedCount > 0 ? stagedCount : changedCount,
+          })}
           rows={3}
           className="w-full resize-none rounded border border-neutral-800 bg-neutral-900 px-2 py-1 pr-8 text-[12px] text-neutral-100 outline-none focus:ring-1 focus:ring-neutral-700"
         />
         <button
           type="button"
           onClick={() => void generateMsg(projectId, worktreeId)}
-          disabled={stagedCount === 0 || generating}
+          disabled={changedCount === 0 || generating}
           className="absolute right-1 top-1 rounded p-1 text-neutral-400 enabled:hover:bg-neutral-800 enabled:hover:text-amber-300 disabled:opacity-30"
           title={t("generate_msg")}
           aria-label={t("generate_msg")}
@@ -938,7 +950,11 @@ function CommitBar({
       )}
       <div className="mt-1 flex items-center justify-between gap-2 text-[11px]">
         <span className="text-neutral-500">
-          {t("staged_count", { count: stagedCount })}
+          {stagedCount > 0
+            ? t("staged_count", { count: stagedCount })
+            : changedCount > 0
+              ? t("changes_will_stage", { count: changedCount })
+              : t("staged_count", { count: 0 })}
         </span>
         <div className="flex items-center gap-1">
           <button

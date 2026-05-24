@@ -287,6 +287,21 @@ export const useGitStore = create<GitState>((set, get) => ({
       commitError: { ...state.commitError, [worktreeId]: null },
     }));
     try {
+      // `git commit -a` style: when nothing is staged, stage every tracked
+      // change + untracked file first so a plain Commit "just works".
+      // Amend is left alone — it edits the last commit with whatever is
+      // already staged and shouldn't sweep in unrelated changes.
+      if (!amend) {
+        const status = get().status[worktreeId] ?? null;
+        const hasStaged =
+          status?.entries.some((e) => e.bucket === "staged") ?? false;
+        if (!hasStaged) {
+          const paths = stageablePaths(status);
+          if (paths.length > 0) {
+            await gitStage({ projectId, worktreeId, paths });
+          }
+        }
+      }
       await gitCommit({ projectId, worktreeId, message, amend });
       set((state) => ({
         committing: { ...state.committing, [worktreeId]: false },
@@ -472,6 +487,19 @@ export const useGitStore = create<GitState>((set, get) => ({
       commitError: { ...state.commitError, [worktreeId]: null },
     }));
     try {
+      // The backend reads the *staged* diff. Mirror the commit flow: if
+      // nothing is staged, stage everything first so Claude has a diff to
+      // summarize (and the panel reflects what will be committed).
+      const status = get().status[worktreeId] ?? null;
+      const hasStaged =
+        status?.entries.some((e) => e.bucket === "staged") ?? false;
+      if (!hasStaged) {
+        const paths = stageablePaths(status);
+        if (paths.length > 0) {
+          await gitStage({ projectId, worktreeId, paths });
+          await get().refreshStatus(projectId, worktreeId);
+        }
+      }
       const { message } = await gitGenerateCommitMessage({
         projectId,
         worktreeId,
@@ -507,6 +535,22 @@ function setRemote(
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Paths to stage for a "commit everything" sweep: every unstaged tracked
+ * change plus every untracked file. Conflicted entries are excluded — they
+ * need resolution before they can be staged.
+ */
+function stageablePaths(status: StatusReport | null): string[] {
+  if (!status) return [];
+  const paths = new Set<string>();
+  for (const e of status.entries) {
+    if (e.bucket === "unstaged" || e.bucket === "untracked") {
+      paths.add(e.path);
+    }
+  }
+  return [...paths];
 }
 
 /** Bucket -> ordered list (matches the GitPanel section order). */

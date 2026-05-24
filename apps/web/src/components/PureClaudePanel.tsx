@@ -36,6 +36,7 @@ import {
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
+import { useBusyStore } from "~/stores/busyStore.ts";
 import {
   toSpeechLocale,
   useSpeechRecognition,
@@ -366,6 +367,7 @@ function PureSessionView({
   // `project.id` joined the session's relative path onto the wrong root (the
   // "Windows cannot find …" error). Fall back to the prop only if the snapshot
   // hasn't hydrated yet.
+  const setBusy = useBusyStore((s) => s.setBusy);
   const openProjectId = useSessionStore(
     (s) => s.snapshots[sessionId]?.project_id ?? project.id,
   );
@@ -440,12 +442,13 @@ function PureSessionView({
     // done-detector. Other keystrokes (navigation, autocomplete) don't.
     if (data.includes("\r")) {
       armedRef.current = true;
+      setBusy(sessionId, true); // typing Enter into the TUI starts a turn
       // The user just answered a prompt (or started a turn): release the latch
       // and reset the sniff buffer so the next request can chime again.
       promptOpenRef.current = false;
       outTailRef.current = "";
     }
-  }, []);
+  }, [sessionId, setBusy]);
 
   const onPtyOutput = useCallback(
     (data: string) => {
@@ -454,6 +457,7 @@ function PureSessionView({
       window.clearTimeout(idleTimerRef.current);
       idleTimerRef.current = window.setTimeout(() => {
         armedRef.current = false;
+        setBusy(sessionId, false); // output went quiet → turn settled
         // If a permission/input prompt is on screen the prompt chime already
         // rang — don't double-ring as a "turn done".
         if (!promptOpenRef.current && shouldNotify()) {
@@ -465,8 +469,13 @@ function PureSessionView({
         refreshTitle();
       }, IDLE_DONE_MS);
     },
-    [refreshTitle, detectPrompt],
+    [refreshTitle, detectPrompt, sessionId, setBusy],
   );
+
+  // A pure turn is only observable while this panel is mounted (no event
+  // stream). On unmount, clear the flag so the sidebar dot can't pulse forever
+  // for a thread we're no longer watching.
+  useEffect(() => () => setBusy(sessionId, false), [sessionId, setBusy]);
 
   // Ensure exactly one claude PTY exists for this session: reuse an existing
   // one (survives remounts) or spawn a fresh one. Deduped via `ensuredRef`
@@ -590,6 +599,7 @@ function PureSessionView({
     // autocomplete entry without submitting — the bug the chips UX fixes.
     const refs = attachments.map((a) => `@${a.path} `).join("");
     armedRef.current = true; // arm the done-chime detector
+    setBusy(sessionId, true); // sidebar pulse on
     promptOpenRef.current = false; // fresh turn → re-arm the prompt chime
     outTailRef.current = "";
     sendToPty(`${refs}${trimmed}`);
