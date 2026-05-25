@@ -364,34 +364,8 @@ export function TerminalView({
 
     // Ctrl+C in a terminal is SIGINT (interrupts claude), so it can't be copy.
     // Bind the conventional terminal shortcuts instead: Ctrl+Shift+C copies the
-    // selection, Ctrl+Shift+V pastes (image → @path ref, else text). Returning
-    // false stops xterm from forwarding the keystroke to the PTY.
-    const pasteFromClipboard = async () => {
-      try {
-        if (navigator.clipboard.read) {
-          const clipItems = await navigator.clipboard.read();
-          for (const ci of clipItems) {
-            const imgType = ci.types.find((tp) => tp.startsWith("image/"));
-            if (imgType && onImagePasteRef.current) {
-              const blob = await ci.getType(imgType);
-              const ext = imgType.split("/")[1] || "png";
-              void onImagePasteRef.current(
-                new File([blob], `pasted.${ext}`, { type: imgType }),
-              );
-              return;
-            }
-          }
-        }
-      } catch {
-        /* no image / no permission — fall through to text */
-      }
-      try {
-        const txt = await navigator.clipboard.readText();
-        if (txt) void terminalWrite({ id: terminalId, data: txt }).catch(() => {});
-      } catch {
-        /* noop */
-      }
-    };
+    // selection; Ctrl+Shift+V pastes. Returning false stops xterm from
+    // forwarding the keystroke to the PTY.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       // Zoom: Ctrl +/- steps the shared font size, Ctrl+0 resets. Shift is
@@ -420,7 +394,12 @@ export function TerminalView({
         return false;
       }
       if (e.code === "KeyV") {
-        void pasteFromClipboard();
+        // Don't paste here — only block the keystroke from reaching the PTY.
+        // The browser still fires a native `paste` event on xterm's textarea,
+        // where `onPasteCapture` routes images to the host and lets xterm paste
+        // text exactly once. The old code also called a manual paste here and
+        // preventDefault'd, but preventDefault does NOT reliably suppress that
+        // native paste in WebView2 — so the text landed twice (the 2× bug).
         return false;
       }
       return true;
