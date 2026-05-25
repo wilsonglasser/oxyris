@@ -30,6 +30,11 @@ export async function claudePtySpawn(input: {
   session_id: string;
   cols: number;
   rows: number;
+  /**
+   * Extra `--append-system-prompt` text for the claude TUI — used to pin the
+   * response language. Merged with the MCP tool nudge backend-side.
+   */
+  system_prompt?: string;
 }): Promise<TerminalInfo> {
   return invoke("claude_pty_spawn", { input });
 }

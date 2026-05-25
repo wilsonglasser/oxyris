@@ -25,6 +25,10 @@
     }
   },
   "section_language": "Idioma",
+  "section_claude_language": "Idioma das respostas do Claude",
+  "claude_language_title": "Idioma das respostas",
+  "claude_language_desc": "Idioma em que o Claude responde. \"Auto\" acompanha o idioma que você escreve, em vez de puxar pro inglês do código e do contexto. Vale pra novas sessões.",
+  "claude_language_auto": "Auto (acompanhar meu idioma)",
   "section_updates": "Atualizações",
   "current_version_label": "Versão atual",
   "check_now": "Checar agora",

@@ -4,6 +4,8 @@ import ReactMarkdown from "react-markdown";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { parseUserMessage } from "~/lib/parseUserMessage.ts";
 import { matchesKey } from "~/lib/keybindings.ts";
+import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
+import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import {
   playTurnCompleteChime,
   shouldNotify,
@@ -529,6 +531,9 @@ export function ChatPanel({
         thinking,
         runtime,
         env_mode: envMode,
+        system_prompt: claudeLanguageDirective(
+          useAppSettingsStore.getState().claudeLanguage,
+        ),
         ...(wtIdToSend ? { worktree_id: wtIdToSend } : {}),
       });
       setActive(res.session_id);

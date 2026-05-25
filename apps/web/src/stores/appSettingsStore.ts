@@ -1,4 +1,8 @@
 import { create } from "zustand";
+import {
+  type ClaudeLanguage,
+  isClaudeLanguage,
+} from "~/lib/claudeLanguage.ts";
 
 /**
  * App-wide UI preferences that don't belong to any one session. Persisted to
@@ -9,6 +13,7 @@ import { create } from "zustand";
 const PURE_MODE_KEY = "oxyris.pureMode";
 const OPEN_EXTERNAL_KEY = "oxyris.openFilesExternally";
 const TERM_FONT_KEY = "oxyris.terminalFontSize";
+const CLAUDE_LANG_KEY = "oxyris.claudeLanguage";
 
 /** Default xterm font size (px). Base 100% for the zoom indicator. */
 export const TERM_FONT_DEFAULT = 12;
@@ -31,6 +36,11 @@ function loadOpenExternal(): boolean {
 function loadTerminalFontSize(): number {
   const raw = window.localStorage.getItem(TERM_FONT_KEY);
   return raw ? clampFont(Number(raw)) : TERM_FONT_DEFAULT;
+}
+
+function loadClaudeLanguage(): ClaudeLanguage {
+  const raw = window.localStorage.getItem(CLAUDE_LANG_KEY);
+  return isClaudeLanguage(raw) ? raw : "auto";
 }
 
 interface AppSettingsState {
@@ -58,6 +68,14 @@ interface AppSettingsState {
   /** Step the font size by `delta` px, clamped to the allowed range. */
   bumpTerminalFontSize: (delta: number) => void;
   resetTerminalFontSize: () => void;
+  /**
+   * Language Claude is instructed to reply in, independent of the UI locale.
+   * `"auto"` (default) tells Claude to mirror the user's own language instead
+   * of drifting to the (mostly English) code/context. Fed into every session's
+   * system prompt at start — see {@link import("~/lib/claudeLanguage").claudeLanguageDirective}.
+   */
+  claudeLanguage: ClaudeLanguage;
+  setClaudeLanguage: (lang: ClaudeLanguage) => void;
 }
 
 export const useAppSettingsStore = create<AppSettingsState>((set) => ({
@@ -86,5 +104,10 @@ export const useAppSettingsStore = create<AppSettingsState>((set) => ({
   resetTerminalFontSize: () => {
     window.localStorage.setItem(TERM_FONT_KEY, String(TERM_FONT_DEFAULT));
     set({ terminalFontSize: TERM_FONT_DEFAULT });
+  },
+  claudeLanguage: loadClaudeLanguage(),
+  setClaudeLanguage: (lang) => {
+    window.localStorage.setItem(CLAUDE_LANG_KEY, lang);
+    set({ claudeLanguage: lang });
   },
 }));

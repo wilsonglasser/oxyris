@@ -31,6 +31,11 @@ pub struct TerminalSpawnInput {
     pub session_id: AggregateId,
     pub cols: u16,
     pub rows: u16,
+    /// Extra system-prompt text (e.g. the response-language directive). Only
+    /// honored by `claude_pty_spawn`; ignored for plain shell terminals. Merged
+    /// ahead of the MCP tool nudge.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 #[tauri::command]
@@ -165,7 +170,7 @@ pub async fn claude_pty_spawn(
     // inside a WSL distro, so we don't wire MCP there yet (matches the
     // structured provider's WSL limitation). Missing binary just means claude
     // runs without it.
-    let (mcp_config_path, system_prompt) = if matches!(env, Environment::Windows) {
+    let (mcp_config_path, mcp_nudge) = if matches!(env, Environment::Windows) {
         let lsp_port = state.session_supervisor.lsp_bridge_port();
         match crate::infra::mcp::prepare_for_worktree(&env, &cwd, lsp_port) {
             Ok(Some(setup)) => (Some(setup.config_path), Some(setup.system_prompt_nudge)),
@@ -173,6 +178,15 @@ pub async fn claude_pty_spawn(
         }
     } else {
         (None, None)
+    };
+
+    // Response-language directive (from the UI) goes first, then the MCP tool
+    // nudge — same ordering the structured provider uses in `augment_with_mcp`.
+    let language = input.system_prompt.filter(|s| !s.trim().is_empty());
+    let system_prompt = match (language, mcp_nudge) {
+        (Some(lang), Some(mcp)) => Some(format!("{lang}\n\n{mcp}")),
+        (Some(lang), None) => Some(lang),
+        (None, mcp) => mcp,
     };
 
     // If claude already wrote a transcript under this id (resumed session, e.g.

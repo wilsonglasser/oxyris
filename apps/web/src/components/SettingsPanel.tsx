@@ -5,6 +5,7 @@ import {
   BellRing,
   FileCode,
   FileText,
+  Globe,
   Languages,
   Plug,
   RefreshCw,
@@ -18,6 +19,10 @@ import { LanguageSwitcher } from "~/components/LanguageSwitcher.tsx";
 import { LanguagePacksPanel } from "~/components/LanguagePacksPanel.tsx";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
+import {
+  CLAUDE_LANGUAGES,
+  type ClaudeLanguage,
+} from "~/lib/claudeLanguage.ts";
 import {
   type UpdateStatus,
   applyUpdate,
@@ -100,6 +105,8 @@ function GeneralTab() {
   const setOpenFilesExternally = useAppSettingsStore(
     (s) => s.setOpenFilesExternally,
   );
+  const claudeLanguage = useAppSettingsStore((s) => s.claudeLanguage);
+  const setClaudeLanguage = useAppSettingsStore((s) => s.setClaudeLanguage);
 
   useEffect(() => {
     void getVersion().then(setVersion).catch(() => {});
@@ -152,6 +159,35 @@ function GeneralTab() {
         title={t("section_language")}
       >
         <LanguageSwitcher />
+      </Section>
+
+      <Section
+        icon={<Globe className="size-3.5" strokeWidth={1.75} />}
+        title={t("section_claude_language")}
+      >
+        <label className="flex items-start gap-3 text-[11px] text-neutral-400">
+          <span className="flex-1">
+            <span className="font-medium text-neutral-200">
+              {t("claude_language_title")}
+            </span>
+            <span className="block text-neutral-500">
+              {t("claude_language_desc")}
+            </span>
+          </span>
+          <select
+            value={claudeLanguage}
+            onChange={(e) =>
+              setClaudeLanguage(e.target.value as ClaudeLanguage)
+            }
+            className="mt-0.5 shrink-0 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-neutral-200"
+          >
+            {CLAUDE_LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.code === "auto" ? t("claude_language_auto") : l.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </Section>
 
       <Section

@@ -36,6 +36,7 @@ import {
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
+import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import {
   toSpeechLocale,
@@ -504,6 +505,9 @@ function PureSessionView({
           session_id: sessionId,
           cols: 80,
           rows: 24,
+          system_prompt: claudeLanguageDirective(
+            useAppSettingsStore.getState().claudeLanguage,
+          ),
         });
         setTermId(info.id);
         setCwd(info.cwd);

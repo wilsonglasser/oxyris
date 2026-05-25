@@ -25,6 +25,10 @@
     }
   },
   "section_language": "Language",
+  "section_claude_language": "Claude response language",
+  "claude_language_title": "Reply language",
+  "claude_language_desc": "Language Claude answers in. \"Auto\" mirrors the language you write in instead of drifting toward the (mostly English) code and context. Applies to new sessions.",
+  "claude_language_auto": "Auto (match my language)",
   "section_updates": "Updates",
   "current_version_label": "Current version",
   "check_now": "Check now",
