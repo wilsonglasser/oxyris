@@ -56,6 +56,13 @@ pub fn open_in_memory() -> Result<Connection, IndexError> {
 }
 
 fn init_schema(conn: &Connection) -> Result<(), IndexError> {
+    // Two processes share this file: the desktop indexer (writes during
+    // rebuild) and the `oxyris-mcp` server Claude spawns (opens it to read,
+    // and runs this same init). Switching to WAL takes a brief exclusive
+    // lock, so without a busy timeout a concurrent open returns SQLITE_BUSY
+    // ("database is locked") immediately instead of waiting. Make every
+    // connection wait up to 5s for the lock before erroring.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(SCHEMA_SQL)?;
     let stored: Option<String> = conn
