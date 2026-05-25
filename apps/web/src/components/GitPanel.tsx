@@ -897,7 +897,9 @@ function CommitBar({
   const message = useGitStore((s) => s.commitMessage[worktreeId] ?? "");
   const setMessage = useGitStore((s) => s.setCommitMessage);
   const commit = useGitStore((s) => s.commit);
+  const commitAndPush = useGitStore((s) => s.commitAndPush);
   const committing = useGitStore((s) => s.committing[worktreeId] ?? false);
+  const pushing = useGitStore((s) => s.remote[worktreeId]?.running ?? false);
   const error = useGitStore((s) => s.commitError[worktreeId] ?? null);
   const status = useGitStore((s) => s.status[worktreeId] ?? null);
   const generating = useGitStore(
@@ -960,7 +962,7 @@ function CommitBar({
           <button
             type="button"
             onClick={() => void commit(projectId, worktreeId, true)}
-            disabled={committing || !message.trim()}
+            disabled={committing || pushing || !message.trim()}
             className="rounded px-2 py-0.5 text-neutral-400 enabled:hover:bg-neutral-800 enabled:hover:text-neutral-200 disabled:opacity-40"
           >
             {t("amend")}
@@ -968,10 +970,22 @@ function CommitBar({
           <button
             type="button"
             onClick={() => void commit(projectId, worktreeId, false)}
-            disabled={!canCommit}
+            disabled={!canCommit || pushing}
             className="rounded bg-emerald-700/80 px-2 py-0.5 text-neutral-100 enabled:hover:bg-emerald-700 disabled:opacity-40"
           >
             {committing ? t("committing") : t("commit")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void commitAndPush(projectId, worktreeId)}
+            disabled={!canCommit || pushing}
+            className="rounded bg-emerald-700/80 px-2 py-0.5 text-neutral-100 enabled:hover:bg-emerald-700 disabled:opacity-40"
+          >
+            {committing
+              ? t("committing")
+              : pushing
+                ? t("pushing")
+                : t("commit_and_push")}
           </button>
         </div>
       </div>

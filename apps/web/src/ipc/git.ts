@@ -1,5 +1,38 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export type GitErrorPayload = { code: string; message: string };
+
+/**
+ * Tauri rejects git commands with the serialized `TauriGitError`
+ * (`apps/desktop/src/tauri_commands/git.rs`) — a plain `{ code, message }`
+ * object. Wrapping it as an `Error` keeps callers from rendering
+ * `[object Object]` when they `String(e)` the rejection.
+ */
+export class GitCommandError extends Error {
+  readonly code: string;
+  constructor(payload: GitErrorPayload) {
+    super(payload.message || payload.code);
+    this.code = payload.code;
+    this.name = "GitCommandError";
+  }
+}
+
+async function invokeGit<T>(cmd: string, input: unknown): Promise<T> {
+  try {
+    return await invoke<T>(cmd, { input });
+  } catch (err) {
+    if (
+      err &&
+      typeof err === "object" &&
+      "message" in err &&
+      typeof (err as { message: unknown }).message === "string"
+    ) {
+      throw new GitCommandError(err as GitErrorPayload);
+    }
+    throw err;
+  }
+}
+
 export type FileStatus =
   | "added"
   | "modified"
@@ -132,13 +165,11 @@ export function gitCommit(args: {
   message: string;
   amend?: boolean;
 }): Promise<CommitResult> {
-  return invoke<CommitResult>("git_commit", {
-    input: {
-      project_id: args.projectId,
-      worktree_id: args.worktreeId,
-      message: args.message,
-      amend: args.amend ?? false,
-    },
+  return invokeGit<CommitResult>("git_commit", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    message: args.message,
+    amend: args.amend ?? false,
   });
 }
 
@@ -147,12 +178,10 @@ export function gitFetch(args: {
   worktreeId: string;
   remote?: string;
 }): Promise<RemoteOpResult> {
-  return invoke<RemoteOpResult>("git_fetch", {
-    input: {
-      project_id: args.projectId,
-      worktree_id: args.worktreeId,
-      remote: args.remote,
-    },
+  return invokeGit<RemoteOpResult>("git_fetch", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    remote: args.remote,
   });
 }
 
@@ -163,14 +192,12 @@ export function gitPull(args: {
   branch?: string;
   rebase?: boolean;
 }): Promise<RemoteOpResult> {
-  return invoke<RemoteOpResult>("git_pull", {
-    input: {
-      project_id: args.projectId,
-      worktree_id: args.worktreeId,
-      remote: args.remote,
-      branch: args.branch,
-      rebase: args.rebase ?? false,
-    },
+  return invokeGit<RemoteOpResult>("git_pull", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    remote: args.remote,
+    branch: args.branch,
+    rebase: args.rebase ?? false,
   });
 }
 
@@ -182,15 +209,13 @@ export function gitPush(args: {
   force?: boolean;
   setUpstream?: boolean;
 }): Promise<RemoteOpResult> {
-  return invoke<RemoteOpResult>("git_push", {
-    input: {
-      project_id: args.projectId,
-      worktree_id: args.worktreeId,
-      remote: args.remote,
-      branch: args.branch,
-      force: args.force ?? false,
-      set_upstream: args.setUpstream ?? false,
-    },
+  return invokeGit<RemoteOpResult>("git_push", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    remote: args.remote,
+    branch: args.branch,
+    force: args.force ?? false,
+    set_upstream: args.setUpstream ?? false,
   });
 }
 
@@ -467,10 +492,8 @@ export function gitGenerateCommitMessage(args: {
   projectId: string;
   worktreeId: string;
 }): Promise<{ message: string }> {
-  return invoke<{ message: string }>("git_generate_commit_message", {
-    input: {
-      project_id: args.projectId,
-      worktree_id: args.worktreeId,
-    },
+  return invokeGit<{ message: string }>("git_generate_commit_message", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
   });
 }

@@ -92,6 +92,7 @@ interface GitState {
     worktreeId: string,
     amend?: boolean,
   ) => Promise<void>;
+  commitAndPush: (projectId: string, worktreeId: string) => Promise<void>;
 
   refreshBranches: (projectId: string, worktreeId: string) => Promise<void>;
   refreshLog: (
@@ -313,6 +314,21 @@ export const useGitStore = create<GitState>((set, get) => ({
       set((state) => ({
         committing: { ...state.committing, [worktreeId]: false },
         commitError: { ...state.commitError, [worktreeId]: msg },
+      }));
+    }
+  },
+
+  commitAndPush: async (projectId, worktreeId) => {
+    await get().commit(projectId, worktreeId, false);
+    // commit() swallows its own failure into commitError — bail before push.
+    if (get().commitError[worktreeId]) return;
+    await get().push(projectId, worktreeId);
+    // push() reports into remote state; mirror any failure under the commit
+    // box so it's visible next to the button that triggered it.
+    const remoteErr = get().remote[worktreeId]?.error ?? null;
+    if (remoteErr) {
+      set((state) => ({
+        commitError: { ...state.commitError, [worktreeId]: remoteErr },
       }));
     }
   },
