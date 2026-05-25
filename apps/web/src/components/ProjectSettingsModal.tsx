@@ -12,6 +12,7 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   projectAutodetectLogo,
+  projectRename,
   projectSetLogo,
   projectSetWorkspace,
 } from "~/ipc/commands.ts";
@@ -109,6 +110,8 @@ export function ProjectSettingsModal({ projectId, onClose: _onClose }: Props) {
       </header>
 
       <div className="flex-1 overflow-y-auto px-5 py-4">
+        <NameSection projectId={projectId} />
+
         <LogoSection projectId={projectId} />
 
         <WorkspaceSection projectId={projectId} />
@@ -207,6 +210,73 @@ function formatErr(e: unknown): string {
     return e.message;
   }
   return e instanceof Error ? e.message : String(e);
+}
+
+function NameSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation("common");
+  const project = useProjectStore((s) =>
+    s.projects.find((p) => p.id === projectId),
+  );
+  const refreshProjects = useProjectStore((s) => s.refresh);
+  const [value, setValue] = useState(project?.name ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!project) return null;
+
+  const trimmed = value.trim();
+  const dirty = trimmed !== project.name && trimmed.length > 0;
+
+  const commit = async () => {
+    if (!dirty || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await projectRename({ id: projectId, new_name: trimmed });
+      await refreshProjects();
+    } catch (e) {
+      setError(formatErr(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="mb-6">
+      <h3 className="mb-1.5 text-[12px] font-medium uppercase tracking-wider text-neutral-400">
+        {t("project_settings_modal.name_heading")}
+      </h3>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void commit();
+            }
+          }}
+          placeholder={t("project_settings_modal.name_placeholder")}
+          disabled={busy}
+          className="flex-1 rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 outline-none focus:border-neutral-700 disabled:opacity-50"
+        />
+        <button
+          type="button"
+          onClick={() => void commit()}
+          disabled={!dirty || busy}
+          className="rounded-md bg-neutral-100 px-3 py-1.5 text-sm font-medium text-neutral-900 transition hover:bg-white disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-500"
+        >
+          {t("project_settings_modal.name_save")}
+        </button>
+      </div>
+      {error && (
+        <p className="mt-2 rounded border border-red-900/40 bg-red-950/20 px-2.5 py-1.5 text-[11px] text-red-200">
+          {error}
+        </p>
+      )}
+    </section>
+  );
 }
 
 function WorkspaceSection({ projectId }: { projectId: string }) {

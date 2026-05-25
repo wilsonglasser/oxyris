@@ -71,6 +71,9 @@
   },
   "project_settings_modal": {
     "title": "Project settings — {{name}}",
+    "name_heading": "Name",
+    "name_placeholder": "Project name",
+    "name_save": "Save",
     "worktrees_heading": "Worktrees",
     "worktrees_help": "Each worktree is a separate working tree on disk on its own branch. Use them to run multiple parallel sessions on the same project without stepping on each other.",
     "new_worktree_prompt": "Branch name (new or existing):",

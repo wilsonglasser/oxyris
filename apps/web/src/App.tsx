@@ -22,6 +22,8 @@ import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
+import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
+import { useBusyStore } from "~/stores/busyStore.ts";
 import { useIndexingStore } from "~/stores/indexingStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { useLspStatusStore } from "~/stores/lspStatusStore.ts";
@@ -69,6 +71,50 @@ export function App() {
     if (document.hasFocus()) clearBadge();
     return () => window.removeEventListener("focus", onFocus);
   }, []);
+
+  // Keep the ACTIVE pure session's "busy" dot alive across tab switches. Its
+  // PureClaudePanel unmounts when you leave the chat tab, taking the in-view
+  // idle detector with it — so the clear must live here (App never unmounts on
+  // tab change). Pure threads have no turn-event stream: the panel *arms* busy
+  // on submit; here we watch the claude PTY's output and clear once it goes
+  // quiet, regardless of which tab is shown.
+  const activeIsPure = sessionSnapshot?.kind === "pure";
+  useEffect(() => {
+    const sid = activeSessionId;
+    if (!sid || !activeIsPure) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    let timer: number | undefined;
+    const scheduleClear = () => {
+      window.clearTimeout(timer);
+      // Slightly longer than the panel's 2500ms so the two don't race.
+      timer = window.setTimeout(
+        () => useBusyStore.getState().setBusy(sid, false),
+        3000,
+      );
+    };
+    void terminalList({ session_id: sid }).then((rows) => {
+      if (cancelled) return;
+      const pty = rows.find((r) => r.kind === "claude");
+      if (!pty) return;
+      // Output only flows during a turn; each chunk pushes the idle clear out.
+      void onTerminalOutput(pty.id, () => {
+        if (useBusyStore.getState().busy[sid]) scheduleClear();
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      });
+      // Guarantee a clear path even if the turn ended right as we subscribed.
+      if (useBusyStore.getState().busy[sid]) scheduleClear();
+    });
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      unlisten?.();
+      // Switching to another session: don't strand a stuck dot on this one.
+      useBusyStore.getState().setBusy(sid, false);
+    };
+  }, [activeSessionId, activeIsPure]);
   const bindings = useKeybindingsStore((s) => s.bindings);
   const loadBindings = useKeybindingsStore((s) => s.load);
   const backgroundCheckUpdate = useUpdaterStore((s) => s.backgroundCheck);

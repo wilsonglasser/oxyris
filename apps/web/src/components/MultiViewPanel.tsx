@@ -63,6 +63,7 @@ export function MultiViewPanel() {
     {},
   );
   const [broadcast, setBroadcast] = useState("");
+  const broadcastRef = useRef<HTMLTextAreaElement | null>(null);
   // The terminal dock belongs to the Multi View (not a grid pane); it follows
   // whichever pane the user last focused.
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null);
@@ -133,6 +134,15 @@ export function MultiViewPanel() {
     }
     setBroadcast("");
   }, [broadcast, panes]);
+
+  // Auto-grow the broadcast composer with content, capped (max-h-32 = 128px),
+  // and collapse back to one row when cleared (broadcast / empty).
+  useEffect(() => {
+    const el = broadcastRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
+  }, [broadcast]);
 
   // Autofill: drop every project's sessions into the grid (running first, then
   // most recent), capped at the current column count × 3 rows.
@@ -293,6 +303,7 @@ export function MultiViewPanel() {
 
       <div className="flex items-end gap-2 border-t border-neutral-800 bg-neutral-900 p-2">
         <textarea
+          ref={broadcastRef}
           value={broadcast}
           onChange={(e) => setBroadcast(e.target.value)}
           onKeyDown={(e) => {
@@ -303,7 +314,7 @@ export function MultiViewPanel() {
           }}
           rows={1}
           placeholder={t("mv_broadcast_placeholder")}
-          className="max-h-32 min-h-[34px] flex-1 resize-none rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700"
+          className="max-h-32 min-h-[34px] flex-1 resize-none overflow-y-auto rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700"
         />
         <button
           type="button"

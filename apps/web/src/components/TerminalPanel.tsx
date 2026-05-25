@@ -17,6 +17,10 @@ import {
   terminalSpawn,
   terminalWrite,
 } from "~/ipc/terminal.ts";
+import {
+  TERM_FONT_DEFAULT,
+  useAppSettingsStore,
+} from "~/stores/appSettingsStore.ts";
 
 interface DockProps {
   sessionId: string;
@@ -262,6 +266,14 @@ export function TerminalView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Global terminal zoom. Kept in a ref too so the keydown/wheel handlers wired
+  // once at mount read the latest size without rebuilding the terminal.
+  const fontSize = useAppSettingsStore((s) => s.terminalFontSize);
+  const fontSizeRef = useRef(fontSize);
+  // Transient zoom badge (bottom-left). `null` = hidden; set to the new px on
+  // change, then cleared after a beat.
+  const [zoomBadge, setZoomBadge] = useState<number | null>(null);
+  const zoomBadgeTimer = useRef<number | undefined>(undefined);
   // Held in refs so the listeners always see the latest callbacks without
   // rebuilding the whole terminal when their identity changes.
   const onImagePasteRef = useRef(onImagePaste);
@@ -282,7 +294,7 @@ export function TerminalView({
     const term = new Terminal({
       fontFamily:
         '"JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace',
-      fontSize: 12,
+      fontSize: fontSizeRef.current,
       theme: {
         background: "#19191c",
         foreground: "#dfe1e5",
@@ -382,6 +394,24 @@ export function TerminalView({
     };
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
+      // Zoom: Ctrl +/- steps the shared font size, Ctrl+0 resets. Shift is
+      // ignored on Equal/Minus so the "+" key (Shift+Equal on most layouts)
+      // also zooms in. Swallow the keystroke so it never reaches the PTY.
+      if (e.ctrlKey && !e.altKey && !e.metaKey) {
+        const store = useAppSettingsStore.getState();
+        if (e.code === "Equal" || e.code === "NumpadAdd") {
+          store.bumpTerminalFontSize(1);
+          return false;
+        }
+        if (e.code === "Minus" || e.code === "NumpadSubtract") {
+          store.bumpTerminalFontSize(-1);
+          return false;
+        }
+        if (e.code === "Digit0" || e.code === "Numpad0") {
+          store.resetTerminalFontSize();
+          return false;
+        }
+      }
       const combo = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
       if (!combo) return true;
       if (e.code === "KeyC") {
@@ -416,6 +446,20 @@ export function TerminalView({
       }
     };
     textarea?.addEventListener("paste", onPasteCapture, { capture: true });
+
+    // Ctrl+scroll zooms instead of scrolling the buffer. Capture phase +
+    // preventDefault so xterm's wheel-scroll never sees it. Non-passive so
+    // preventDefault is honored. One notch = one px step (sign-only — wheel
+    // deltas vary wildly across devices, so we ignore magnitude).
+    const onWheelZoom = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      useAppSettingsStore.getState().bumpTerminalFontSize(e.deltaY < 0 ? 1 : -1);
+    };
+    mount.addEventListener("wheel", onWheelZoom, {
+      capture: true,
+      passive: false,
+    });
 
     const safeFit = () => {
       try {
@@ -522,6 +566,7 @@ export function TerminalView({
       window.clearTimeout(resizeTimer);
       window.removeEventListener("resize", safeFit);
       textarea?.removeEventListener("paste", onPasteCapture, { capture: true });
+      mount.removeEventListener("wheel", onWheelZoom, { capture: true });
       ro.disconnect();
       try {
         dataHandlers.forEach((d) => d.dispose());
@@ -545,6 +590,35 @@ export function TerminalView({
     };
   }, [terminalId, onExit]);
 
+  // Apply zoom changes to the live terminal: resize the font, reflow the PTY to
+  // the new cols/rows, and flash the badge. Skips the initial mount (the badge
+  // shouldn't pop just from opening a terminal). Re-fit is deferred a frame so
+  // xterm picks up the new char metrics before measuring.
+  const fontMountedRef = useRef(false);
+  useEffect(() => {
+    fontSizeRef.current = fontSize;
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontSize = fontSize;
+    const id = window.setTimeout(() => {
+      try {
+        fitRef.current?.fit();
+      } catch {
+        /* noop */
+      }
+    }, 0);
+    if (!fontMountedRef.current) {
+      fontMountedRef.current = true;
+      return () => window.clearTimeout(id);
+    }
+    setZoomBadge(fontSize);
+    window.clearTimeout(zoomBadgeTimer.current);
+    zoomBadgeTimer.current = window.setTimeout(() => setZoomBadge(null), 1200);
+    return () => window.clearTimeout(id);
+  }, [fontSize]);
+
+  useEffect(() => () => window.clearTimeout(zoomBadgeTimer.current), []);
+
   // Re-fit when becoming visible — xterm needs a relayout pass.
   useEffect(() => {
     if (!visible) return;
@@ -559,9 +633,16 @@ export function TerminalView({
   }, [visible]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`absolute inset-0 p-2 ${visible ? "" : "invisible"}`}
-    />
+    <div className={`absolute inset-0 ${visible ? "" : "invisible"}`}>
+      <div ref={containerRef} className="absolute inset-0 p-2" />
+      {zoomBadge !== null && (
+        <div
+          className="pointer-events-none absolute bottom-2 left-2 z-10 rounded bg-neutral-900/90 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-neutral-300 ring-1 ring-neutral-700"
+          aria-live="polite"
+        >
+          {Math.round((zoomBadge / TERM_FONT_DEFAULT) * 100)}% · {zoomBadge}px
+        </div>
+      )}
+    </div>
   );
 }

@@ -399,6 +399,7 @@ function PureSessionView({
   const PROMPT_RE =
     /(do you want to (proceed|make this edit|create|run|continue))|(❯\s*\d+\.\s*yes)|(yes, and don'?t ask again)|(no, and tell claude)/i;
   const outTailRef = useRef("");
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
   // Latched true while a prompt is on screen so we chime once per request, not
   // once per redraw. Cleared when the user submits a response (see onPtyInput).
   const promptOpenRef = useRef(false);
@@ -472,10 +473,10 @@ function PureSessionView({
     [refreshTitle, detectPrompt, sessionId, setBusy],
   );
 
-  // A pure turn is only observable while this panel is mounted (no event
-  // stream). On unmount, clear the flag so the sidebar dot can't pulse forever
-  // for a thread we're no longer watching.
-  useEffect(() => () => setBusy(sessionId, false), [sessionId, setBusy]);
+  // NB: no unmount-clear here. Leaving the chat tab unmounts this panel mid-turn
+  // and clearing on unmount made the sidebar dot vanish while still working. The
+  // idle clear lives at the App level instead (watches the PTY output and
+  // survives tab switches); see App.tsx.
 
   // Ensure exactly one claude PTY exists for this session: reuse an existing
   // one (survives remounts) or spawn a fresh one. Deduped via `ensuredRef`
@@ -606,6 +607,17 @@ function PureSessionView({
     setText("");
     setAttachments([]);
   };
+
+  // Auto-grow the composer with its content, capped (max-h-32 = 128px), and
+  // collapse back to one row when cleared (submit / empty). Measures the
+  // displayed value, which includes any interim dictation transcript.
+  const composerValue = text + (speech.interim ? ` ${speech.interim}` : "");
+  useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
+  }, [composerValue]);
 
   // Auto-submit when a Ctrl+click-armed dictation ends (listening true→false).
   useEffect(() => {
@@ -779,7 +791,8 @@ function PureSessionView({
         )}
         <div className="flex items-end gap-2">
         <textarea
-          value={text + (speech.interim ? ` ${speech.interim}` : "")}
+          ref={taRef}
+          value={composerValue}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => void onPaste(e)}
           onKeyDown={(e) => {
@@ -790,7 +803,7 @@ function PureSessionView({
           }}
           rows={1}
           placeholder={t("pure_composer_placeholder")}
-          className="max-h-32 min-h-[34px] flex-1 resize-none rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700"
+          className="max-h-32 min-h-[34px] flex-1 resize-none overflow-y-auto rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700"
         />
         {speech.supported && (
           <button
