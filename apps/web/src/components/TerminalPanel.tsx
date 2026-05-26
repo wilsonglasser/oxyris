@@ -310,7 +310,11 @@ export function TerminalView({
       cursorBlink: false,
       cursorStyle: "bar",
       cursorInactiveStyle: "none",
-      scrollback: 5000,
+      // Deep scrollback: a `cargo run`/build flood blows past a few thousand
+      // lines, and pure-claude renders inline (normal buffer) so this cap is
+      // exactly how far back the user can scroll. Kept in step with the backend
+      // replay cap (REPLAY_CAP_BYTES) so a tab-switch re-attach doesn't truncate.
+      scrollback: 50000,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);

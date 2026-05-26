@@ -15,9 +15,13 @@ use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Cap on the per-terminal replay buffer. Enough to capture a shell banner +
-/// a few screens of output while we wait for the frontend to attach.
-const REPLAY_CAP_BYTES: usize = 256 * 1024;
+/// Cap on the per-terminal replay buffer. This is the source of truth for how
+/// much scrollback survives a re-attach (tab switch / remount): on attach the
+/// frontend rebuilds a fresh xterm and replays this snapshot, so anything older
+/// is gone for good. Sized to cover the frontend's `scrollback` cap (~50k lines)
+/// — 256 KB was too small and silently truncated history after a flood like
+/// `cargo run`.
+const REPLAY_CAP_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum PtyError {
@@ -461,8 +465,14 @@ impl PtySupervisor {
                             };
                             rb.last_seq += 1;
                             rb.data.extend(bytes.iter().copied());
-                            while rb.data.len() > REPLAY_CAP_BYTES {
-                                rb.data.pop_front();
+                            // Drain the overflow in one shot. The old one-byte
+                            // `pop_front` loop was O(n) per chunk and could sever
+                            // a multi-byte UTF-8 char or an ANSI escape sequence
+                            // at the front, so the replayed snapshot started
+                            // mid-escape and rendered garbled.
+                            if rb.data.len() > REPLAY_CAP_BYTES {
+                                let excess = rb.data.len() - REPLAY_CAP_BYTES;
+                                rb.data.drain(..excess);
                             }
                             rb.last_seq
                         };
