@@ -12,8 +12,9 @@ use std::path::{Component, Path, PathBuf};
 
 use oxyris_core::{AggregateId, Environment};
 use oxyris_ipc::ops::{
-    FsCreateFileArgs, FsDeleteArgs, FsListDirArgs, FsListDirResult, FsPathArgs, FsReadArgs,
-    FsReadBytesArgs, FsReadBytesResult, FsReadResult, FsRenameArgs, FsSearchPathsArgs,
+    FsContentFileHits, FsContentMatch, FsCopyArgs, FsCreateFileArgs, FsDeleteArgs, FsListDirArgs,
+    FsListDirResult, FsPathArgs, FsReadArgs, FsReadBytesArgs, FsReadBytesResult, FsReadResult,
+    FsRenameArgs, FsSearchContentArgs, FsSearchContentResult, FsSearchPathsArgs,
     FsSearchPathsResult, FsWriteArgs, FsWriteResult, op_name,
 };
 use thiserror::Error;
@@ -317,6 +318,61 @@ pub async fn rename(
     }
 }
 
+pub async fn copy(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    from: String,
+    to: String,
+) -> Result<(), FsError> {
+    match env {
+        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+            let from_p = Path::new(&from);
+            let to_p = Path::new(&to);
+            if !from_p.exists() {
+                return Err(FsError::InvalidPath(format!("not found: {from}")));
+            }
+            if let Some(parent) = to_p.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let md = std::fs::symlink_metadata(from_p)?;
+            if md.is_dir() {
+                copy_dir_recursive(from_p, to_p)?;
+            } else {
+                std::fs::copy(from_p, to_p)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| FsError::Agent(format!("join: {e}")))?,
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::FS_COPY,
+                    serde_json::to_value(FsCopyArgs { from, to })
+                        .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), FsError> {
+    std::fs::create_dir_all(to)?;
+    for dent in std::fs::read_dir(from)? {
+        let dent = dent?;
+        let src = dent.path();
+        let dst = to.join(dent.file_name());
+        if dent.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn delete(
     env: &Environment,
     agent_pool: &AgentPool,
@@ -410,6 +466,33 @@ pub async fn search_paths(
                     distro,
                     op_name::FS_SEARCH_PATHS,
                     serde_json::to_value(FsSearchPathsArgs { root, query, limit })
+                        .map_err(|e| FsError::Agent(e.to_string()))?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| FsError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn search_content(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    root: String,
+    args: FsSearchContentArgs,
+) -> Result<FsSearchContentResult, FsError> {
+    match env {
+        Environment::Windows => {
+            let a = FsSearchContentArgs { root, ..args };
+            tokio::task::spawn_blocking(move || search_content_native(&a))
+                .await
+                .map_err(|e| FsError::Agent(format!("join: {e}")))?
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::FS_SEARCH_CONTENT,
+                    serde_json::to_value(FsSearchContentArgs { root, ..args })
                         .map_err(|e| FsError::Agent(e.to_string()))?,
                 )
                 .await?;
@@ -596,6 +679,139 @@ fn search_paths_native(
         truncated = true;
     }
     Ok(FsSearchPathsResult { hits, truncated })
+}
+
+// ────── content search (Find in Files) ────────────────────────────────────
+
+const SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const SEARCH_WALK_CAP: u32 = 50_000;
+const SEARCH_MAX_LINE_LEN: usize = 500;
+
+fn build_content_matcher(args: &FsSearchContentArgs) -> Result<regex::Regex, String> {
+    if args.query.is_empty() {
+        return Err("empty query".to_owned());
+    }
+    let base = if args.is_regex {
+        args.query.clone()
+    } else {
+        regex::escape(&args.query)
+    };
+    let pat = if args.whole_word {
+        format!(r"\b(?:{base})\b")
+    } else {
+        base
+    };
+    regex::RegexBuilder::new(&pat)
+        .case_insensitive(!args.case_sensitive)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+fn cap_line(line: &str) -> String {
+    if line.len() <= SEARCH_MAX_LINE_LEN {
+        return line.to_owned();
+    }
+    let mut end = SEARCH_MAX_LINE_LEN;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].to_owned()
+}
+
+fn search_content_native(args: &FsSearchContentArgs) -> Result<FsSearchContentResult, FsError> {
+    use ignore::WalkBuilder;
+    use ignore::overrides::OverrideBuilder;
+
+    let root = Path::new(&args.root);
+    if !root.exists() {
+        return Err(FsError::InvalidPath(format!("not found: {}", args.root)));
+    }
+    let re = build_content_matcher(args).map_err(FsError::InvalidPath)?;
+
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .standard_filters(true)
+        .hidden(false)
+        .follow_links(false);
+    if let Some(mask) = args.include_glob.as_deref() {
+        let mut ob = OverrideBuilder::new(root);
+        for pat in mask.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = ob.add(pat);
+        }
+        if let Ok(ov) = ob.build() {
+            builder.overrides(ov);
+        }
+    }
+
+    let max_results = args.max_results.max(1);
+    let mut files: Vec<FsContentFileHits> = Vec::new();
+    let mut total = 0u32;
+    let mut truncated = false;
+    let mut walked = 0u32;
+
+    for dent in builder.build() {
+        let Ok(dent) = dent else { continue };
+        walked += 1;
+        if walked > SEARCH_WALK_CAP {
+            truncated = true;
+            break;
+        }
+        if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(md) = dent.metadata()
+            && md.len() > SEARCH_MAX_FILE_BYTES
+        {
+            continue;
+        }
+        let path = dent.path();
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        if bytes.iter().take(8000).any(|&b| b == 0) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+        let mut matches = Vec::new();
+        let mut hit_cap = false;
+        for (i, line) in text.lines().enumerate() {
+            if total >= max_results {
+                hit_cap = true;
+                break;
+            }
+            if re.is_match(line) {
+                matches.push(FsContentMatch {
+                    line: (i as u32) + 1,
+                    text: cap_line(line),
+                });
+                total += 1;
+            }
+        }
+        if !matches.is_empty() {
+            files.push(FsContentFileHits {
+                rel_path: rel_str,
+                matches,
+            });
+        }
+        if hit_cap {
+            truncated = true;
+            break;
+        }
+    }
+
+    files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(FsSearchContentResult {
+        files,
+        total_matches: total,
+        truncated,
+    })
 }
 
 #[cfg(test)]

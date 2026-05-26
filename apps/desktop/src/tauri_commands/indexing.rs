@@ -40,6 +40,11 @@ pub struct RebuildInput {
 #[derive(Debug, Deserialize)]
 pub struct QuerySymbolInput {
     pub worktree_id: AggregateId,
+    /// Required when `worktree_id` is the primary sentinel (nil UUID) — the
+    /// sentinel doesn't disambiguate projects, so we resolve env+root through
+    /// the project row instead.
+    #[serde(default)]
+    pub project_id: Option<AggregateId>,
     pub name: String,
     /// Optional kind filter — `function`, `method`, `class`, `struct`, etc.
     #[serde(default)]
@@ -90,7 +95,7 @@ pub async fn index_query_symbol(
     input: QuerySymbolInput,
     state: State<'_, AppState>,
 ) -> Result<Vec<SymbolHit>, TauriIndexingError> {
-    let ctx = lookup_worktree(&state, input.worktree_id)?;
+    let ctx = resolve_ctx(&state, input.worktree_id, input.project_id)?;
     let index = state
         .indexing
         .open_for(input.worktree_id, &ctx.environment, &ctx.path)
@@ -254,6 +259,31 @@ pub async fn index_stats(
 struct WorktreeContext {
     environment: Environment,
     path: String,
+}
+
+/// Like [`lookup_worktree`] but understands the primary sentinel: when
+/// `worktree_id` is the nil-UUID primary checkout, resolve env+root through
+/// the owning project (`project_id` required in that case).
+fn resolve_ctx(
+    state: &AppState,
+    worktree_id: AggregateId,
+    project_id: Option<AggregateId>,
+) -> Result<WorktreeContext, TauriIndexingError> {
+    if worktree_id == crate::tauri_commands::worktree::PRIMARY_WORKTREE_SENTINEL {
+        let project_id = project_id.ok_or(TauriIndexingError::WorktreeNotFound)?;
+        let p = state
+            .projections
+            .list_projects()
+            .map_err(|e| TauriIndexingError::Storage(e.to_string()))?
+            .into_iter()
+            .find(|p| p.id == project_id)
+            .ok_or(TauriIndexingError::WorktreeNotFound)?;
+        return Ok(WorktreeContext {
+            environment: p.environment,
+            path: p.root_path,
+        });
+    }
+    lookup_worktree(state, worktree_id)
 }
 
 fn lookup_worktree(

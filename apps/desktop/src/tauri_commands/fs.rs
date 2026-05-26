@@ -213,6 +213,92 @@ pub async fn fs_delete(
     Ok(())
 }
 
+// ────── copy (clipboard paste) ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct FsCopyInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub from_rel: String,
+    pub to_rel: String,
+}
+
+#[tauri::command]
+pub async fn fs_copy(input: FsCopyInput, state: State<'_, AppState>) -> Result<(), TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let from = fs_infra::join_inside_worktree(&env, &root, &input.from_rel)?;
+    let to = fs_infra::join_inside_worktree(&env, &root, &input.to_rel)?;
+    fs_infra::copy(&env, &state.agent_pool, from, to).await?;
+    Ok(())
+}
+
+// ────── absolute path (copy path / reference) ──────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct FsAbsPathInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub rel_path: String,
+}
+
+/// Resolve a worktree-relative path to its absolute form without touching the
+/// disk. For Windows projects this is a native path; for WSL it's the POSIX
+/// path inside the distro. Used by the "Copy path" context-menu action.
+#[tauri::command]
+pub async fn fs_abs_path(
+    input: FsAbsPathInput,
+    state: State<'_, AppState>,
+) -> Result<String, TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(fs_infra::join_inside_worktree(
+        &env,
+        &root,
+        &input.rel_path,
+    )?)
+}
+
+// ────── reveal in OS file manager ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct FsRevealInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub rel_path: String,
+}
+
+/// Open the OS file manager (Windows Explorer) with the target selected.
+///
+/// This is one of the two sanctioned Windows-side touches of a WSL path
+/// (PLAN.md §13): for WSL projects we translate the POSIX path to its
+/// `\\wsl.localhost\<distro>\...` UNC form and hand it to Explorer. Hot-path
+/// fs ops still route through the agent — only this one-shot UX touches UNC.
+#[tauri::command]
+pub async fn fs_reveal(
+    input: FsRevealInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriFsError> {
+    use oxyris_core::Environment;
+    use oxyris_procutil::HideConsole;
+    use std::process::Command;
+
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let windows_path = match &env {
+        Environment::Windows => abs,
+        Environment::Wsl { distro } => crate::infra::path_translator::to_windows(distro, &abs)
+            .map_err(|e| TauriFsError::Backend(format!("path translate: {e}")))?,
+    };
+    // `explorer.exe /select,<path>` highlights the entry in its parent folder.
+    // Explorer routinely returns a non-zero exit code even on success, so we
+    // intentionally don't inspect the status.
+    Command::new("explorer.exe")
+        .arg(format!("/select,{windows_path}"))
+        .hide_console()
+        .spawn()
+        .map_err(|e| TauriFsError::Backend(format!("spawn explorer: {e}")))?;
+    Ok(())
+}
+
 // ────── quick file search (Ctrl+P) ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -246,6 +332,49 @@ pub async fn fs_search_paths(
         hits: result.hits,
         truncated: result.truncated,
     })
+}
+
+// ────── full-text search (Find in Files / Ctrl+Shift+F) ────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct FsSearchContentInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub query: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub is_regex: bool,
+    #[serde(default)]
+    pub whole_word: bool,
+    #[serde(default)]
+    pub include_glob: Option<String>,
+    #[serde(default = "default_content_limit")]
+    pub max_results: u32,
+}
+
+fn default_content_limit() -> u32 {
+    1000
+}
+
+#[tauri::command]
+pub async fn fs_search_content(
+    input: FsSearchContentInput,
+    state: State<'_, AppState>,
+) -> Result<oxyris_ipc::ops::FsSearchContentResult, TauriFsError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let args = oxyris_ipc::ops::FsSearchContentArgs {
+        // `root` is filled per-env by the facade; pass empty here.
+        root: String::new(),
+        query: input.query,
+        case_sensitive: input.case_sensitive,
+        is_regex: input.is_regex,
+        whole_word: input.whole_word,
+        include_glob: input.include_glob,
+        max_results: input.max_results,
+    };
+    let result = fs_infra::search_content(&env, &state.agent_pool, root, args).await?;
+    Ok(result)
 }
 
 // ────── binary read for previews (images, PDFs) ───────────────────────────

@@ -18,6 +18,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ignore.workspace = true
 walkdir.workspace = true
+regex.workspace = true
 base64 = "0.22"
 oxyris-git.workspace = true
 oxyris-ipc.workspace = true

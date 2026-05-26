@@ -8,6 +8,11 @@ import { FilesPanel } from "~/components/FilesPanel.tsx";
 import { GitPanel } from "~/components/GitPanel.tsx";
 import { Modal } from "~/components/Modal.tsx";
 import { QuickFileSearch } from "~/components/QuickFileSearch.tsx";
+import {
+  SearchEverywhere,
+  type SearchTab,
+} from "~/components/SearchEverywhere.tsx";
+import { FindInFiles } from "~/components/FindInFiles.tsx";
 import { PRIMARY_WORKTREE_ID } from "~/ipc/worktree.ts";
 import type { ProjectRow } from "~/ipc/commands.ts";
 import { NewChatModal } from "~/components/NewChatModal.tsx";
@@ -21,6 +26,7 @@ import { TitleBar } from "~/components/TitleBar.tsx";
 import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
+import { createPromptSniffer } from "~/lib/pureTurn.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
 import { sessionStart } from "~/ipc/session.ts";
@@ -58,6 +64,9 @@ export function App() {
   );
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTab, setSearchTab] = useState<SearchTab>("symbols");
+  const [findOpen, setFindOpen] = useState(false);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessionSnapshot = useSessionStore((s) =>
     activeSessionId ? s.snapshots[activeSessionId] : null,
@@ -97,12 +106,21 @@ export function App() {
         3000,
       );
     };
+    // Light the red "wants input" bull when the claude TUI shows its
+    // permission/question menu, so it survives leaving the chat tab (which
+    // unmounts PureClaudePanel and its own detector). No chime here — the
+    // mounted panel owns that, same as the busy clear below stays silent to
+    // avoid a double-ring. Cleared when the user answers (panel's onPtyInput).
+    const sniffer = createPromptSniffer(() => {
+      useSessionStore.getState().setNeedsInput(sid, true);
+    });
     void terminalList({ session_id: sid }).then((rows) => {
       if (cancelled) return;
       const pty = rows.find((r) => r.kind === "claude");
       if (!pty) return;
       // Output only flows during a turn; each chunk pushes the idle clear out.
-      void onTerminalOutput(pty.id, () => {
+      void onTerminalOutput(pty.id, (_seq, data) => {
+        sniffer.feed(data);
         if (useBusyStore.getState().busy[sid]) scheduleClear();
       }).then((fn) => {
         if (cancelled) fn();
@@ -192,15 +210,52 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (matchesKey(e, bindings.new_thread)) {
-        e.preventDefault();
-        // "New thread" asks which project to scope the chat to (the app is no
-        // longer pinned to a single project). With no projects yet, fall back
-        // to creating one — there's nothing to scope to.
-        if (useProjectStore.getState().projects.length > 0) {
-          setNewChatOpen(true);
-        } else {
-          setProjectModalOpen(true);
+        // The default "new thread" combo (Ctrl+Shift+N) doubles as "go to
+        // file" when not in a conversation view — JetBrains-style. New thread
+        // only fires from the chat / multi tabs; on Files/Git/Settings the
+        // same combo opens Search Everywhere on the Files scope.
+        if (tab === "chat" || tab === "multi") {
+          e.preventDefault();
+          // "New thread" asks which project to scope the chat to (the app is no
+          // longer pinned to a single project). With no projects yet, fall back
+          // to creating one — there's nothing to scope to.
+          if (useProjectStore.getState().projects.length > 0) {
+            setNewChatOpen(true);
+          } else {
+            setProjectModalOpen(true);
+          }
+          return;
         }
+        if (activeId) {
+          e.preventDefault();
+          setSearchTab("files");
+          setSearchOpen(true);
+          return;
+        }
+      }
+      // Ctrl+N / Cmd+N → Search Everywhere on the Symbols scope.
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "n" &&
+        activeId
+      ) {
+        e.preventDefault();
+        setSearchTab("symbols");
+        setSearchOpen(true);
+        return;
+      }
+      // Ctrl+Shift+F → Find in Files (full-text search + preview).
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        !e.altKey &&
+        e.key.toLowerCase() === "f" &&
+        activeId
+      ) {
+        e.preventDefault();
+        setFindOpen(true);
         return;
       }
       if (matchesKey(e, bindings.toggle_terminal)) {
@@ -232,7 +287,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [bindings, activeSessionId, activeId, setActiveSession]);
+  }, [bindings, activeSessionId, activeId, setActiveSession, tab]);
 
   const quickWorktreeId =
     sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
@@ -459,6 +514,25 @@ export function App() {
           worktreeId={quickWorktreeId}
           open={quickOpen}
           onClose={() => setQuickOpen(false)}
+        />
+      )}
+
+      {activeId && (
+        <SearchEverywhere
+          projectId={activeId}
+          worktreeId={quickWorktreeId}
+          open={searchOpen}
+          initialTab={searchTab}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
+
+      {activeId && (
+        <FindInFiles
+          projectId={activeId}
+          worktreeId={quickWorktreeId}
+          open={findOpen}
+          onClose={() => setFindOpen(false)}
         />
       )}
 

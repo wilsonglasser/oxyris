@@ -44,6 +44,7 @@ oxyris-procutil.workspace = true
 oxyris-provider.workspace = true
 oxyris-claude.workspace = true
 ignore.workspace = true
+regex.workspace = true
 notify.workspace = true
 rusqlite.workspace = true
 encoding_rs.workspace = true

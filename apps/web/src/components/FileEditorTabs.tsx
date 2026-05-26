@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronLeft, ChevronRight, ExternalLink, Save, X } from "lucide-react";
-import { EditorState, type Extension } from "@codemirror/state";
+import { EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, lineNumbers, keymap } from "@codemirror/view";
 import { islandDark } from "~/lib/codemirror-theme.ts";
 import { languageForPath } from "~/lib/codemirror-language.ts";
@@ -258,6 +258,10 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
   const { t } = useTranslation("files");
   const setBuffer = useFileEditorStore((s) => s.setBuffer);
   const saveTab = useFileEditorStore((s) => s.saveTab);
+  const reveal = useFileEditorStore(
+    (s) => s.reveal[scopeKey(projectId, worktreeId)] ?? null,
+  );
+  const consumeReveal = useFileEditorStore((s) => s.consumeReveal);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const dirty = tab.buffer !== tab.baseContent;
@@ -351,6 +355,25 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
       });
     }
   }, [tab.buffer]);
+
+  // Honor a pending "go to line" request (symbol search / Find in Files):
+  // select the target line and center it. Selecting the line gives a visible
+  // highlight band without needing a custom decoration field.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !showEditor) return;
+    if (!reveal || reveal.relPath !== tab.relPath) return;
+    if (tab.loading) return;
+    const lineNo = Math.min(Math.max(reveal.line, 1), view.state.doc.lines);
+    const lineObj = view.state.doc.line(lineNo);
+    view.dispatch({
+      selection: EditorSelection.range(lineObj.from, lineObj.to),
+      effects: EditorView.scrollIntoView(lineObj.from, { y: "center" }),
+    });
+    view.focus();
+    consumeReveal(projectId, worktreeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal?.nonce, tab.relPath, tab.loading, showEditor]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

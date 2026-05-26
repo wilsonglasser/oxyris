@@ -174,6 +174,52 @@ export function fsDelete(args: {
   });
 }
 
+export function fsCopy(args: {
+  projectId: string;
+  worktreeId: string;
+  fromRel: string;
+  toRel: string;
+}): Promise<void> {
+  return invoke<void>("fs_copy", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      from_rel: args.fromRel,
+      to_rel: args.toRel,
+    },
+  });
+}
+
+/** Resolve a worktree-relative path to its absolute form (for "Copy path"). */
+export function fsAbsPath(args: {
+  projectId: string;
+  worktreeId: string;
+  relPath: string;
+}): Promise<string> {
+  return invoke<string>("fs_abs_path", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      rel_path: args.relPath,
+    },
+  });
+}
+
+/** Reveal a file/folder in the OS file manager (Windows Explorer). */
+export function fsReveal(args: {
+  projectId: string;
+  worktreeId: string;
+  relPath: string;
+}): Promise<void> {
+  return invoke<void>("fs_reveal", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      rel_path: args.relPath,
+    },
+  });
+}
+
 export type FsSearchHit = {
   rel_path: string;
   score: number;
@@ -196,6 +242,52 @@ export function fsSearchPaths(args: {
       worktree_id: args.worktreeId,
       query: args.query,
       limit: args.limit ?? 50,
+    },
+  });
+}
+
+export type FsContentMatch = {
+  /** 1-based line number. */
+  line: number;
+  /** Full matched line text (capped server-side). */
+  text: string;
+};
+
+export type FsContentFileHits = {
+  /** Path relative to the worktree root, forward slashes. */
+  rel_path: string;
+  matches: FsContentMatch[];
+};
+
+export type FsSearchContentResult = {
+  files: FsContentFileHits[];
+  total_matches: number;
+  truncated: boolean;
+};
+
+/** Full-text search across the worktree (Find in Files). Respects .gitignore;
+ *  skips binary/oversized files server-side. Column highlighting is computed
+ *  on the frontend from the same query/flags. */
+export function fsSearchContent(args: {
+  projectId: string;
+  worktreeId: string;
+  query: string;
+  caseSensitive?: boolean;
+  isRegex?: boolean;
+  wholeWord?: boolean;
+  includeGlob?: string | null;
+  maxResults?: number;
+}): Promise<FsSearchContentResult> {
+  return invoke<FsSearchContentResult>("fs_search_content", {
+    input: {
+      project_id: args.projectId,
+      worktree_id: args.worktreeId,
+      query: args.query,
+      case_sensitive: args.caseSensitive ?? false,
+      is_regex: args.isRegex ?? false,
+      whole_word: args.wholeWord ?? false,
+      include_glob: args.includeGlob ?? null,
+      max_results: args.maxResults ?? 1000,
     },
   });
 }

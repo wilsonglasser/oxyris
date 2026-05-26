@@ -50,6 +50,7 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 notify = "8.2"
 walkdir = "2.5"
 ignore = "0.4"
+regex = "1.11"
 portable-pty = "0.9"
 which = "8.0"
 encoding_rs = "0.8"

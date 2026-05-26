@@ -2,6 +2,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import {
+  fsCopy,
   fsCreateDir,
   fsCreateFile,
   fsDelete,
@@ -54,6 +55,14 @@ export type Tab = {
   kind: PreviewKind;
 };
 
+/** A file/folder marked for copy or move via the tree context menu. */
+export type FileClipboard = {
+  projectId: string;
+  worktreeId: string;
+  relPath: string;
+  op: "copy" | "cut";
+} | null;
+
 interface FileEditorState {
   /** scopeKey → relPath → DirNode (expanded folders). */
   trees: Record<string, Record<string, DirNode>>;
@@ -65,6 +74,13 @@ interface FileEditorState {
   tabs: Record<string, Record<string, Tab>>;
   /** scopeKey → currently focused tab relPath (or null). */
   active: Record<string, string | null>;
+  /** scopeKey → pending "scroll the editor to this line" request. The `nonce`
+   *  lets the same (file,line) be re-requested and re-fire the editor effect.
+   *  Never persisted. */
+  reveal: Record<
+    string,
+    { relPath: string; line: number; nonce: number } | null
+  >;
 
   loadDir: (
     projectId: string,
@@ -81,6 +97,16 @@ interface FileEditorState {
     worktreeId: string,
     relPath: string,
   ) => Promise<void>;
+  /** Open a file (if not already) and request the editor scroll to `line`
+   *  (1-based). Used by symbol search and Find-in-Files navigation. */
+  openFileAt: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+    line: number,
+  ) => Promise<void>;
+  /** Clear a consumed reveal request so it won't re-fire on remount. */
+  consumeReveal: (projectId: string, worktreeId: string) => void;
   closeTab: (projectId: string, worktreeId: string, relPath: string) => void;
   closeOthers: (
     projectId: string,
@@ -133,6 +159,18 @@ interface FileEditorState {
   ) => Promise<void>;
   /** Subscribe to backend `fs:changed` events; returns the Tauri unlisten. */
   subscribeFsChanged: (projectIdResolver: () => string | null) => Promise<UnlistenFn>;
+
+  /** File/folder marked for copy or move; null when empty. */
+  clipboard: FileClipboard;
+  setClipboard: (clip: FileClipboard) => void;
+  /** Paste the clipboard entry into `destDir` (worktree-relative, "" = root).
+   *  Copy duplicates, cut moves and clears the clipboard. Resolves name
+   *  collisions by suffixing " copy". */
+  pasteInto: (
+    projectId: string,
+    worktreeId: string,
+    destDir: string,
+  ) => Promise<void>;
 }
 
 /** Best-effort string from a thrown value — Tauri rejections are often plain
@@ -160,6 +198,8 @@ export const useFileEditorStore = create<FileEditorState>()(
   openOrder: {},
   tabs: {},
   active: {},
+  reveal: {},
+  clipboard: null,
 
   loadDir: async (projectId, worktreeId, relPath) => {
     const key = scopeKey(projectId, worktreeId);
@@ -298,6 +338,28 @@ export const useFileEditorStore = create<FileEditorState>()(
       });
     }
   },
+
+  openFileAt: async (projectId, worktreeId, relPath, line) => {
+    await get().openFile(projectId, worktreeId, relPath);
+    const key = scopeKey(projectId, worktreeId);
+    set((state) => ({
+      reveal: {
+        ...state.reveal,
+        [key]: {
+          relPath,
+          line,
+          nonce: (state.reveal[key]?.nonce ?? 0) + 1,
+        },
+      },
+    }));
+  },
+
+  consumeReveal: (projectId, worktreeId) =>
+    set((state) => {
+      const key = scopeKey(projectId, worktreeId);
+      if (!state.reveal[key]) return state;
+      return { reveal: { ...state.reveal, [key]: null } };
+    }),
 
   closeTab: (projectId, worktreeId, relPath) =>
     set((state) => {
@@ -451,6 +513,61 @@ export const useFileEditorStore = create<FileEditorState>()(
     }
   },
 
+  setClipboard: (clip) => set({ clipboard: clip }),
+
+  pasteInto: async (projectId, worktreeId, destDir) => {
+    const clip = get().clipboard;
+    if (!clip) return;
+    const key = scopeKey(projectId, worktreeId);
+    // Block pasting a folder into itself or one of its descendants (would
+    // recurse / corrupt). Compare against the normalized dest path.
+    if (
+      clip.op === "cut" &&
+      (destDir === parentDir(clip.relPath) ||
+        destDir === clip.relPath ||
+        destDir.startsWith(`${clip.relPath}/`))
+    ) {
+      return;
+    }
+    // Make sure we know the destination's contents so we can dodge name
+    // collisions before writing.
+    if (!get().trees[key]?.[destDir]?.children) {
+      await get().loadDir(projectId, worktreeId, destDir);
+    }
+    const siblings = get().trees[key]?.[destDir]?.children ?? [];
+    const taken = new Set(siblings.map((s) => s.name));
+    const targetName = uniqueName(basename(clip.relPath), taken);
+    const target = destDir ? `${destDir}/${targetName}` : targetName;
+
+    if (clip.op === "cut") {
+      await fsRename({ projectId, worktreeId, fromRel: clip.relPath, toRel: target });
+      await get().loadDir(projectId, worktreeId, parentDir(clip.relPath));
+      // Keep an open tab pointing at the moved file.
+      set((state) => {
+        const order = state.openOrder[key] ?? [];
+        if (!order.includes(clip.relPath)) return { clipboard: null };
+        const newOrder = order.map((p) => (p === clip.relPath ? target : p));
+        const tabs = { ...(state.tabs[key] ?? {}) };
+        const oldTab = tabs[clip.relPath];
+        if (oldTab) {
+          tabs[target] = { ...oldTab, relPath: target };
+          delete tabs[clip.relPath];
+        }
+        const active =
+          state.active[key] === clip.relPath ? target : state.active[key];
+        return {
+          openOrder: { ...state.openOrder, [key]: newOrder },
+          tabs: { ...state.tabs, [key]: tabs },
+          active: { ...state.active, [key]: active ?? null },
+          clipboard: null,
+        };
+      });
+    } else {
+      await fsCopy({ projectId, worktreeId, fromRel: clip.relPath, toRel: target });
+    }
+    await get().loadDir(projectId, worktreeId, destDir);
+  },
+
   subscribeFsChanged: async (projectIdResolver) => {
     return await listen<{ worktree_id: string; paths: string[] }>(
       "fs:changed",
@@ -501,4 +618,26 @@ export function joinPath(parent: string, name: string): string {
 function parentDir(relPath: string): string {
   const idx = relPath.lastIndexOf("/");
   return idx >= 0 ? relPath.slice(0, idx) : "";
+}
+
+function basename(relPath: string): string {
+  const idx = relPath.lastIndexOf("/");
+  return idx >= 0 ? relPath.slice(idx + 1) : relPath;
+}
+
+/** Return `name` if free, else suffix " copy" (then " copy 2", …) before the
+ *  extension until it doesn't collide with `taken`. */
+function uniqueName(name: string, taken: Set<string>): string {
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf(".");
+  const hasExt = dot > 0;
+  const stem = hasExt ? name.slice(0, dot) : name;
+  const ext = hasExt ? name.slice(dot) : "";
+  let candidate = `${stem} copy${ext}`;
+  let n = 2;
+  while (taken.has(candidate)) {
+    candidate = `${stem} copy ${n}${ext}`;
+    n += 1;
+  }
+  return candidate;
 }

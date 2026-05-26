@@ -15,10 +15,12 @@ pub mod op_name {
     pub const FS_CREATE_FILE: &str = "fs.create_file";
     pub const FS_CREATE_DIR: &str = "fs.create_dir";
     pub const FS_RENAME: &str = "fs.rename";
+    pub const FS_COPY: &str = "fs.copy";
     pub const FS_DELETE: &str = "fs.delete";
     pub const FS_READ_BYTES: &str = "fs.read_bytes";
     pub const FS_WRITE_BYTES: &str = "fs.write_bytes";
     pub const FS_SEARCH_PATHS: &str = "fs.search_paths";
+    pub const FS_SEARCH_CONTENT: &str = "fs.search_content";
     pub const GIT_LIST_BRANCHES: &str = "git.list_branches";
     pub const GIT_LIST_WORKTREES: &str = "git.list_worktrees";
     pub const GIT_CREATE_WORKTREE: &str = "git.create_worktree";
@@ -212,6 +214,12 @@ pub struct FsRenameArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsCopyArgs {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsDeleteArgs {
     pub path: String,
     /// When true, recursively delete a directory. Required for non-empty
@@ -264,6 +272,60 @@ pub struct FsSearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsSearchPathsResult {
     pub hits: Vec<FsSearchHit>,
+    pub truncated: bool,
+}
+
+// ────── fs.search_content (Find in Files / Ctrl+Shift+F) ───────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsSearchContentArgs {
+    pub root: String,
+    pub query: String,
+    /// Case-sensitive match. Defaults to insensitive.
+    #[serde(default)]
+    pub case_sensitive: bool,
+    /// Treat `query` as a regular expression. When false the query is matched
+    /// literally (still substring, not anchored).
+    #[serde(default)]
+    pub is_regex: bool,
+    /// Require word boundaries around the match.
+    #[serde(default)]
+    pub whole_word: bool,
+    /// Optional comma-separated glob mask (e.g. `*.php,*.rs`). When present,
+    /// only files matching one of the globs are searched.
+    #[serde(default)]
+    pub include_glob: Option<String>,
+    /// Hard cap on total matches across all files.
+    #[serde(default = "default_content_limit")]
+    pub max_results: u32,
+}
+
+fn default_content_limit() -> u32 {
+    1000
+}
+
+/// One matched line. Column highlighting is recomputed on the frontend from
+/// the same query/flags, so we keep the payload to the line text only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsContentMatch {
+    /// 1-based line number.
+    pub line: u32,
+    /// The full line text (capped to a sane length server-side).
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsContentFileHits {
+    /// Path relative to `root`, forward slashes.
+    pub rel_path: String,
+    pub matches: Vec<FsContentMatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsSearchContentResult {
+    pub files: Vec<FsContentFileHits>,
+    pub total_matches: u32,
+    /// True when the match cap or file-walk cap stopped the search early.
     pub truncated: bool,
 }
 
@@ -425,6 +487,10 @@ pub struct GitLogArgs {
     pub limit: u32,
     #[serde(default)]
     pub rev: Option<String>,
+    /// When set, only commits that touched this worktree-relative path are
+    /// returned (file history).
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 fn default_log_limit() -> u32 {

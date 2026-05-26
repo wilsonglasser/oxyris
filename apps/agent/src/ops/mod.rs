@@ -84,6 +84,11 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
             fs::rename(&args.from, &args.to)?;
             Ok(serde_json::Value::Null)
         }
+        op_name::FS_COPY => {
+            let args: oxyris_ipc::ops::FsCopyArgs = from_args(args)?;
+            fs::copy(&args.from, &args.to)?;
+            Ok(serde_json::Value::Null)
+        }
         op_name::FS_DELETE => {
             let args: oxyris_ipc::ops::FsDeleteArgs = from_args(args)?;
             fs::delete(&args.path, args.recursive)?;
@@ -102,6 +107,11 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         op_name::FS_SEARCH_PATHS => {
             let args: oxyris_ipc::ops::FsSearchPathsArgs = from_args(args)?;
             let result = fs::search_paths(&args.root, &args.query, args.limit)?;
+            Ok(serde_json::to_value(result)?)
+        }
+        op_name::FS_SEARCH_CONTENT => {
+            let args: oxyris_ipc::ops::FsSearchContentArgs = from_args(args)?;
+            let result = fs::search_content(&args)?;
             Ok(serde_json::to_value(result)?)
         }
         op_name::GIT_LIST_BRANCHES => git::list_branches(from_args(args)?),

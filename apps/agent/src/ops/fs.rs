@@ -3,9 +3,11 @@ use std::io::Read;
 use std::path::Path;
 
 use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use oxyris_ipc::ops::{
-    FsListDirEntry, FsListDirResult, FsReadBytesResult, FsReadResult, FsSearchHit,
-    FsSearchPathsResult, FsStatResult, FsWalkArgs, FsWalkEvent, FsWalkResult, FsWriteResult,
+    FsContentFileHits, FsContentMatch, FsListDirEntry, FsListDirResult, FsReadBytesResult,
+    FsReadResult, FsSearchContentArgs, FsSearchContentResult, FsSearchHit, FsSearchPathsResult,
+    FsStatResult, FsWalkArgs, FsWalkEvent, FsWalkResult, FsWriteResult,
 };
 
 use crate::ops::OpError;
@@ -179,6 +181,39 @@ pub fn rename(from_str: &str, to_str: &str) -> Result<(), OpError> {
     Ok(())
 }
 
+pub fn copy(from_str: &str, to_str: &str) -> Result<(), OpError> {
+    let from = Path::new(from_str);
+    let to = Path::new(to_str);
+    if !from.exists() {
+        return Err(OpError::NotFound(from_str.to_owned()));
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let md = fs::symlink_metadata(from)?;
+    if md.is_dir() {
+        copy_dir_recursive(from, to)?;
+    } else {
+        fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), OpError> {
+    fs::create_dir_all(to)?;
+    for dent in fs::read_dir(from)? {
+        let dent = dent?;
+        let src = dent.path();
+        let dst = to.join(dent.file_name());
+        if dent.file_type()?.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn delete(path_str: &str, recursive: bool) -> Result<(), OpError> {
     let path = Path::new(path_str);
     if !path.exists() {
@@ -287,6 +322,140 @@ pub fn search_paths(
         truncated = true;
     }
     Ok(FsSearchPathsResult { hits, truncated })
+}
+
+/// Caps shared by the content searcher. Files bigger than `MAX_FILE_BYTES`
+/// or containing NUL bytes (binary) are skipped; lines are truncated to
+/// `MAX_LINE_LEN` so a minified bundle can't blow up the payload.
+const SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const SEARCH_WALK_CAP: u32 = 50_000;
+const SEARCH_MAX_LINE_LEN: usize = 500;
+
+/// Build the line matcher from the search flags. Non-regex queries are
+/// escaped so metacharacters are literal; `whole_word` wraps in `\b…\b`.
+fn build_content_matcher(args: &FsSearchContentArgs) -> Result<regex::Regex, String> {
+    if args.query.is_empty() {
+        return Err("empty query".to_owned());
+    }
+    let base = if args.is_regex {
+        args.query.clone()
+    } else {
+        regex::escape(&args.query)
+    };
+    let pat = if args.whole_word {
+        format!(r"\b(?:{base})\b")
+    } else {
+        base
+    };
+    regex::RegexBuilder::new(&pat)
+        .case_insensitive(!args.case_sensitive)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Truncate `line` to at most `SEARCH_MAX_LINE_LEN` bytes on a char boundary.
+fn cap_line(line: &str) -> String {
+    if line.len() <= SEARCH_MAX_LINE_LEN {
+        return line.to_owned();
+    }
+    let mut end = SEARCH_MAX_LINE_LEN;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].to_owned()
+}
+
+pub fn search_content(args: &FsSearchContentArgs) -> Result<FsSearchContentResult, OpError> {
+    let root = Path::new(&args.root);
+    if !root.exists() {
+        return Err(OpError::NotFound(args.root.clone()));
+    }
+    let re = build_content_matcher(args)
+        .map_err(|e| OpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
+
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .standard_filters(true)
+        .hidden(false)
+        .follow_links(false);
+    if let Some(mask) = args.include_glob.as_deref() {
+        let mut ob = OverrideBuilder::new(root);
+        for pat in mask.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = ob.add(pat);
+        }
+        if let Ok(ov) = ob.build() {
+            builder.overrides(ov);
+        }
+    }
+
+    let max_results = args.max_results.max(1);
+    let mut files: Vec<FsContentFileHits> = Vec::new();
+    let mut total = 0u32;
+    let mut truncated = false;
+    let mut walked = 0u32;
+
+    for dent in builder.build() {
+        let Ok(dent) = dent else { continue };
+        walked += 1;
+        if walked > SEARCH_WALK_CAP {
+            truncated = true;
+            break;
+        }
+        if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(md) = dent.metadata()
+            && md.len() > SEARCH_MAX_FILE_BYTES
+        {
+            continue;
+        }
+        let path = dent.path();
+        let Ok(bytes) = fs::read(path) else { continue };
+        // Heuristic binary sniff: a NUL byte near the head means skip.
+        if bytes.iter().take(8000).any(|&b| b == 0) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+        let mut matches = Vec::new();
+        let mut hit_cap = false;
+        for (i, line) in text.lines().enumerate() {
+            if total >= max_results {
+                hit_cap = true;
+                break;
+            }
+            if re.is_match(line) {
+                matches.push(FsContentMatch {
+                    line: (i as u32) + 1,
+                    text: cap_line(line),
+                });
+                total += 1;
+            }
+        }
+        if !matches.is_empty() {
+            files.push(FsContentFileHits {
+                rel_path: rel_str,
+                matches,
+            });
+        }
+        if hit_cap {
+            truncated = true;
+            break;
+        }
+    }
+
+    files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(FsSearchContentResult {
+        files,
+        total_matches: total,
+        truncated,
+    })
 }
 
 pub async fn walk(request_id: &str, args: FsWalkArgs) -> Result<FsWalkResult, OpError> {
