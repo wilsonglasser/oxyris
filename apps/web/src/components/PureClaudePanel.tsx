@@ -657,9 +657,11 @@ function PureSessionView({
   }, [project.root_path, addAttachment]);
 
   // Image pasted (Ctrl/Cmd+V) directly into the xterm. Save the blob, then
-  // inject the `@path ` ref straight into claude's live prompt — the trailing
-  // space accepts claude's autocomplete and closes the popup (same trick as
-  // `submit`). No chip: the ref lands in the TUI where the user can keep typing.
+  // inject the plain path (trailing space) straight into claude's live prompt.
+  // No leading `@`: claude resolves a bare path on its own, and the `@` only
+  // opened claude's file-autocomplete popup without consuming the injected
+  // path — leaving a stale popup that hijacked the *next* `@` the user typed
+  // (showing `@/home…`). No chip: the path lands in the TUI for further typing.
   const onTerminalImagePaste = useCallback(
     async (file: File) => {
       try {
@@ -671,7 +673,7 @@ function PureSessionView({
           ...(file.name ? { filename: file.name } : {}),
         });
         if (termId) {
-          void terminalWrite({ id: termId, data: `@${info.path} ` }).catch(
+          void terminalWrite({ id: termId, data: `${info.path} ` }).catch(
             () => {},
           );
         }

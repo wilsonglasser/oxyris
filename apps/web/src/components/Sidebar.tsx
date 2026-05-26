@@ -41,7 +41,7 @@ import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 interface Props {
   onNewProject: () => void;
   onOpenSettings: () => void;
-  onNewSession?: () => void;
+  onNewSession?: (project: import("~/ipc/commands.ts").ProjectRow) => void;
   onOpenProjectSettings?: (projectId: string) => void;
 }
 
@@ -384,7 +384,7 @@ export function Sidebar({
                     onNewSession
                       ? () => {
                           setActiveProject(p.id);
-                          onNewSession();
+                          onNewSession(p);
                         }
                       : undefined
                   }

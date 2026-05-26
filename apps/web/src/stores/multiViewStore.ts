@@ -9,10 +9,11 @@ import { create } from "zustand";
 
 const PANES_KEY = "oxyris.multiView.panes";
 const COLS_KEY = "oxyris.multiView.cols";
-/** Rows are capped at 3, so max panes = cols * 3 (9 / 12 / 15). */
+const SIDEBAR_HIDDEN_KEY = "oxyris.multiView.sidebarHidden";
+/** Rows are capped at 3, so max panes = cols * 3 (6 / 9 / 12 / 15). */
 const MAX_ROWS = 3;
 
-export type MvCols = 3 | 4 | 5;
+export type MvCols = 2 | 3 | 4 | 5;
 
 export interface Pane {
   paneId: string;
@@ -29,7 +30,11 @@ export function maxPanes(cols: MvCols): number {
 
 function loadCols(): MvCols {
   const raw = Number(window.localStorage.getItem(COLS_KEY));
-  return raw === 4 || raw === 5 ? raw : 3;
+  return raw === 2 || raw === 4 || raw === 5 ? raw : 3;
+}
+
+function loadSidebarHidden(): boolean {
+  return window.localStorage.getItem(SIDEBAR_HIDDEN_KEY) === "1";
 }
 
 function loadPanes(): Pane[] {
@@ -48,10 +53,13 @@ function loadPanes(): Pane[] {
 interface MultiViewState {
   panes: Pane[];
   cols: MvCols;
+  /** Collapse the app sidebar to hand the grid the full width. */
+  sidebarHidden: boolean;
   addPane: () => void;
   removePane: (paneId: string) => void;
   setPaneSession: (paneId: string, sessionId: string | null) => void;
   setCols: (cols: MvCols) => void;
+  toggleSidebar: () => void;
   /** Replace all panes (used by autofill). */
   setPanes: (sessionIds: string[]) => void;
   /** Reorder: pull `fromPaneId` out and drop it at `toPaneId`'s slot. */
@@ -66,6 +74,7 @@ function persistPanes(panes: Pane[]): Pane[] {
 export const useMultiViewStore = create<MultiViewState>((set) => ({
   panes: loadPanes(),
   cols: loadCols(),
+  sidebarHidden: loadSidebarHidden(),
   addPane: () =>
     set((s) =>
       s.panes.length >= maxPanes(s.cols)
@@ -92,6 +101,12 @@ export const useMultiViewStore = create<MultiViewState>((set) => ({
     window.localStorage.setItem(COLS_KEY, String(cols));
     set({ cols });
   },
+  toggleSidebar: () =>
+    set((s) => {
+      const next = !s.sidebarHidden;
+      window.localStorage.setItem(SIDEBAR_HIDDEN_KEY, next ? "1" : "0");
+      return { sidebarHidden: next };
+    }),
   setPanes: (sessionIds) =>
     set((s) => {
       const capped = sessionIds.slice(0, maxPanes(s.cols));
@@ -117,6 +132,8 @@ export const useMultiViewStore = create<MultiViewState>((set) => ({
 /** Tailwind grid-cols class for the chosen column count (static for JIT). */
 export function gridColsClass(cols: MvCols): string {
   switch (cols) {
+    case 2:
+      return "grid-cols-2";
     case 4:
       return "grid-cols-4";
     case 5:

@@ -181,5 +181,7 @@
   "mv_max_reached": "Maximum panes reached",
   "mv_new_session": "New Claude Code",
   "mv_terminal": "Terminal",
-  "mv_drag_hint": "Drag to reorder"
+  "mv_drag_hint": "Drag to reorder",
+  "mv_hide_sidebar": "Hide sidebar",
+  "mv_show_sidebar": "Show sidebar"
 }

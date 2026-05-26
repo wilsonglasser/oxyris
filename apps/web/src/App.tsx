@@ -20,8 +20,10 @@ import { TerminalPanel } from "~/components/TerminalPanel.tsx";
 import { TitleBar } from "~/components/TitleBar.tsx";
 import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
+import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
+import { sessionStart } from "~/ipc/session.ts";
 import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import { useIndexingStore } from "~/stores/indexingStore.ts";
@@ -33,6 +35,7 @@ import {
   onDockerCleanup,
 } from "~/ipc/env.ts";
 import { useFileEditorStore } from "~/stores/fileEditorStore.ts";
+import { useMultiViewStore } from "~/stores/multiViewStore.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
@@ -61,6 +64,7 @@ export function App() {
   );
   const setActiveSession = useSessionStore((s) => s.setActive);
   const pureMode = useAppSettingsStore((s) => s.pureMode);
+  const multiSidebarHidden = useMultiViewStore((s) => s.sidebarHidden);
 
   // Clear the taskbar unread badge whenever the window regains focus — the
   // badge counts turns that completed while the user was away (see
@@ -242,12 +246,38 @@ export function App() {
     setNewChatOpen(false);
   };
 
-  // "New thread": drop into the empty composer AND jump to the chat tab — the
-  // sidebar is visible from Files/Git too, so starting a thread there must
-  // leave that tab and show the composer.
-  const startNewSession = () => {
-    setActiveSession(null);
+  // "New thread": immediately spin up a session with the default config
+  // (primary worktree → project root, provider's default model, supervised
+  // runtime, auto thinking, no worktree env) and select it. The sidebar is
+  // visible from Files/Git too, so jump to the chat tab as well. On failure
+  // we fall back to the empty composer so the user can still start manually.
+  const startNewSession = (project?: ProjectRow | null) => {
+    const p = project ?? active;
     setTab("chat");
+    if (!p) {
+      setActiveSession(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await sessionStart({
+          project_id: p.id,
+          provider_id: "claude",
+          environment: p.environment,
+          cwd: p.root_path,
+          model: "",
+          thinking: "auto",
+          runtime: "supervised",
+          env_mode: "default",
+          system_prompt: claudeLanguageDirective(
+            useAppSettingsStore.getState().claudeLanguage,
+          ),
+        });
+        setActiveSession(res.session_id);
+      } catch {
+        setActiveSession(null);
+      }
+    })();
   };
 
   const center =
@@ -342,12 +372,14 @@ export function App() {
         )}
         {tab === "multi" && (
           <>
-            <Sidebar
-              onNewProject={() => setProjectModalOpen(true)}
-              onOpenSettings={() => setTab("settings")}
-              onNewSession={startNewSession}
-              onOpenProjectSettings={(id) => setProjectSettingsId(id)}
-            />
+            {!multiSidebarHidden && (
+              <Sidebar
+                onNewProject={() => setProjectModalOpen(true)}
+                onOpenSettings={() => setTab("settings")}
+                onNewSession={startNewSession}
+                onOpenProjectSettings={(id) => setProjectSettingsId(id)}
+              />
+            )}
             <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">
               <MultiViewPanel />
             </main>

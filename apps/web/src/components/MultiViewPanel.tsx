@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   GripVertical,
+  PanelLeft,
+  PanelLeftClose,
   Plus,
   Send,
   Sparkles,
@@ -56,6 +58,8 @@ export function MultiViewPanel() {
   const removePane = useMultiViewStore((s) => s.removePane);
   const setPaneSession = useMultiViewStore((s) => s.setPaneSession);
   const setCols = useMultiViewStore((s) => s.setCols);
+  const sidebarHidden = useMultiViewStore((s) => s.sidebarHidden);
+  const toggleSidebar = useMultiViewStore((s) => s.toggleSidebar);
   const setPanes = useMultiViewStore((s) => s.setPanes);
   const movePane = useMultiViewStore((s) => s.movePane);
 
@@ -202,6 +206,25 @@ export function MultiViewPanel() {
         <div className="flex items-center gap-1.5">
           <button
             type="button"
+            onClick={toggleSidebar}
+            title={sidebarHidden ? t("mv_show_sidebar") : t("mv_hide_sidebar")}
+            aria-label={
+              sidebarHidden ? t("mv_show_sidebar") : t("mv_hide_sidebar")
+            }
+            className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
+              sidebarHidden
+                ? "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+                : "border-neutral-600 bg-neutral-800 text-neutral-100"
+            }`}
+          >
+            {sidebarHidden ? (
+              <PanelLeft className="size-3" strokeWidth={1.75} />
+            ) : (
+              <PanelLeftClose className="size-3" strokeWidth={1.75} />
+            )}
+          </button>
+          <button
+            type="button"
             onClick={() => setTerminalOpen((v) => !v)}
             disabled={!focusedSessionId}
             title={t("mv_terminal")}
@@ -222,7 +245,7 @@ export function MultiViewPanel() {
               onChange={(e) => setCols(Number(e.target.value) as MvCols)}
               className="rounded border border-neutral-700 bg-neutral-950 px-1.5 py-0.5 text-[11px] text-neutral-200 outline-none focus:border-neutral-600"
             >
-              {[3, 4, 5].map((c) => (
+              {[2, 3, 4, 5].map((c) => (
                 <option key={c} value={c} className="bg-neutral-900">
                   {c}
                 </option>
@@ -424,7 +447,7 @@ function PaneCard({
         canDrop && isOver
           ? "ring-2 ring-inset ring-emerald-500/70"
           : isFocused
-            ? "ring-1 ring-inset ring-blue-600/60"
+            ? "ring-2 ring-inset ring-blue-500"
             : ""
       } ${isDragSource ? "opacity-40" : ""}`}
     >
