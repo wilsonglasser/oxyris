@@ -15,6 +15,8 @@
   "unstage": "Unstage",
   "commit": "Commit",
   "amend": "Amend",
+  "amend_last": "Amend last",
+  "amend_and_push": "Amend & Push",
   "commit_and_push": "Commit & Push",
   "committing": "Committing…",
   "pushing": "Pushing…",
@@ -70,5 +72,12 @@
   "rev_compare_with_worktree": "{{id}} → working tree",
   "rev_compare_with_worktree_short": "Compare with working tree",
   "rev_diff_empty": "No file changes between revisions.",
+  "compare_pick_ref": "Compare with branch or tag",
+  "compare_pick_rev": "Compare with revision",
+  "compare_search": "Filter…",
+  "compare_branches": "Branches",
+  "compare_tags": "Tags",
+  "compare_no_refs": "No branches or tags.",
+  "file_history": "History:",
   "close": "Close"
 }

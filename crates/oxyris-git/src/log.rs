@@ -17,7 +17,12 @@ pub struct CommitInfo {
     pub parents: Vec<String>,
 }
 
-pub fn log(repo_path: &str, limit: usize, rev: Option<&str>) -> Result<Vec<CommitInfo>, GitError> {
+pub fn log(
+    repo_path: &str,
+    limit: usize,
+    rev: Option<&str>,
+    path: Option<&str>,
+) -> Result<Vec<CommitInfo>, GitError> {
     let repo = git2::Repository::discover(repo_path)
         .map_err(|_| GitError::NotARepo(repo_path.to_owned()))?;
     let mut walk = repo.revwalk()?;
@@ -36,12 +41,19 @@ pub fn log(repo_path: &str, limit: usize, rev: Option<&str>) -> Result<Vec<Commi
     walk.set_sorting(git2::Sort::TIME)?;
 
     let mut out = Vec::new();
-    for (i, oid) in walk.enumerate() {
-        if i >= limit {
+    for oid in walk {
+        if out.len() >= limit {
             break;
         }
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
+        // File history: keep only commits whose diff against the first parent
+        // touched `path`. The root commit is compared against the empty tree.
+        if let Some(p) = path
+            && !commit_touches_path(&repo, &commit, p)?
+        {
+            continue;
+        }
         let message = commit.message().unwrap_or("").to_owned();
         let summary = commit.summary().unwrap_or("").to_owned();
         let author = commit.author();
@@ -57,4 +69,22 @@ pub fn log(repo_path: &str, limit: usize, rev: Option<&str>) -> Result<Vec<Commi
         });
     }
     Ok(out)
+}
+
+/// True when `commit`'s diff against its first parent (or the empty tree for
+/// a root commit) contains at least one delta under `path`.
+fn commit_touches_path(
+    repo: &git2::Repository,
+    commit: &git2::Commit,
+    path: &str,
+) -> Result<bool, GitError> {
+    let new_tree = commit.tree()?;
+    let old_tree = match commit.parent(0) {
+        Ok(parent) => Some(parent.tree()?),
+        Err(_) => None,
+    };
+    let mut opts = git2::DiffOptions::new();
+    opts.pathspec(path);
+    let diff = repo.diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), Some(&mut opts))?;
+    Ok(diff.deltas().len() > 0)
 }

@@ -270,6 +270,8 @@ export function gitLog(args: {
   worktreeId: string;
   limit?: number;
   rev?: string;
+  /** Restrict to commits touching this worktree-relative path (file history). */
+  path?: string;
 }): Promise<CommitInfo[]> {
   return invoke<CommitInfo[]>("git_log", {
     input: {
@@ -277,6 +279,7 @@ export function gitLog(args: {
       worktree_id: args.worktreeId,
       limit: args.limit ?? 50,
       rev: args.rev,
+      path: args.path,
     },
   });
 }

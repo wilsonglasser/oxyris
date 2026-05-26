@@ -187,7 +187,11 @@ function BranchToolbar({
             type="button"
             onClick={() => void pull(projectId, worktreeId, false)}
             disabled={remote?.running}
-            className="rounded p-1 text-neutral-400 enabled:hover:bg-neutral-800 enabled:hover:text-neutral-100 disabled:opacity-40"
+            className={`rounded p-1 enabled:hover:bg-neutral-800 disabled:opacity-40 ${
+              (status?.ahead_behind?.behind ?? 0) > 0
+                ? "text-sky-400 enabled:hover:text-sky-300"
+                : "text-neutral-400 enabled:hover:text-neutral-100"
+            }`}
             title={t("pull")}
             aria-label={t("pull")}
           >
@@ -197,7 +201,11 @@ function BranchToolbar({
             type="button"
             onClick={() => void push(projectId, worktreeId, false)}
             disabled={remote?.running}
-            className="rounded p-1 text-neutral-400 enabled:hover:bg-neutral-800 enabled:hover:text-neutral-100 disabled:opacity-40"
+            className={`rounded p-1 enabled:hover:bg-neutral-800 disabled:opacity-40 ${
+              (status?.ahead_behind?.ahead ?? 0) > 0
+                ? "text-emerald-400 enabled:hover:text-emerald-300"
+                : "text-neutral-400 enabled:hover:text-neutral-100"
+            }`}
             title={t("push")}
             aria-label={t("push")}
           >
@@ -906,6 +914,9 @@ function CommitBar({
     (s) => s.generatingCommitMsg[worktreeId] ?? false,
   );
   const generateMsg = useGitStore((s) => s.generateCommitMessage);
+  // Amend rewrites the last commit. Kept as a sticky toggle so both Commit and
+  // Commit & Push reuse it, instead of being a third competing button.
+  const [amend, setAmend] = useState(false);
   const stagedCount = useMemo(
     () => status?.entries.filter((e) => e.bucket === "staged").length ?? 0,
     [status],
@@ -918,9 +929,12 @@ function CommitBar({
     [status],
   );
   // With `git commit -a` style auto-staging, the gate is "is there anything
-  // to commit", not "is anything staged".
+  // to commit", not "is anything staged". Amend can edit the last commit with
+  // no working changes (e.g. fixing the message), so it only needs a message.
   const canCommit =
-    changedCount > 0 && message.trim().length > 0 && !committing;
+    message.trim().length > 0 &&
+    !committing &&
+    (amend || changedCount > 0);
 
   return (
     <div className="border-t border-neutral-800 bg-neutral-950 p-2">
@@ -951,43 +965,46 @@ function CommitBar({
         </div>
       )}
       <div className="mt-1 flex items-center justify-between gap-2 text-[11px]">
-        <span className="text-neutral-500">
+        <span className="min-w-0 truncate text-neutral-500">
           {stagedCount > 0
             ? t("staged_count", { count: stagedCount })
             : changedCount > 0
               ? t("changes_will_stage", { count: changedCount })
               : t("staged_count", { count: 0 })}
         </span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => void commit(projectId, worktreeId, true)}
-            disabled={committing || pushing || !message.trim()}
-            className="rounded px-2 py-0.5 text-neutral-400 enabled:hover:bg-neutral-800 enabled:hover:text-neutral-200 disabled:opacity-40"
-          >
-            {t("amend")}
-          </button>
-          <button
-            type="button"
-            onClick={() => void commit(projectId, worktreeId, false)}
-            disabled={!canCommit || pushing}
-            className="rounded bg-emerald-700/80 px-2 py-0.5 text-neutral-100 enabled:hover:bg-emerald-700 disabled:opacity-40"
-          >
-            {committing ? t("committing") : t("commit")}
-          </button>
-          <button
-            type="button"
-            onClick={() => void commitAndPush(projectId, worktreeId)}
-            disabled={!canCommit || pushing}
-            className="rounded bg-emerald-700/80 px-2 py-0.5 text-neutral-100 enabled:hover:bg-emerald-700 disabled:opacity-40"
-          >
-            {committing
-              ? t("committing")
-              : pushing
-                ? t("pushing")
-                : t("commit_and_push")}
-          </button>
-        </div>
+        <label className="flex shrink-0 cursor-pointer items-center gap-1 text-neutral-400 hover:text-neutral-200">
+          <input
+            type="checkbox"
+            checked={amend}
+            onChange={(e) => setAmend(e.target.checked)}
+            className="h-3 w-3 accent-emerald-600"
+          />
+          {t("amend_last")}
+        </label>
+      </div>
+      <div className="mt-1.5 flex items-stretch gap-1">
+        <button
+          type="button"
+          onClick={() => void commit(projectId, worktreeId, amend)}
+          disabled={!canCommit || pushing}
+          className="flex-1 rounded bg-emerald-700/80 px-2 py-1 text-[12px] font-medium text-neutral-100 enabled:hover:bg-emerald-700 disabled:opacity-40"
+        >
+          {committing ? t("committing") : amend ? t("amend") : t("commit")}
+        </button>
+        <button
+          type="button"
+          onClick={() => void commitAndPush(projectId, worktreeId, amend)}
+          disabled={!canCommit || pushing}
+          title={amend ? t("amend_and_push") : t("commit_and_push")}
+          aria-label={amend ? t("amend_and_push") : t("commit_and_push")}
+          className="flex shrink-0 items-center justify-center gap-1 rounded bg-emerald-700/80 px-2.5 text-neutral-100 enabled:hover:bg-emerald-700 disabled:opacity-40"
+        >
+          {pushing ? (
+            <span className="text-[11px]">{t("pushing")}</span>
+          ) : (
+            <ArrowUpToLine size={14} />
+          )}
+        </button>
       </div>
     </div>
   );

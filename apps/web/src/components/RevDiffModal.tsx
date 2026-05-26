@@ -14,6 +14,10 @@ interface Props {
   /** Title shown in the modal header — caller decides how to render the
    *  comparison ("a → b", "abc1234 → HEAD", etc.). */
   title: string;
+  /** When set, the diff is narrowed to this single worktree-relative path
+   *  (the file the user right-clicked). Used by the file-tree "Compare with…"
+   *  / "Show diff" actions so they don't show the whole-tree diff. */
+  pathFilter?: string;
   open: boolean;
   onClose: () => void;
 }
@@ -29,6 +33,7 @@ export function RevDiffModal({
   from,
   to,
   title,
+  pathFilter,
   open,
   onClose,
 }: Props) {
@@ -46,8 +51,13 @@ export function RevDiffModal({
     void gitDiffRevs({ projectId, worktreeId, from, to })
       .then((res) => {
         if (cancelled) return;
-        setFiles(res);
-        setSelected(res[0]?.path ?? null);
+        const filtered = pathFilter
+          ? res.filter(
+              (f) => f.path === pathFilter || f.old_path === pathFilter,
+            )
+          : res;
+        setFiles(filtered);
+        setSelected(filtered[0]?.path ?? null);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));

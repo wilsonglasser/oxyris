@@ -152,7 +152,12 @@ pub fn branch_delete(args: GitBranchDeleteArgs) -> Result<serde_json::Value, OpE
 }
 
 pub fn log(args: GitLogArgs) -> Result<serde_json::Value, OpError> {
-    let entries = git_log::log(&args.repo_path, args.limit as usize, args.rev.as_deref())?;
+    let entries = git_log::log(
+        &args.repo_path,
+        args.limit as usize,
+        args.rev.as_deref(),
+        args.path.as_deref(),
+    )?;
     Ok(serde_json::to_value(entries)?)
 }
 

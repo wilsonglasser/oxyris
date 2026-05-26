@@ -273,6 +273,10 @@ pub struct GitLogInput {
     pub limit: u32,
     #[serde(default)]
     pub rev: Option<String>,
+    /// When set, restricts the log to commits touching this worktree-relative
+    /// path (file history).
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 fn default_limit() -> u32 {
@@ -285,7 +289,15 @@ pub async fn git_log(
     state: State<'_, AppState>,
 ) -> Result<Vec<CommitInfo>, TauriGitError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    Ok(git::log(&env, &state.agent_pool, &root, input.limit, input.rev).await?)
+    Ok(git::log(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.limit,
+        input.rev,
+        input.path,
+    )
+    .await?)
 }
 
 #[derive(Debug, Deserialize)]

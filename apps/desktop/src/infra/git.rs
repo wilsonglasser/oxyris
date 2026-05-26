@@ -574,15 +574,19 @@ pub async fn log(
     repo_path: &str,
     limit: u32,
     rev: Option<String>,
+    path: Option<String>,
 ) -> Result<Vec<CommitInfo>, GitError> {
     match env {
         Environment::Windows => {
             let repo = repo_path.to_owned();
             let r = rev.clone();
-            tokio::task::spawn_blocking(move || git_log::log(&repo, limit as usize, r.as_deref()))
-                .await
-                .map_err(|e| GitError::Git(format!("join: {e}")))?
-                .map_err(Into::into)
+            let p = path.clone();
+            tokio::task::spawn_blocking(move || {
+                git_log::log(&repo, limit as usize, r.as_deref(), p.as_deref())
+            })
+            .await
+            .map_err(|e| GitError::Git(format!("join: {e}")))?
+            .map_err(Into::into)
         }
         Environment::Wsl { distro } => {
             let value = agent_pool
@@ -593,6 +597,7 @@ pub async fn log(
                         repo_path: repo_path.to_owned(),
                         limit,
                         rev,
+                        path,
                     })
                     .map_err(|e| GitError::Agent(e.to_string()))?,
                 )
