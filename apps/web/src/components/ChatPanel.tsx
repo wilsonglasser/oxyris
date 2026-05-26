@@ -128,6 +128,7 @@ export function ChatPanel({
   const setActive = useSessionStore((s) => s.setActive);
   const hydrate = useSessionStore((s) => s.hydrate);
   const applyEvent = useSessionStore((s) => s.applyEvent);
+  const setNeedsInput = useSessionStore((s) => s.setNeedsInput);
   const setBusy = useBusyStore((s) => s.setBusy);
 
   const [model, setModel] = useState<string>("");
@@ -260,7 +261,11 @@ export function ChatPanel({
       applyEvent(payload);
       // Drive the sidebar's pulsing "busy" dot for the active thread.
       const kind = payload.event.kind;
-      if (kind === "TurnStarted") setBusy(activeId, true);
+      if (kind === "TurnStarted") {
+        // Working again → blue; clears any "wants input" (red) flag.
+        setBusy(activeId, true);
+        setNeedsInput(activeId, false);
+      }
       // Turn is "yours again" on any terminal outcome — chime if the user
       // has the app in the background so they know to come back.
       const terminal =
@@ -268,13 +273,16 @@ export function ChatPanel({
         kind === "TurnFailed" ||
         kind === "TurnInterrupted";
       if (terminal) {
+        // blue → orange: only chime if it was actually working.
+        const wasBusy = useBusyStore.getState().busy[activeId];
         setBusy(activeId, false);
         // Any pending approval for this turn is moot once it ends.
         setApprovals([]);
-        if (shouldNotify()) {
-        playTurnCompleteChime();
-        bumpBadge();
-      }
+        setNeedsInput(activeId, false);
+        if (wasBusy && shouldNotify()) {
+          playTurnCompleteChime();
+          bumpBadge();
+        }
       }
     }).then((fn) => {
       if (cancelled) fn();
@@ -284,7 +292,7 @@ export function ChatPanel({
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [activeId, applyEvent, setBusy]);
+  }, [activeId, applyEvent, setBusy, setNeedsInput]);
 
   // Subscribe to the active session's tool-approval prompts. A pending prompt
   // means the turn is paused waiting on the user. Cleared on session switch.
@@ -295,7 +303,9 @@ export function ChatPanel({
     let unlisten: (() => void) | null = null;
     void onSessionApproval(activeId, (req) => {
       if (cancelled) return;
-      // Chime when the window is backgrounded — a prompt needs the user.
+      // blue → red: Claude wants an input. Light the red bull and chime when
+      // the window is backgrounded so the user knows to come decide.
+      setNeedsInput(activeId, true);
       if (shouldNotify()) {
         playTurnCompleteChime();
         bumpBadge();
@@ -311,11 +321,23 @@ export function ChatPanel({
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [activeId]);
+  }, [activeId, setNeedsInput]);
+
+  // Answering the last pending prompt clears the red bull. The turn resumes,
+  // so `busy` stays true and the dot reads blue again (red → blue).
+  const clearInputIfDrained = useCallback(
+    (req: ToolApprovalRequest) =>
+      setApprovals((prev) => {
+        const next = prev.filter((p) => p.request_id !== req.request_id);
+        if (next.length === 0) setNeedsInput(req.session_id, false);
+        return next;
+      }),
+    [setNeedsInput],
+  );
 
   const onApprove = useCallback(
     async (req: ToolApprovalRequest) => {
-      setApprovals((prev) => prev.filter((p) => p.request_id !== req.request_id));
+      clearInputIfDrained(req);
       try {
         await sessionApproveTool({
           session_id: req.session_id,
@@ -325,12 +347,12 @@ export function ChatPanel({
         setError(extractError(e));
       }
     },
-    [],
+    [clearInputIfDrained],
   );
 
   const onReject = useCallback(
     async (req: ToolApprovalRequest) => {
-      setApprovals((prev) => prev.filter((p) => p.request_id !== req.request_id));
+      clearInputIfDrained(req);
       try {
         await sessionRejectTool({
           session_id: req.session_id,
@@ -340,7 +362,7 @@ export function ChatPanel({
         setError(extractError(e));
       }
     },
-    [],
+    [clearInputIfDrained],
   );
 
   const activeSnapshot = activeId ? snapshots[activeId] : undefined;

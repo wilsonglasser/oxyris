@@ -37,6 +37,11 @@ import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
+import {
+  playTurnCompleteChime,
+  shouldNotify,
+} from "~/lib/notificationSound.ts";
+import { bumpBadge } from "~/lib/taskbarBadge.ts";
 
 interface Props {
   onNewProject: () => void;
@@ -63,6 +68,7 @@ export function Sidebar({
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const setActiveSession = useSessionStore((s) => s.setActive);
   const markAttention = useSessionStore((s) => s.markAttention);
+  const setNeedsInput = useSessionStore((s) => s.setNeedsInput);
   const setBusy = useBusyStore((s) => s.setBusy);
 
   const [query, setQuery] = useState("");
@@ -211,7 +217,9 @@ export function Sidebar({
           return;
         }
         if (kind === "TurnStarted") {
+          // Working again → blue. Any prior "wants input" (red) is moot.
           setBusy(s.id, true);
+          setNeedsInput(s.id, false);
           return;
         }
         if (
@@ -220,17 +228,30 @@ export function Sidebar({
           kind === "TurnInterrupted" ||
           kind === "SessionErrored"
         ) {
+          // blue → orange: chime only when this thread was actually working
+          // and the window is unfocused (the user can't see the bull).
+          const wasBusy = useBusyStore.getState().busy[s.id];
           setBusy(s.id, false);
+          setNeedsInput(s.id, false);
           markAttention(s.id);
           void refreshProjectSessions(s.project_id);
+          if (wasBusy && shouldNotify()) {
+            playTurnCompleteChime();
+            bumpBadge();
+          }
         }
       }).then((fn) => {
         if (cancelled) fn();
         else unlistens.push(fn);
       });
-      // A pending tool-approval is the strongest "needs you" signal.
+      // A pending tool-approval is the strongest "needs you" signal → red bull.
+      // blue → red: chime when backgrounded so the user knows to come decide.
       void onSessionApproval(s.id, () => {
-        markAttention(s.id);
+        setNeedsInput(s.id, true);
+        if (shouldNotify()) {
+          playTurnCompleteChime();
+          bumpBadge();
+        }
       }).then((fn) => {
         if (cancelled) fn();
         else unlistens.push(fn);
@@ -240,7 +261,7 @@ export function Sidebar({
       cancelled = true;
       for (const fn of unlistens) fn();
     };
-  }, [watchKey, markAttention, setBusy, refreshProjectSessions]);
+  }, [watchKey, markAttention, setNeedsInput, setBusy, refreshProjectSessions]);
 
   // Auto-expand the active project so the user always sees its threads.
   useEffect(() => {
@@ -625,6 +646,8 @@ function SessionEntry({
   // Orange highlight when this background thread finished/errored and the user
   // hasn't opened it yet. Active threads are being viewed, so never flagged.
   const needsAttention = useSessionStore((s) => !!s.attention[session.id]);
+  // Red — Claude is paused waiting on a tool-approval input.
+  const needsInput = useSessionStore((s) => !!s.needsInput[session.id]);
   const busy = useBusyStore((s) => !!s.busy[session.id]);
 
   const onRename = async (e: React.MouseEvent) => {
@@ -676,18 +699,22 @@ function SessionEntry({
   return (
     <li>
       <div
-        className={`group flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-[11px] transition ${
+        className={`group relative flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-[11px] transition ${
           isActive
             ? "bg-[#2e436e]/40 text-neutral-100"
-            : needsAttention
-              ? "bg-orange-500/20 text-orange-100 hover:bg-orange-500/30"
-              : "text-neutral-400 hover:bg-neutral-800/40"
+            : needsInput
+              ? "bg-red-500/15 text-red-100 hover:bg-red-500/25"
+              : needsAttention
+                ? "bg-orange-500/20 text-orange-100 hover:bg-orange-500/30"
+                : "text-neutral-400 hover:bg-neutral-800/40"
         }`}
       >
         <StatusDot
           status={session.status}
           attention={needsAttention}
+          needsInput={needsInput}
           busy={busy}
+          lastActivityAt={session.last_activity_at}
         />
         <button
           type="button"
@@ -704,7 +731,7 @@ function SessionEntry({
             {subtitle}
           </span>
         </button>
-        <div className="flex items-center gap-0.5">
+        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 pl-3">
           <button
             type="button"
             onClick={(e) => void onTogglePin(e)}
@@ -752,36 +779,59 @@ function SessionEntry({
   );
 }
 
+// "Talked recently" window for the green bull — activity within the last hour.
+const RECENT_MS = 60 * 60 * 1000;
+
+function isRecent(iso: string): boolean {
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) && Date.now() - t < RECENT_MS;
+}
+
+/**
+ * The bull. Four meanings, highest priority first:
+ *   red    — Claude wants you to pick an input (paused on approval), or errored.
+ *   blue   — working: a turn is in flight (pulses).
+ *   orange — Claude finished a background thread you haven't opened yet.
+ *   green  — talked recently (within the last hour).
+ *   gray   — idle / stale.
+ */
 function StatusDot({
   status,
   attention,
+  needsInput,
   busy,
+  lastActivityAt,
 }: {
   status: string;
   attention?: boolean;
+  needsInput?: boolean;
   busy?: boolean;
+  lastActivityAt: string;
 }) {
-  // A turn in flight outranks everything else — pulse it amber so an
-  // in-progress thread reads as "working" at a glance.
+  // Needs you → red. Outranks everything: a paused turn can still be "busy".
+  if (needsInput || status === "errored") {
+    return (
+      <span className="inline-block size-1.5 shrink-0 rounded-full bg-red-500" />
+    );
+  }
+  // A turn in flight → blue, pulsing, so "working" reads at a glance.
   if (busy) {
     return (
       <span className="relative inline-flex size-1.5 shrink-0">
-        <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-75" />
-        <span className="relative inline-flex size-1.5 rounded-full bg-amber-400" />
+        <span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-400 opacity-75" />
+        <span className="relative inline-flex size-1.5 rounded-full bg-sky-400" />
       </span>
     );
   }
-  const color = attention
-    ? "bg-orange-400"
-    : status === "running"
-      ? "bg-emerald-400"
-      : status === "errored"
-        ? "bg-red-400"
-        : "bg-neutral-600";
+  // Finished while you were away → orange until you open it.
+  if (attention) {
+    return (
+      <span className="inline-block size-1.5 shrink-0 rounded-full bg-orange-400" />
+    );
+  }
+  const color = isRecent(lastActivityAt) ? "bg-emerald-400" : "bg-neutral-600";
   return (
-    <span
-      className={`inline-block size-1.5 shrink-0 rounded-full ${color}`}
-    />
+    <span className={`inline-block size-1.5 shrink-0 rounded-full ${color}`} />
   );
 }
 

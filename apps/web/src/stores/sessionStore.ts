@@ -14,9 +14,18 @@ interface SessionStoreState {
    * flagged so the sidebar can highlight them until the user opens them.
    */
   attention: Record<string, boolean>;
+  /**
+   * Threads paused on a tool-approval prompt — Claude wants the user to pick
+   * an input. Surfaced as the red bull. Unlike {@link attention}, this is set
+   * for the active thread too (the dot must read red while you decide) and is
+   * *not* cleared by opening the thread — only by answering or the turn ending.
+   */
+  needsInput: Record<string, boolean>;
   setActive: (id: string | null) => void;
   /** Flag a background thread as needing attention (no-op for the active one). */
   markAttention: (id: string) => void;
+  /** Set/clear the "Claude wants your input" (red) flag for a thread. */
+  setNeedsInput: (id: string, on: boolean) => void;
   hydrate: (snapshot: SessionSnapshot) => void;
   applyEvent: (ev: EmittedSessionEvent) => void;
   clear: (id: string) => void;
@@ -27,6 +36,7 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   snapshots: {},
   activeSessionId: null,
   attention: {},
+  needsInput: {},
 
   setActive: (id) =>
     set((state) => {
@@ -47,6 +57,14 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
         : { attention: { ...state.attention, [id]: true } },
     ),
 
+  setNeedsInput: (id, on) =>
+    set((state) => {
+      if (!!state.needsInput[id] === on) return {};
+      if (on) return { needsInput: { ...state.needsInput, [id]: true } };
+      const { [id]: _drop, ...rest } = state.needsInput;
+      return { needsInput: rest };
+    }),
+
   hydrate: (snapshot) =>
     set((state) => ({
       snapshots: { ...state.snapshots, [snapshot.id]: snapshot },
@@ -62,9 +80,11 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
     set((state) => {
       const { [id]: _removed, ...rest } = state.snapshots;
       const { [id]: _seen, ...attRest } = state.attention;
+      const { [id]: _input, ...inputRest } = state.needsInput;
       return {
         snapshots: rest,
         attention: attRest,
+        needsInput: inputRest,
         activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
       };
     }),
