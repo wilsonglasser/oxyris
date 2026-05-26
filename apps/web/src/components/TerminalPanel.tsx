@@ -362,10 +362,22 @@ export function TerminalView({
       },
     });
 
+    // Route a pasted image to the host exactly once. Both the Ctrl+Shift+V
+    // keydown (async clipboard read, below) and `onPasteCapture` (native paste)
+    // can fire for the same paste, so debounce: the second call within the
+    // window is dropped.
+    let lastImageRoute = 0;
+    const routeImage = (file: File) => {
+      const now = Date.now();
+      if (now - lastImageRoute < 500) return;
+      lastImageRoute = now;
+      void onImagePasteRef.current?.(file);
+    };
+
     // Ctrl+C in a terminal is SIGINT (interrupts claude), so it can't be copy.
     // Bind the conventional terminal shortcuts instead: Ctrl+Shift+C copies the
-    // selection; Ctrl+Shift+V pastes. Returning false stops xterm from
-    // forwarding the keystroke to the PTY.
+    // selection; Ctrl+Shift+V pastes (image → @path ref, else text). Returning
+    // false stops xterm from forwarding the keystroke to the PTY.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       // Zoom: Ctrl +/- steps the shared font size, Ctrl+0 resets. Shift is
@@ -394,12 +406,29 @@ export function TerminalView({
         return false;
       }
       if (e.code === "KeyV") {
-        // Don't paste here — only block the keystroke from reaching the PTY.
-        // The browser still fires a native `paste` event on xterm's textarea,
-        // where `onPasteCapture` routes images to the host and lets xterm paste
-        // text exactly once. The old code also called a manual paste here and
-        // preventDefault'd, but preventDefault does NOT reliably suppress that
-        // native paste in WebView2 — so the text landed twice (the 2× bug).
+        // Images only. A screenshot lives on the clipboard as a bitmap, which
+        // WebView2's native `paste` event does NOT expose as a file item — only
+        // the async Clipboard API reconstitutes it as image/png — so read it
+        // here and route to the host (deduped via `routeImage` against any
+        // native paste that also catches a real image *file*). We deliberately
+        // do NOT write text here: the native paste lets xterm paste text once.
+        // The old code wrote text too and the keydown preventDefault does NOT
+        // reliably suppress the native paste in WebView2, so text landed twice.
+        void (async () => {
+          try {
+            if (!navigator.clipboard.read || !onImagePasteRef.current) return;
+            for (const ci of await navigator.clipboard.read()) {
+              const imgType = ci.types.find((tp) => tp.startsWith("image/"));
+              if (!imgType) continue;
+              const blob = await ci.getType(imgType);
+              const ext = imgType.split("/")[1] || "png";
+              routeImage(new File([blob], `pasted.${ext}`, { type: imgType }));
+              return;
+            }
+          } catch {
+            /* no image / no permission — native paste handles text */
+          }
+        })();
         return false;
       }
       return true;
@@ -419,7 +448,7 @@ export function TerminalView({
           if (!file) continue;
           e.preventDefault();
           e.stopPropagation();
-          void onImagePasteRef.current?.(file);
+          routeImage(file);
           return;
         }
       }
