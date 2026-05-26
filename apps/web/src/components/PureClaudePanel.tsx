@@ -37,6 +37,7 @@ import {
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
+import { PURE_PROMPT_RE, stripAnsi } from "~/lib/pureTurn.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import {
   toSpeechLocale,
@@ -46,39 +47,6 @@ import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import { TerminalView } from "~/components/TerminalPanel.tsx";
 import { FileViewerModal } from "~/components/FileViewerModal.tsx";
-
-// Strip ANSI escape sequences (CSI + OSC) from raw PTY bytes so prompt text
-// matches across redraws. Char-code based to keep raw control bytes out of
-// source. ESC = 27, BEL = 7.
-function stripAnsi(s: string): string {
-  let out = "";
-  for (let i = 0; i < s.length; i += 1) {
-    if (s.charCodeAt(i) !== 27) {
-      out += s[i];
-      continue;
-    }
-    const next = s[i + 1];
-    if (next === "[") {
-      // CSI: skip until a final byte in @–~ (0x40–0x7e).
-      i += 2;
-      while (i < s.length) {
-        const c = s.charCodeAt(i);
-        if (c >= 0x40 && c <= 0x7e) break;
-        i += 1;
-      }
-    } else if (next === "]") {
-      // OSC: skip until BEL or ESC (start of the ST terminator).
-      i += 2;
-      while (i < s.length && s.charCodeAt(i) !== 7 && s.charCodeAt(i) !== 27) {
-        i += 1;
-      }
-    } else {
-      // Lone ESC or a 2-byte escape — drop ESC and the following byte.
-      i += 1;
-    }
-  }
-  return out;
-}
 
 /**
  * Turn a path token clicked in the terminal into a worktree-relative path the
@@ -369,6 +337,7 @@ function PureSessionView({
   // "Windows cannot find …" error). Fall back to the prop only if the snapshot
   // hasn't hydrated yet.
   const setBusy = useBusyStore((s) => s.setBusy);
+  const setNeedsInput = useSessionStore((s) => s.setNeedsInput);
   const openProjectId = useSessionStore(
     (s) => s.snapshots[sessionId]?.project_id ?? project.id,
   );
@@ -391,32 +360,37 @@ function PureSessionView({
   const idleTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(idleTimerRef.current), []);
 
-  // Permission / input-request chime. The claude TUI renders a numbered menu
-  // ("Do you want to proceed?" + "❯ 1. Yes" / "…don't ask again") whenever it
-  // needs the user to approve a tool or answer a question. We sniff the raw PTY
-  // bytes for that menu and ring once, immediately, when the window is
-  // unfocused — separate from the done-idle chime below. A rolling, ANSI-
-  // stripped tail handles the prompt being split across output chunks.
-  const PROMPT_RE =
-    /(do you want to (proceed|make this edit|create|run|continue))|(❯\s*\d+\.\s*yes)|(yes, and don'?t ask again)|(no, and tell claude)/i;
+  // Permission / input-request detection. The claude TUI renders a numbered
+  // menu ("Do you want to proceed?" + "❯ 1. Yes" / "…don't ask again") whenever
+  // it needs the user to approve a tool or answer a question — the pure-mode
+  // equivalent of a tool-approval prompt. Sniffing the raw PTY for that menu
+  // drives the red "wants input" bull (via setNeedsInput) and rings once,
+  // immediately, when the window is unfocused. A rolling, ANSI-stripped tail
+  // handles the prompt being split across output chunks.
   const outTailRef = useRef("");
   const taRef = useRef<HTMLTextAreaElement | null>(null);
-  // Latched true while a prompt is on screen so we chime once per request, not
+  // Latched true while a prompt is on screen so we fire once per request, not
   // once per redraw. Cleared when the user submits a response (see onPtyInput).
   const promptOpenRef = useRef(false);
 
-  const detectPrompt = useCallback((data: string) => {
-    const stripped = stripAnsi(data);
-    const tail = (outTailRef.current + stripped).slice(-2000);
-    outTailRef.current = tail;
-    if (PROMPT_RE.test(tail) && !promptOpenRef.current) {
-      promptOpenRef.current = true;
-      if (shouldNotify()) {
-        playTurnCompleteChime();
-        bumpBadge();
+  const detectPrompt = useCallback(
+    (data: string) => {
+      const stripped = stripAnsi(data);
+      const tail = (outTailRef.current + stripped).slice(-2000);
+      outTailRef.current = tail;
+      if (PURE_PROMPT_RE.test(tail) && !promptOpenRef.current) {
+        promptOpenRef.current = true;
+        // Light the red bull: this thread wants an input. Outranks the blue
+        // busy pulse (see StatusDot). Cleared when the user answers.
+        setNeedsInput(sessionId, true);
+        if (shouldNotify()) {
+          playTurnCompleteChime();
+          bumpBadge();
+        }
       }
-    }
-  }, []);
+    },
+    [sessionId, setNeedsInput],
+  );
 
   // Pure sessions get no auto-title from a turn-event stream. Instead we read
   // claude's own transcript (it's written under our `--session-id`) once a turn
@@ -445,12 +419,13 @@ function PureSessionView({
     if (data.includes("\r")) {
       armedRef.current = true;
       setBusy(sessionId, true); // typing Enter into the TUI starts a turn
-      // The user just answered a prompt (or started a turn): release the latch
-      // and reset the sniff buffer so the next request can chime again.
+      // The user just answered a prompt (or started a turn): drop the red bull,
+      // release the latch, and reset the sniff buffer so the next request fires.
+      setNeedsInput(sessionId, false);
       promptOpenRef.current = false;
       outTailRef.current = "";
     }
-  }, [sessionId, setBusy]);
+  }, [sessionId, setBusy, setNeedsInput]);
 
   const onPtyOutput = useCallback(
     (data: string) => {

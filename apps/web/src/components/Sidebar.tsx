@@ -42,6 +42,15 @@ import {
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
+import { createPromptSniffer } from "~/lib/pureTurn.ts";
+import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
+
+// Pure threads have no turn-event stream, so a background pure thread's bull is
+// driven off its claude PTY: a live turn is a stretch of output (the TUI
+// spinner), and this much silence after it declares the turn settled. Slightly
+// longer than the in-view panel's 2500ms so the two don't race on the active
+// thread during the hand-off when you open it.
+const PURE_IDLE_DONE_MS = 3000;
 
 interface Props {
   onNewProject: () => void;
@@ -255,6 +264,51 @@ export function Sidebar({
       }).then((fn) => {
         if (cancelled) fn();
         else unlistens.push(fn);
+      });
+      // Pure threads emit none of the events above — drive their bull off the
+      // claude PTY. Output flowing = a turn is live (blue); the TUI's
+      // permission/question menu = red; a quiet finish with no menu on screen =
+      // orange (it finished while you were on another thread). The idle TUI is
+      // silent, so output-presence is a sound "working" signal.
+      const sniffer = createPromptSniffer(() => {
+        setNeedsInput(s.id, true);
+        if (shouldNotify()) {
+          playTurnCompleteChime();
+          bumpBadge();
+        }
+      });
+      let armed = false;
+      let idleTimer: number | undefined;
+      void terminalList({ session_id: s.id }).then((rows) => {
+        if (cancelled) return;
+        const pty = rows.find((r) => r.kind === "claude");
+        if (!pty) return; // structured session — handled by the event path above
+        void onTerminalOutput(pty.id, (_seq, data) => {
+          sniffer.feed(data);
+          if (!armed) {
+            armed = true;
+            setBusy(s.id, true);
+          }
+          window.clearTimeout(idleTimer);
+          idleTimer = window.setTimeout(() => {
+            armed = false;
+            setBusy(s.id, false);
+            if (!sniffer.open) {
+              markAttention(s.id);
+              if (shouldNotify()) {
+                playTurnCompleteChime();
+                bumpBadge();
+              }
+            }
+          }, PURE_IDLE_DONE_MS);
+        }).then((fn) => {
+          if (cancelled) {
+            fn();
+            return;
+          }
+          unlistens.push(fn);
+          unlistens.push(() => window.clearTimeout(idleTimer));
+        });
       });
     }
     return () => {
