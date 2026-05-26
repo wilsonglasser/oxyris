@@ -51,9 +51,10 @@ export async function actionRun(input: {
   return invoke("action_run", { input });
 }
 
+export type ActionStreamChunk = { stream: "stdout" | "stderr"; text: string };
+
 export type ActionStreamLine =
-  | { kind: "stdout"; text: string }
-  | { kind: "stderr"; text: string }
+  | { kind: "batch"; lines: ActionStreamChunk[] }
   | { kind: "exit"; code: number; success: boolean }
   | { kind: "error"; message: string };
 

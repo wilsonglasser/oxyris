@@ -87,8 +87,13 @@ export const useActionRunsStore = create<State>((set, get) => ({
     // modal is minimized. Drops cleanly on `killRun`.
     const unlisten = await listenActionOutput(run_id, (line) => {
       mutateInstance(set, get, actionId, run_id, (inst) => {
-        if (line.kind === "stdout" || line.kind === "stderr") {
-          inst.lines.push(line);
+        if (line.kind === "batch") {
+          // Backend coalesces output into ~50ms batches so a chatty process
+          // like `cargo run` triggers one store update per batch instead of
+          // one per line (which froze the whole app).
+          for (const chunk of line.lines) {
+            inst.lines.push({ kind: chunk.stream, text: chunk.text });
+          }
           // Cap at 5000 lines per instance so a chatty process doesn't
           // gobble RAM forever; oldest go first.
           if (inst.lines.length > 5000) {

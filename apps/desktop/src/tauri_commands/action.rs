@@ -185,13 +185,36 @@ pub struct ActionRunOutput {
     pub run_id: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionStreamChunk {
+    pub stream: ActionStream,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionStreamLine {
-    Stdout { text: String },
-    Stderr { text: String },
-    Exit { code: i32, success: bool },
-    Error { message: String },
+    /// Coalesced batch of output lines. Readers feed individual lines into a
+    /// channel; a flusher drains them every ~50ms (or on a 512-line burst) and
+    /// emits a single event. Without this, `cargo run` floods the WebView IPC
+    /// with thousands of events/sec and freezes the whole app.
+    Batch {
+        lines: Vec<ActionStreamChunk>,
+    },
+    Exit {
+        code: i32,
+        success: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[tauri::command]
@@ -241,6 +264,12 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
     use oxyris_procutil::HideConsole;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, interval};
+
+    /// Flush when a burst piles this many lines before the timer fires, so a
+    /// single emitted payload stays bounded.
+    const MAX_BATCH: usize = 512;
 
     tauri::async_runtime::spawn(async move {
         let event_name = format!("action:output:{run_id}");
@@ -284,26 +313,73 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
         };
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+
+        // Readers push individual lines into one channel; the flusher coalesces
+        // them into batched events. `tx` is dropped once both readers finish so
+        // the flusher sees the channel close and drains the remainder.
+        let (tx, mut rx) = mpsc::unbounded_channel::<ActionStreamChunk>();
+
         let stdout_task = stdout.map(|s| {
-            let app = app.clone();
-            let event_name = event_name.clone();
+            let tx = tx.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(s).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = app.emit(&event_name, ActionStreamLine::Stdout { text: line });
+                    let _ = tx.send(ActionStreamChunk {
+                        stream: ActionStream::Stdout,
+                        text: line,
+                    });
                 }
             })
         });
         let stderr_task = stderr.map(|s| {
-            let app = app.clone();
-            let event_name = event_name.clone();
+            let tx = tx.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(s).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = app.emit(&event_name, ActionStreamLine::Stderr { text: line });
+                    let _ = tx.send(ActionStreamChunk {
+                        stream: ActionStream::Stderr,
+                        text: line,
+                    });
                 }
             })
         });
+        drop(tx);
+
+        let flusher = {
+            let app = app.clone();
+            let event_name = event_name.clone();
+            tokio::spawn(async move {
+                let mut buf: Vec<ActionStreamChunk> = Vec::new();
+                let mut tick = interval(Duration::from_millis(50));
+                loop {
+                    tokio::select! {
+                        maybe = rx.recv() => match maybe {
+                            Some(chunk) => {
+                                buf.push(chunk);
+                                if buf.len() >= MAX_BATCH {
+                                    let lines = std::mem::take(&mut buf);
+                                    let _ = app.emit(&event_name, ActionStreamLine::Batch { lines });
+                                }
+                            }
+                            None => {
+                                if !buf.is_empty() {
+                                    let lines = std::mem::take(&mut buf);
+                                    let _ = app.emit(&event_name, ActionStreamLine::Batch { lines });
+                                }
+                                break;
+                            }
+                        },
+                        _ = tick.tick() => {
+                            if !buf.is_empty() {
+                                let lines = std::mem::take(&mut buf);
+                                let _ = app.emit(&event_name, ActionStreamLine::Batch { lines });
+                            }
+                        }
+                    }
+                }
+            })
+        };
+
         let exit = child.wait().await;
         if let Some(t) = stdout_task {
             let _ = t.await;
@@ -311,6 +387,9 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
         if let Some(t) = stderr_task {
             let _ = t.await;
         }
+        // All `tx` clones now dropped → flusher drains and exits. Awaiting it
+        // guarantees every output batch is emitted before the exit event.
+        let _ = flusher.await;
         let line = match exit {
             Ok(status) => ActionStreamLine::Exit {
                 code: status.code().unwrap_or(-1),
