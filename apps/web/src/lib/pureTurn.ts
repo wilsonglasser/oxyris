@@ -44,20 +44,45 @@ export function stripAnsi(s: string): string {
 export const PURE_PROMPT_RE =
   /(do you want to (proceed|make this edit|create|run|continue))|(❯\s*\d+\.\s*yes)|(yes, and don'?t ask again)|(no, and tell claude)/i;
 
+// claude's optional end-of-session feedback poll ("How is Claude doing this
+// session?" + "1: Bad   2: Fine   3: Good   0: Dismiss"). Distinct from the
+// approval menu: the user isn't *required* to answer, so this should not light
+// the red "needs input" bull — it just signals that the turn ended (orange
+// attention for background threads, green for the active one). The poll's
+// blinking cursor keeps the PTY dripping output, defeating the idle-clear, so
+// the bull would otherwise stay blue forever. Requires the whole numbered row
+// in order so an assistant message that merely mentions the strings in prose
+// can't fire it.
+export const PURE_POLL_RE =
+  /1:\s*bad\s+2:\s*fine\s+3:\s*good\s+0:\s*dismiss/i;
+
+// claude's turn-end summary line: a star-like glyph followed by a past-tense
+// verb and "for <duration>" — e.g. "✶ Worked for 3m 9s", "✻ Brewed for 12s",
+// "✼ Crunched for 42s". When this appears the turn is settled; we use it as a
+// hard "done" signal because the composer's blinking cursor (and the TUI's
+// ticking footer) can keep the PTY output dripping past the idle-clear window,
+// stranding the blue pulse on. The leading glyph filters out prose mentions.
+export const PURE_TURN_END_RE =
+  /[✱-✽]\s+\w+\s+for\s+\d+[ms]/i;
+
 /**
- * Rolling-tail sniffer for the pure-mode permission/question menu. Feed it raw
- * PTY output; `onOpen` fires once when the menu first appears (latched, so a
- * redraw doesn't re-fire). `reset()` clears the latch when the user answers or
- * a new turn starts. A 2000-char tail handles the menu being split across
- * output chunks.
+ * Rolling-tail sniffer for a pure-mode TUI pattern. Feed it raw PTY output;
+ * `onOpen` fires once when the pattern first matches (latched, so a redraw
+ * doesn't re-fire). `reset()` clears the latch when the user answers or a new
+ * turn starts. A 2000-char tail handles the match being split across output
+ * chunks. Defaults to the approval-menu pattern; pass `PURE_POLL_RE` (or any
+ * other regex) for a different signal.
  */
-export function createPromptSniffer(onOpen: () => void) {
+export function createPromptSniffer(
+  onOpen: () => void,
+  re: RegExp = PURE_PROMPT_RE,
+) {
   let tail = "";
   let open = false;
   return {
     feed(data: string) {
       tail = (tail + stripAnsi(data)).slice(-2000);
-      if (PURE_PROMPT_RE.test(tail) && !open) {
+      if (re.test(tail) && !open) {
         open = true;
         onOpen();
       }

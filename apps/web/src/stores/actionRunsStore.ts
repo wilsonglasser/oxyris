@@ -2,8 +2,10 @@ import { create } from "zustand";
 import {
   actionRun,
   listenActionOutput,
+  type ActionKind,
   type ActionStreamLine,
 } from "~/ipc/actions.ts";
+import { terminalSpawn, terminalWrite } from "~/ipc/terminal.ts";
 
 /**
  * In-memory store of every action run that's been started this session.
@@ -40,10 +42,16 @@ interface State {
   activeTabRun: Record<string, string>;
 
   start: (
-    actionId: string,
-    actionName: string,
+    action: {
+      id: string;
+      name: string;
+      kind: ActionKind;
+      command: string;
+    },
     projectId: string,
     worktreeId: string | null,
+    sessionId: string | null,
+    onOpenTerminal: () => void,
   ) => Promise<void>;
   toggleOpen: (actionId: string) => void;
   setOpen: (actionId: string, open: boolean) => void;
@@ -59,16 +67,31 @@ export const useActionRunsStore = create<State>((set, get) => ({
   openActionIds: {},
   activeTabRun: {},
 
-  start: async (actionId, actionName, projectId, worktreeId) => {
+  start: async (action, projectId, worktreeId, sessionId, onOpenTerminal) => {
+    if (action.kind === "terminal_command_pty") {
+      if (!sessionId) {
+        throw new Error(
+          "An active session is required to run an interactive terminal action.",
+        );
+      }
+      const term = await terminalSpawn({
+        session_id: sessionId,
+        cols: 80,
+        rows: 24,
+      });
+      await terminalWrite({ id: term.id, data: `${action.command}\r` });
+      onOpenTerminal();
+      return;
+    }
     const { run_id } = await actionRun({
-      action_id: actionId,
+      action_id: action.id,
       project_id: projectId,
       worktree_id: worktreeId,
     });
     const instance: RunInstance = {
       runId: run_id,
-      actionId,
-      actionName,
+      actionId: action.id,
+      actionName: action.name,
       startedAt: Date.now(),
       lines: [],
       status: { kind: "running" },
@@ -77,16 +100,16 @@ export const useActionRunsStore = create<State>((set, get) => ({
     set((s) => ({
       runs: {
         ...s.runs,
-        [actionId]: [...(s.runs[actionId] ?? []), instance],
+        [action.id]: [...(s.runs[action.id] ?? []), instance],
       },
-      openActionIds: { ...s.openActionIds, [actionId]: true },
-      activeTabRun: { ...s.activeTabRun, [actionId]: run_id },
+      openActionIds: { ...s.openActionIds, [action.id]: true },
+      activeTabRun: { ...s.activeTabRun, [action.id]: run_id },
     }));
 
     // Subscribe — keeps appending lines to this instance even when the
     // modal is minimized. Drops cleanly on `killRun`.
     const unlisten = await listenActionOutput(run_id, (line) => {
-      mutateInstance(set, get, actionId, run_id, (inst) => {
+      mutateInstance(set, get, action.id, run_id, (inst) => {
         if (line.kind === "batch") {
           // Backend coalesces output into ~50ms batches so a chatty process
           // like `cargo run` triggers one store update per batch instead of
@@ -106,7 +129,7 @@ export const useActionRunsStore = create<State>((set, get) => ({
         }
       });
     });
-    mutateInstance(set, get, actionId, run_id, (inst) => {
+    mutateInstance(set, get, action.id, run_id, (inst) => {
       inst.unlisten = unlisten;
     });
   },

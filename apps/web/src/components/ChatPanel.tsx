@@ -7,7 +7,8 @@ import { matchesKey } from "~/lib/keybindings.ts";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import {
-  playTurnCompleteChime,
+  playCompletionChime,
+  playInputChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
@@ -280,7 +281,7 @@ export function ChatPanel({
         setApprovals([]);
         setNeedsInput(activeId, false);
         if (wasBusy && shouldNotify()) {
-          playTurnCompleteChime();
+          playCompletionChime();
           bumpBadge();
         }
       }
@@ -307,7 +308,7 @@ export function ChatPanel({
       // the window is backgrounded so the user knows to come decide.
       setNeedsInput(activeId, true);
       if (shouldNotify()) {
-        playTurnCompleteChime();
+        playInputChime();
         bumpBadge();
       }
       setApprovals((prev) =>

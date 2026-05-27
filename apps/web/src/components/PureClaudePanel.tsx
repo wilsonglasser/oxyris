@@ -32,12 +32,18 @@ import {
 } from "~/ipc/terminal.ts";
 import { attachmentSave, blobToBase64 } from "~/ipc/attachments.ts";
 import {
-  playTurnCompleteChime,
+  playCompletionChime,
+  playInputChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
-import { PURE_PROMPT_RE, stripAnsi } from "~/lib/pureTurn.ts";
+import {
+  PURE_POLL_RE,
+  PURE_PROMPT_RE,
+  PURE_TURN_END_RE,
+  stripAnsi,
+} from "~/lib/pureTurn.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import {
   toSpeechLocale,
@@ -372,25 +378,13 @@ function PureSessionView({
   // Latched true while a prompt is on screen so we fire once per request, not
   // once per redraw. Cleared when the user submits a response (see onPtyInput).
   const promptOpenRef = useRef(false);
-
-  const detectPrompt = useCallback(
-    (data: string) => {
-      const stripped = stripAnsi(data);
-      const tail = (outTailRef.current + stripped).slice(-2000);
-      outTailRef.current = tail;
-      if (PURE_PROMPT_RE.test(tail) && !promptOpenRef.current) {
-        promptOpenRef.current = true;
-        // Light the red bull: this thread wants an input. Outranks the blue
-        // busy pulse (see StatusDot). Cleared when the user answers.
-        setNeedsInput(sessionId, true);
-        if (shouldNotify()) {
-          playTurnCompleteChime();
-          bumpBadge();
-        }
-      }
-    },
-    [sessionId, setNeedsInput],
-  );
+  // Same latching for claude's optional end-of-session poll, which does NOT
+  // need an answer but does keep the PTY dripping output forever (defeating
+  // the idle-clear). When detected we end the turn the same way idle would.
+  const pollOpenRef = useRef(false);
+  // Same for claude's "✶ Worked for …" turn-end marker — a hard "done" signal
+  // even when the cursor-blink keeps the PTY dripping past the idle window.
+  const turnEndSeenRef = useRef(false);
 
   // Pure sessions get no auto-title from a turn-event stream. Instead we read
   // claude's own transcript (it's written under our `--session-id`) once a turn
@@ -405,6 +399,60 @@ function PureSessionView({
       })
       .catch(() => {});
   }, [sessionId]);
+
+  const detectPrompt = useCallback(
+    (data: string) => {
+      const stripped = stripAnsi(data);
+      const tail = (outTailRef.current + stripped).slice(-2000);
+      outTailRef.current = tail;
+      if (PURE_PROMPT_RE.test(tail) && !promptOpenRef.current) {
+        promptOpenRef.current = true;
+        // Light the red bull: this thread wants an input. Outranks the blue
+        // busy pulse (see StatusDot). Cleared when the user answers.
+        setNeedsInput(sessionId, true);
+        // Work is paused on this prompt — drop the blue pulse immediately.
+        // The prompt's blinking cursor keeps the PTY dripping output, so the
+        // idle-clear would otherwise never fire while it's on screen.
+        armedRef.current = false;
+        window.clearTimeout(idleTimerRef.current);
+        setBusy(sessionId, false);
+        if (shouldNotify()) {
+          playInputChime();
+          bumpBadge();
+        }
+        return;
+      }
+      if (PURE_POLL_RE.test(tail) && !pollOpenRef.current) {
+        pollOpenRef.current = true;
+        // Optional poll → claude has effectively finished. Treat as a turn end:
+        // drop the blue pulse, ring the done chime, try to title. No red bull
+        // (no input required) and no attention flag (this is the active view).
+        armedRef.current = false;
+        window.clearTimeout(idleTimerRef.current);
+        setBusy(sessionId, false);
+        if (shouldNotify()) {
+          playCompletionChime();
+          bumpBadge();
+        }
+        refreshTitle();
+        return;
+      }
+      if (PURE_TURN_END_RE.test(tail) && !turnEndSeenRef.current) {
+        turnEndSeenRef.current = true;
+        // "✶ Worked for X" marker — turn settled. Same treatment as the poll
+        // case, in case the cursor-blink or footer redraws keep dripping bytes.
+        armedRef.current = false;
+        window.clearTimeout(idleTimerRef.current);
+        setBusy(sessionId, false);
+        if (shouldNotify()) {
+          playCompletionChime();
+          bumpBadge();
+        }
+        refreshTitle();
+      }
+    },
+    [sessionId, setNeedsInput, setBusy, refreshTitle],
+  );
 
   // One attempt shortly after mount catches resumed sessions whose transcript
   // already exists from a previous run.
@@ -423,6 +471,8 @@ function PureSessionView({
       // release the latch, and reset the sniff buffer so the next request fires.
       setNeedsInput(sessionId, false);
       promptOpenRef.current = false;
+      pollOpenRef.current = false;
+      turnEndSeenRef.current = false;
       outTailRef.current = "";
     }
   }, [sessionId, setBusy, setNeedsInput]);
@@ -438,7 +488,7 @@ function PureSessionView({
         // If a permission/input prompt is on screen the prompt chime already
         // rang — don't double-ring as a "turn done".
         if (!promptOpenRef.current && shouldNotify()) {
-          playTurnCompleteChime();
+          playCompletionChime();
           bumpBadge();
         }
         // Turn settled → claude has flushed the user message (and maybe a
@@ -581,6 +631,8 @@ function PureSessionView({
     armedRef.current = true; // arm the done-chime detector
     setBusy(sessionId, true); // sidebar pulse on
     promptOpenRef.current = false; // fresh turn → re-arm the prompt chime
+    pollOpenRef.current = false;
+    turnEndSeenRef.current = false;
     outTailRef.current = "";
     sendToPty(`${refs}${trimmed}`);
     setText("");

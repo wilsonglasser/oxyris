@@ -26,7 +26,11 @@ import { TitleBar } from "~/components/TitleBar.tsx";
 import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
-import { createPromptSniffer } from "~/lib/pureTurn.ts";
+import {
+  createPromptSniffer,
+  PURE_POLL_RE,
+  PURE_TURN_END_RE,
+} from "~/lib/pureTurn.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
 import { sessionStart } from "~/ipc/session.ts";
@@ -111,8 +115,41 @@ export function App() {
     // unmounts PureClaudePanel and its own detector). No chime here — the
     // mounted panel owns that, same as the busy clear below stays silent to
     // avoid a double-ring. Cleared when the user answers (panel's onPtyInput).
+    // Also force-clears busy: a prompt's blinking cursor keeps dripping output
+    // so the idle-clear below never settles while it's on screen.
     const sniffer = createPromptSniffer(() => {
       useSessionStore.getState().setNeedsInput(sid, true);
+      window.clearTimeout(timer);
+      useBusyStore.getState().setBusy(sid, false);
+    });
+    // claude's optional end-of-session poll has the same "PTY drips forever"
+    // problem but is NOT a real input request — just force the busy clear and
+    // leave the bull to settle to its natural state (green for active sessions,
+    // never attention since the user is viewing it).
+    const pollSniffer = createPromptSniffer(() => {
+      window.clearTimeout(timer);
+      useBusyStore.getState().setBusy(sid, false);
+    }, PURE_POLL_RE);
+    // "✶ Worked for …" turn-end marker: a hard "done" signal in case the
+    // cursor-blink keeps the PTY dripping past the idle window.
+    const endSniffer = createPromptSniffer(() => {
+      window.clearTimeout(timer);
+      useBusyStore.getState().setBusy(sid, false);
+    }, PURE_TURN_END_RE);
+    // Reset every latched sniffer when a new turn starts (busy goes true), so
+    // their once-per-turn signals fire again at the next turn-end. Without
+    // this, the second turn's "✶ Worked for …" would be ignored and the bull
+    // would only clear via the idle-timer fallback (which can't settle while
+    // the TUI keeps redrawing).
+    let prevBusy = useBusyStore.getState().busy[sid] ?? false;
+    const unsubBusy = useBusyStore.subscribe((state) => {
+      const now = state.busy[sid] ?? false;
+      if (now && !prevBusy) {
+        sniffer.reset();
+        pollSniffer.reset();
+        endSniffer.reset();
+      }
+      prevBusy = now;
     });
     void terminalList({ session_id: sid }).then((rows) => {
       if (cancelled) return;
@@ -121,6 +158,8 @@ export function App() {
       // Output only flows during a turn; each chunk pushes the idle clear out.
       void onTerminalOutput(pty.id, (_seq, data) => {
         sniffer.feed(data);
+        pollSniffer.feed(data);
+        endSniffer.feed(data);
         if (useBusyStore.getState().busy[sid]) scheduleClear();
       }).then((fn) => {
         if (cancelled) fn();
@@ -132,6 +171,7 @@ export function App() {
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      unsubBusy();
       unlisten?.();
       // Switching to another session: don't strand a stuck dot on this one.
       useBusyStore.getState().setBusy(sid, false);
@@ -477,6 +517,8 @@ export function App() {
           <ActionSidebar
             projectId={activeId}
             worktreeId={sessionSnapshot?.worktree_id ?? null}
+            sessionId={activeSessionId}
+            onOpenTerminal={() => setTerminalOpen(true)}
           />
         )}
       </div>

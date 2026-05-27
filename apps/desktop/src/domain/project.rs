@@ -11,12 +11,12 @@ pub struct Project;
 
 /// Hydrated view of one project. `None` means either "not yet created" or
 /// "already deleted" — both are rejection cases for non-create commands.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProjectState {
     pub inner: Option<ProjectData>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectData {
     pub id: AggregateId,
     pub name: String,
@@ -33,6 +33,12 @@ pub struct ProjectData {
     #[serde(default)]
     pub workspace: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Sidebar sort key. Lower = higher in the list. Drag-to-reorder lands a
+    /// midpoint between visible neighbors so a drop produces a single event
+    /// instead of renumbering the whole list. Projects predating this field
+    /// are backfilled to their `created_at` epoch in the projection.
+    #[serde(default)]
+    pub sort_order: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +62,12 @@ pub enum ProjectCommand {
         /// `None` (or empty) clears the workspace, making the project ungrouped.
         workspace: Option<String>,
     },
+    /// Move the project to a new position in the sidebar. The caller computes
+    /// `sort_order` as the midpoint between the visible neighbors' sort_orders
+    /// (or `prev - 1.0` / `next + 1.0` at the ends).
+    SetSortOrder {
+        sort_order: f64,
+    },
     Delete,
 }
 
@@ -63,7 +75,7 @@ pub enum ProjectCommand {
 // discriminator in the shared event log across every aggregate — dropping it
 // would collide with other aggregates' `Created`/`Renamed`/`Deleted`.
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum ProjectEvent {
     ProjectCreated {
@@ -84,6 +96,9 @@ pub enum ProjectEvent {
     ProjectWorkspaceSet {
         workspace: Option<String>,
     },
+    ProjectSortOrderSet {
+        sort_order: f64,
+    },
     ProjectDeleted,
 }
 
@@ -94,6 +109,7 @@ impl DomainEvent for ProjectEvent {
             Self::ProjectRenamed { .. } => "ProjectRenamed",
             Self::ProjectLogoSet { .. } => "ProjectLogoSet",
             Self::ProjectWorkspaceSet { .. } => "ProjectWorkspaceSet",
+            Self::ProjectSortOrderSet { .. } => "ProjectSortOrderSet",
             Self::ProjectDeleted => "ProjectDeleted",
         }
     }
@@ -111,6 +127,8 @@ pub enum ProjectError {
     NameTooLong,
     #[error("project root_path must not be empty")]
     EmptyRootPath,
+    #[error("project sort_order must be a finite number")]
+    InvalidSortOrder,
 }
 
 const MAX_NAME_LEN: usize = 128;
@@ -193,6 +211,16 @@ impl Aggregate for Project {
                     workspace: normalized,
                 }])
             }
+            ProjectCommand::SetSortOrder { sort_order } => {
+                let current = state.inner.as_ref().ok_or(ProjectError::NotFound)?;
+                if !sort_order.is_finite() {
+                    return Err(ProjectError::InvalidSortOrder);
+                }
+                if current.sort_order == Some(sort_order) {
+                    return Ok(vec![]);
+                }
+                Ok(vec![ProjectEvent::ProjectSortOrderSet { sort_order }])
+            }
             ProjectCommand::Delete => {
                 if state.inner.is_none() {
                     return Err(ProjectError::NotFound);
@@ -220,6 +248,7 @@ impl Aggregate for Project {
                     logo_path: None,
                     workspace: workspace.clone(),
                     created_at: *created_at,
+                    sort_order: None,
                 });
             }
             ProjectEvent::ProjectRenamed { new_name } => {
@@ -235,6 +264,11 @@ impl Aggregate for Project {
             ProjectEvent::ProjectWorkspaceSet { workspace } => {
                 if let Some(data) = state.inner.as_mut() {
                     data.workspace = workspace.clone();
+                }
+            }
+            ProjectEvent::ProjectSortOrderSet { sort_order } => {
+                if let Some(data) = state.inner.as_mut() {
+                    data.sort_order = Some(*sort_order);
                 }
             }
             ProjectEvent::ProjectDeleted => {

@@ -136,7 +136,7 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
             return (
               <div
                 key={tab.id}
-                className={`group flex shrink-0 items-center gap-1 border-r border-neutral-800 px-2 py-1.5 text-[11px] transition ${
+                className={`group relative flex shrink-0 items-center border-r border-neutral-800 text-[11px] transition ${
                   isActive
                     ? "bg-neutral-950 text-neutral-100"
                     : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
@@ -146,30 +146,32 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
                   type="button"
                   onClick={() => setActiveId(tab.id)}
                   onDoubleClick={() => void renameTab(tab.id, tab.title)}
-                  className="flex items-center gap-1.5"
+                  className="flex items-center gap-1.5 py-1.5 pl-2 pr-12"
                   title={tab.cwd}
                 >
                   <span className="size-1.5 rounded-full bg-emerald-500/80" />
                   <span className="max-w-[140px] truncate">{tab.title}</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void renameTab(tab.id, tab.title)}
-                  aria-label={t("terminal_rename")}
-                  title={t("terminal_rename")}
-                  className="flex size-3.5 items-center justify-center rounded text-neutral-500 opacity-0 transition hover:bg-neutral-700 hover:text-neutral-200 group-hover:opacity-100"
-                >
-                  <Pencil className="size-2.5" strokeWidth={1.75} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => closeTab(tab.id)}
-                  aria-label={t("terminal_close_tab")}
-                  title={t("terminal_close_tab")}
-                  className="flex size-3.5 items-center justify-center rounded text-neutral-500 opacity-0 transition hover:bg-red-950/40 hover:text-red-300 group-hover:opacity-100"
-                >
-                  <X className="size-2.5" strokeWidth={2} />
-                </button>
+                <div className="pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
+                  <button
+                    type="button"
+                    onClick={() => void renameTab(tab.id, tab.title)}
+                    aria-label={t("terminal_rename")}
+                    title={t("terminal_rename")}
+                    className="flex size-4 items-center justify-center rounded text-neutral-500 transition hover:bg-neutral-700 hover:text-neutral-200"
+                  >
+                    <Pencil className="size-2.5" strokeWidth={1.75} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => closeTab(tab.id)}
+                    aria-label={t("terminal_close_tab")}
+                    title={t("terminal_close_tab")}
+                    className="flex size-4 items-center justify-center rounded text-neutral-500 transition hover:bg-red-950/40 hover:text-red-300"
+                  >
+                    <X className="size-2.5" strokeWidth={2} />
+                  </button>
+                </div>
               </div>
             );
           })}

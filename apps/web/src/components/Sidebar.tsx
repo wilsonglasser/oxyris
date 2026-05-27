@@ -33,16 +33,22 @@ import {
   useProjectStore,
   workspacesOf,
 } from "~/stores/projectStore.ts";
+import { projectReorder, type ProjectRow } from "~/ipc/commands.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 import {
-  playTurnCompleteChime,
+  playCompletionChime,
+  playInputChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
-import { createPromptSniffer } from "~/lib/pureTurn.ts";
+import {
+  createPromptSniffer,
+  PURE_POLL_RE,
+  PURE_TURN_END_RE,
+} from "~/lib/pureTurn.ts";
 import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
 
 // Pure threads have no turn-event stream, so a background pure thread's bull is
@@ -87,6 +93,15 @@ export function Sidebar({
   );
   const [worktreesByProject, setWorktreesByProject] =
     useState<WorktreesByProject>({});
+  // Drag-to-reorder state. `dragId` is the project being dragged; `dropTarget`
+  // is the row the cursor is currently over plus an insertion side. Both are
+  // cleared on dragend so an aborted drag leaves no UI residue.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    id: string;
+    pos: "before" | "after";
+  } | null>(null);
+  const refreshProjects = useProjectStore((s) => s.refresh);
   const hasUpdate = useHasUpdate();
 
   // App version read from the bundle at runtime (Tauri injects it from
@@ -245,7 +260,7 @@ export function Sidebar({
           markAttention(s.id);
           void refreshProjectSessions(s.project_id);
           if (wasBusy && shouldNotify()) {
-            playTurnCompleteChime();
+            playCompletionChime();
             bumpBadge();
           }
         }
@@ -258,7 +273,7 @@ export function Sidebar({
       void onSessionApproval(s.id, () => {
         setNeedsInput(s.id, true);
         if (shouldNotify()) {
-          playTurnCompleteChime();
+          playInputChime();
           bumpBadge();
         }
       }).then((fn) => {
@@ -272,19 +287,72 @@ export function Sidebar({
       // silent, so output-presence is a sound "working" signal.
       const sniffer = createPromptSniffer(() => {
         setNeedsInput(s.id, true);
+        // Work is paused on this prompt — drop the blue pulse. The TUI's
+        // blinking cursor keeps the PTY dripping output, so the idle-clear
+        // below would otherwise never fire while the menu is on screen.
+        window.clearTimeout(idleTimer);
+        setBusy(s.id, false);
         if (shouldNotify()) {
-          playTurnCompleteChime();
+          playInputChime();
           bumpBadge();
         }
       });
+      // Optional end-of-session poll: not a real input request, but it does
+      // keep the PTY dripping output. Treat it as a turn end (orange attention
+      // bull), not as a "needs input" (red). No red.
+      const pollSniffer = createPromptSniffer(() => {
+        window.clearTimeout(idleTimer);
+        setBusy(s.id, false);
+        markAttention(s.id);
+        if (shouldNotify()) {
+          playCompletionChime();
+          bumpBadge();
+        }
+      }, PURE_POLL_RE);
+      // "✶ Worked for …" marker: hard turn-end signal in case the cursor-blink
+      // or footer redraws keep the PTY dripping past the idle window.
+      const endSniffer = createPromptSniffer(() => {
+        window.clearTimeout(idleTimer);
+        setBusy(s.id, false);
+        markAttention(s.id);
+        if (shouldNotify()) {
+          playCompletionChime();
+          bumpBadge();
+        }
+      }, PURE_TURN_END_RE);
       let armed = false;
       let idleTimer: number | undefined;
+      // Bytes seen since any sniffer last fired. A new turn brings a stream of
+      // real content; the post-fire trickle from cursor-blink redraws is tiny.
+      // Crossing the threshold means "next turn started" → reset all latches
+      // so they can fire again at this turn's end.
+      let bytesSinceFire = 0;
       void terminalList({ session_id: s.id }).then((rows) => {
         if (cancelled) return;
         const pty = rows.find((r) => r.kind === "claude");
         if (!pty) return; // structured session — handled by the event path above
         void onTerminalOutput(pty.id, (_seq, data) => {
           sniffer.feed(data);
+          pollSniffer.feed(data);
+          endSniffer.feed(data);
+          // Any sniffer latched: count output to detect a new turn. Cursor-
+          // blink redraws are tiny; real content trips the threshold quickly.
+          if (sniffer.open || pollSniffer.open || endSniffer.open) {
+            bytesSinceFire += data.length;
+            if (bytesSinceFire > 400) {
+              sniffer.reset();
+              pollSniffer.reset();
+              endSniffer.reset();
+              bytesSinceFire = 0;
+              // Fall through and arm the pulse for the new turn.
+            } else {
+              armed = false;
+              window.clearTimeout(idleTimer);
+              return;
+            }
+          } else {
+            bytesSinceFire = 0;
+          }
           if (!armed) {
             armed = true;
             setBusy(s.id, true);
@@ -293,10 +361,10 @@ export function Sidebar({
           idleTimer = window.setTimeout(() => {
             armed = false;
             setBusy(s.id, false);
-            if (!sniffer.open) {
+            if (!sniffer.open && !pollSniffer.open && !endSniffer.open) {
               markAttention(s.id);
               if (shouldNotify()) {
-                playTurnCompleteChime();
+                playCompletionChime();
                 bumpBadge();
               }
             }
@@ -352,6 +420,38 @@ export function Sidebar({
 
   const toggle = (id: string) =>
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  // Drag-to-reorder. The dragged project's new `sort_order` is the midpoint
+  // between its visible-list neighbors after the drop, so one drop = one event
+  // (no whole-list renumber). At the edges we pick `neighbor ± 1.0` so the
+  // value stays finite. Drops onto the dragged row itself, or that would land
+  // in the same slot, are no-ops.
+  const reorderTo = useCallback(
+    async (movedId: string, overId: string, pos: "before" | "after") => {
+      if (movedId === overId) return;
+      const filtered = visibleProjects.filter((p) => p.id !== movedId);
+      const overIdx = filtered.findIndex((p) => p.id === overId);
+      if (overIdx < 0) return;
+      const insertIdx = pos === "before" ? overIdx : overIdx + 1;
+      const prev = filtered[insertIdx - 1];
+      const next = filtered[insertIdx];
+      let sortOrder: number;
+      if (prev && next) sortOrder = (prev.sort_order + next.sort_order) / 2;
+      else if (prev) sortOrder = prev.sort_order + 1;
+      else if (next) sortOrder = next.sort_order - 1;
+      else return;
+      // No-op when the row already sits in that slot (sort_order unchanged).
+      const moved = visibleProjects.find((p) => p.id === movedId);
+      if (moved && moved.sort_order === sortOrder) return;
+      try {
+        await projectReorder({ id: movedId, sort_order: sortOrder });
+        await refreshProjects();
+      } catch {
+        // Backend rejected (e.g. project gone). The next refresh will reconcile.
+      }
+    },
+    [visibleProjects, refreshProjects],
+  );
 
   const visibleSessionsFor = (
     projectId: string,
@@ -472,6 +572,40 @@ export function Sidebar({
                   worktreeNameById={worktreeNameById}
                   primaryLabel={primaryLabel ?? null}
                   onSessionsChanged={() => void refreshProjectSessions(p.id)}
+                  isDragging={dragId === p.id}
+                  dropIndicator={
+                    dropTarget && dropTarget.id === p.id && dragId !== p.id
+                      ? dropTarget.pos
+                      : null
+                  }
+                  // Reorder is disabled inside search results — the list is no
+                  // longer a stable sortable view, so a drop would land
+                  // somewhere the user can't see.
+                  dragEnabled={!searching}
+                  onDragStartItem={() => setDragId(p.id)}
+                  onDragOverItem={(pos) => {
+                    if (!dragId || dragId === p.id) return;
+                    setDropTarget((prev) =>
+                      prev && prev.id === p.id && prev.pos === pos
+                        ? prev
+                        : { id: p.id, pos },
+                    );
+                  }}
+                  onDragLeaveItem={() => {
+                    setDropTarget((prev) =>
+                      prev && prev.id === p.id ? null : prev,
+                    );
+                  }}
+                  onDropItem={(pos) => {
+                    const moved = dragId;
+                    setDragId(null);
+                    setDropTarget(null);
+                    if (moved) void reorderTo(moved, p.id, pos);
+                  }}
+                  onDragEndItem={() => {
+                    setDragId(null);
+                    setDropTarget(null);
+                  }}
                 />
               );
             })}
@@ -541,7 +675,7 @@ function readStoredWidth(): number {
 }
 
 interface ProjectItemProps {
-  project: import("~/ipc/commands.ts").ProjectRow;
+  project: ProjectRow;
   isActive: boolean;
   isExpanded: boolean;
   onToggle: () => void;
@@ -554,6 +688,21 @@ interface ProjectItemProps {
   worktreeNameById: Record<string, string>;
   primaryLabel: string | null;
   onSessionsChanged: () => void;
+  /** This row is the one currently being dragged. Dims its content. */
+  isDragging: boolean;
+  /**
+   * `"before"` / `"after"` when the cursor is over this row while another
+   * project is being dragged; the corresponding edge gets a visible line.
+   * `null` otherwise.
+   */
+  dropIndicator: "before" | "after" | null;
+  /** False disables `draggable` and reorder handlers (e.g. while searching). */
+  dragEnabled: boolean;
+  onDragStartItem: () => void;
+  onDragOverItem: (pos: "before" | "after") => void;
+  onDragLeaveItem: () => void;
+  onDropItem: (pos: "before" | "after") => void;
+  onDragEndItem: () => void;
 }
 
 function ProjectItem({
@@ -570,6 +719,14 @@ function ProjectItem({
   worktreeNameById,
   primaryLabel,
   onSessionsChanged,
+  isDragging,
+  dropIndicator,
+  dragEnabled,
+  onDragStartItem,
+  onDragOverItem,
+  onDragLeaveItem,
+  onDropItem,
+  onDragEndItem,
 }: ProjectItemProps) {
   const { t } = useTranslation("common");
 
@@ -578,8 +735,52 @@ function ProjectItem({
       ? "Windows"
       : `WSL · ${project.environment.distro}`;
 
+  // Split the row vertically at its midpoint to decide "before" vs "after"
+  // when the cursor hovers — drops on the top half insert above, bottom
+  // half below. Native HTML5 DnD gives us clientY; the row's rect gives us
+  // its bounds.
+  const sideFromEvent = (
+    e: React.DragEvent<HTMLLIElement>,
+  ): "before" | "after" => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  };
+
   return (
-    <li className="flex flex-col">
+    <li
+      draggable={dragEnabled}
+      onDragStart={(e) => {
+        if (!dragEnabled) return;
+        // Some browsers refuse to start a drag unless setData is called.
+        e.dataTransfer.effectAllowed = "move";
+        try {
+          e.dataTransfer.setData("text/plain", project.id);
+        } catch {
+          /* setData can throw in some sandboxed contexts; the drag still works */
+        }
+        onDragStartItem();
+      }}
+      onDragOver={(e) => {
+        if (!dragEnabled) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        onDragOverItem(sideFromEvent(e));
+      }}
+      onDragLeave={onDragLeaveItem}
+      onDrop={(e) => {
+        if (!dragEnabled) return;
+        e.preventDefault();
+        onDropItem(sideFromEvent(e));
+      }}
+      onDragEnd={onDragEndItem}
+      className={`flex flex-col ${isDragging ? "opacity-50" : ""} ${
+        dropIndicator === "before"
+          ? "border-t border-emerald-400"
+          : dropIndicator === "after"
+            ? "border-b border-emerald-400"
+            : ""
+      }`}
+    >
       <div
         className={`group flex items-center gap-1 rounded-md pr-1 transition ${
           isActive

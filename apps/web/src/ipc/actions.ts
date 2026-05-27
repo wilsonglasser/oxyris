@@ -1,7 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ActionKind = "terminal_command" | "one_shot" | "github_workflow";
+export type ActionKind =
+  | "terminal_command"
+  | "terminal_command_pty"
+  | "one_shot"
+  | "github_workflow";
 
 export type ActionRow = {
   id: string;

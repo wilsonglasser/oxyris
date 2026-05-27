@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { CircleDot, Minus, X } from "lucide-react";
+import { Check, CircleDot, Copy, Minus, RotateCw, X } from "lucide-react";
 import {
   useActionRunsStore,
   type RunInstance,
@@ -11,6 +11,10 @@ interface Props {
   actionId: string;
   actionName: string;
   onMinimize: () => void;
+  /** Re-run the same action — when present, single-instance header shows
+   * a re-run button. Wired by `ActionSidebar` (which holds the project /
+   * worktree / session context needed by `start`). */
+  onRerun?: () => void;
 }
 
 /**
@@ -19,18 +23,36 @@ interface Props {
  * counter stays); X kills the active tab's run (and auto-closes the modal
  * when the last instance dies).
  */
-export function ActionRunsModal({ actionId, actionName, onMinimize }: Props) {
+export function ActionRunsModal({
+  actionId,
+  actionName,
+  onMinimize,
+  onRerun,
+}: Props) {
   const { t } = useTranslation("actions");
   const runs = useActionRunsStore((s) => s.runs[actionId] ?? EMPTY);
   const activeTabRun = useActionRunsStore((s) => s.activeTabRun[actionId]);
   const setActiveTab = useActionRunsStore((s) => s.setActiveTab);
   const killRun = useActionRunsStore((s) => s.killRun);
+  const [copied, setCopied] = useState(false);
 
   const active = runs.find((r) => r.runId === activeTabRun) ?? runs[0];
 
   if (!active) return null;
 
   const multi = runs.length > 1;
+  const canRerun = !multi && onRerun && active.status.kind !== "running";
+
+  const onCopy = async () => {
+    const text = active.lines.map((l) => l.text).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard API can fail when window not focused — fall back silently.
+    }
+  };
 
   return (
     <div className="fixed bottom-2 right-12 z-30 flex h-[55vh] w-[60vw] max-w-3xl flex-col rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl">
@@ -85,6 +107,32 @@ export function ActionRunsModal({ actionId, actionName, onMinimize }: Props) {
           </div>
         )}
         <div className="flex shrink-0 items-center gap-0.5 border-l border-neutral-800 px-1">
+          {!multi && active.lines.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void onCopy()}
+              className="rounded p-1 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
+              title={copied ? t("copied") : t("copy_output")}
+              aria-label={copied ? t("copied") : t("copy_output")}
+            >
+              {copied ? (
+                <Check size={13} className="text-emerald-400" />
+              ) : (
+                <Copy size={13} />
+              )}
+            </button>
+          )}
+          {canRerun && (
+            <button
+              type="button"
+              onClick={onRerun}
+              className="rounded p-1 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
+              title={t("rerun")}
+              aria-label={t("rerun")}
+            >
+              <RotateCw size={13} />
+            </button>
+          )}
           <button
             type="button"
             onClick={onMinimize}

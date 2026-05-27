@@ -27,6 +27,8 @@ export type ProjectRow = {
   session_count: number;
   created_at: string;
   last_activity_at: string;
+  /** Sidebar sort key — lower = higher in the list (drag-to-reorder). */
+  sort_order: number;
 };
 
 export async function projectSetLogo(input: {
@@ -41,6 +43,17 @@ export async function projectSetWorkspace(input: {
   workspace?: string | null;
 }): Promise<void> {
   await invoke("project_set_workspace", { input });
+}
+
+export async function projectReorder(input: {
+  id: string;
+  sort_order: number;
+}): Promise<void> {
+  try {
+    await invoke<void>("project_reorder", { input });
+  } catch (err) {
+    wrapError(err);
+  }
 }
 
 export async function projectAutodetectLogo(input: {

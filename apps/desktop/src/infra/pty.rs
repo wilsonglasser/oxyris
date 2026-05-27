@@ -6,10 +6,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use oxyris_core::{AggregateId, Environment};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use regex::Regex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use thiserror::Error;
@@ -22,6 +23,25 @@ use uuid::Uuid;
 /// — 256 KB was too small and silently truncated history after a flood like
 /// `cargo run`.
 const REPLAY_CAP_BYTES: usize = 8 * 1024 * 1024;
+
+/// Terminal-query escape sequences that expect a reply from the emulator.
+/// We strip these from the replay snapshot before handing it to the frontend
+/// because xterm.js answers them via `onData` — sending the reply into the
+/// live PTY. A shell already sitting at a cooked-mode prompt then echoes the
+/// reply back as literal text (`^[[1;1R`, etc.), polluting the buffer on every
+/// re-attach. The original interactive session already received whatever reply
+/// it needed at the time; replay must be a pure visual restore.
+///
+/// Covers: CSI DSR (`\x1b[6n`, `\x1b[5n`, `\x1b[?6n`), CSI DA primary/secondary/
+/// tertiary (`\x1b[c`, `\x1b[0c`, `\x1b[>c`, `\x1b[=c`), and OSC color queries
+/// (`\x1b]10;?\x07`, `\x1b]11;?\x07`, …) terminated by BEL or ST.
+fn query_strip_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\x1b\[[?>=]?\d*(?:;\d*)*[nc]|\x1b\]\d+;\?(?:\x07|\x1b\\)")
+            .expect("query strip regex")
+    })
+}
 
 #[derive(Debug, Error)]
 pub enum PtyError {
@@ -538,8 +558,9 @@ impl PtySupervisor {
             .get(id)
             .ok_or_else(|| PtyError::UnknownTerminal(id.to_owned()))?;
         let rb = live.replay.lock().expect("pty replay mutex poisoned");
-        let data =
+        let raw =
             String::from_utf8_lossy(&rb.data.iter().copied().collect::<Vec<u8>>()).into_owned();
+        let data = query_strip_re().replace_all(&raw, "").into_owned();
         Ok(TerminalAttachSnapshot {
             data,
             last_seq: rb.last_seq,

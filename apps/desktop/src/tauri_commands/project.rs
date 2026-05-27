@@ -248,6 +248,29 @@ pub fn project_set_workspace(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ReorderProjectInput {
+    pub id: AggregateId,
+    /// New sort key — typically the midpoint between the dragged row's visible
+    /// neighbors in the sidebar. Lower values sort to the top.
+    pub sort_order: f64,
+}
+
+#[tauri::command]
+pub fn project_reorder(
+    input: ReorderProjectInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriProjectError> {
+    let (project_state, version) = load_state(&state, input.id)?;
+    let events = Project::decide(
+        &project_state,
+        ProjectCommand::SetSortOrder {
+            sort_order: input.sort_order,
+        },
+    )?;
+    dispatch(&state, input.id, version, events)
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AutodetectLogoInput {
     pub id: AggregateId,
 }

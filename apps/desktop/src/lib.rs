@@ -83,6 +83,7 @@ pub fn run() {
             tauri_commands::project::project_list,
             tauri_commands::project::project_set_logo,
             tauri_commands::project::project_set_workspace,
+            tauri_commands::project::project_reorder,
             tauri_commands::project::project_autodetect_logo,
             tauri_commands::project::project_logo_bytes,
             tauri_commands::environment::environment_list,

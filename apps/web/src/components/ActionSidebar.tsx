@@ -12,6 +12,9 @@ import { useActionRunsStore } from "~/stores/actionRunsStore.ts";
 interface Props {
   projectId: string | null;
   worktreeId: string | null;
+  sessionId: string | null;
+  /** Open the terminal dock — called when a `terminal_command_pty` action runs. */
+  onOpenTerminal: () => void;
 }
 
 /**
@@ -24,7 +27,12 @@ interface Props {
  *
  * Hidden when no project is selected.
  */
-export function ActionSidebar({ projectId, worktreeId }: Props) {
+export function ActionSidebar({
+  projectId,
+  worktreeId,
+  sessionId,
+  onOpenTerminal,
+}: Props) {
   const { t } = useTranslation("actions");
   const [actions, setActions] = useState<ActionRow[]>([]);
   const [edit, setEdit] = useState<{ row: ActionRow | null } | null>(null);
@@ -40,6 +48,7 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
   const startRun = useActionRunsStore((s) => s.start);
   const toggleOpen = useActionRunsStore((s) => s.toggleOpen);
   const setOpen = useActionRunsStore((s) => s.setOpen);
+  const killRun = useActionRunsStore((s) => s.killRun);
   const runs = useActionRunsStore((s) => s.runs);
   const openActionIds = useActionRunsStore((s) => s.openActionIds);
 
@@ -89,22 +98,50 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
       for (const a of actions) {
         if (a.keybinding && matchesKey(e, a.keybinding)) {
           e.preventDefault();
-          void startRun(a.id, a.name, projectId, worktreeId).catch(() => {});
+          void startRun(
+            { id: a.id, name: a.name, kind: a.kind, command: a.command },
+            projectId,
+            worktreeId,
+            sessionId,
+            onOpenTerminal,
+          ).catch(() => {});
           return;
         }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [actions, projectId, worktreeId, startRun]);
+  }, [actions, projectId, worktreeId, sessionId, onOpenTerminal, startRun]);
 
   if (!projectId) return null;
 
   const onIconClick = async (a: ActionRow) => {
+    // Interactive PTY actions always spawn a new dock terminal — there's no
+    // "runs modal" to toggle, so every click just opens another tab.
+    if (a.kind === "terminal_command_pty") {
+      try {
+        await startRun(
+          { id: a.id, name: a.name, kind: a.kind, command: a.command },
+          projectId,
+          worktreeId,
+          sessionId,
+          onOpenTerminal,
+        );
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
     const count = runs[a.id]?.length ?? 0;
     if (count === 0) {
       try {
-        await startRun(a.id, a.name, projectId, worktreeId);
+        await startRun(
+          { id: a.id, name: a.name, kind: a.kind, command: a.command },
+          projectId,
+          worktreeId,
+          sessionId,
+          onOpenTerminal,
+        );
       } catch (e) {
         window.alert(e instanceof Error ? e.message : String(e));
       }
@@ -181,7 +218,18 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
               const row = menu.row;
               setMenu(null);
               try {
-                await startRun(row.id, row.name, projectId, worktreeId);
+                await startRun(
+                  {
+                    id: row.id,
+                    name: row.name,
+                    kind: row.kind,
+                    command: row.command,
+                  },
+                  projectId,
+                  worktreeId,
+                  sessionId,
+                  onOpenTerminal,
+                );
               } catch (e) {
                 window.alert(e instanceof Error ? e.message : String(e));
               }
@@ -253,6 +301,24 @@ export function ActionSidebar({ projectId, worktreeId }: Props) {
             actionId={a.id}
             actionName={a.name}
             onMinimize={() => setOpen(a.id, false)}
+            onRerun={() => {
+              // Re-run = drop the finished single instance, then start fresh.
+              // setOpen guards against killRun auto-closing the modal between
+              // the two calls.
+              const list = runs[a.id] ?? [];
+              const finished = list.find((r) => r.status.kind !== "running");
+              if (finished) killRun(a.id, finished.runId);
+              setOpen(a.id, true);
+              void startRun(
+                { id: a.id, name: a.name, kind: a.kind, command: a.command },
+                projectId,
+                worktreeId,
+                sessionId,
+                onOpenTerminal,
+              ).catch((e) => {
+                window.alert(e instanceof Error ? e.message : String(e));
+              });
+            }}
           />
         ) : null,
       )}

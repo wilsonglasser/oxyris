@@ -112,6 +112,7 @@ export function ActionEditModal({ projectId, row, onClose }: Props) {
           onChange={(e) => setKind(e.target.value as ActionKind)}
           className="mt-1 w-full rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-[12px] text-neutral-100 outline-none focus:ring-1 focus:ring-neutral-700"
         >
+          <option value="terminal_command_pty">{t("kind_terminal_pty")}</option>
           <option value="terminal_command">{t("kind_terminal")}</option>
           <option value="one_shot">{t("kind_one_shot")}</option>
           <option value="github_workflow">{t("kind_github")}</option>
@@ -127,9 +128,11 @@ export function ActionEditModal({ projectId, row, onClose }: Props) {
           placeholder={
             kind === "github_workflow"
               ? "deploy.yml --ref main"
-              : kind === "terminal_command"
-                ? "npm run dev"
-                : "gulp build"
+              : kind === "terminal_command_pty"
+                ? "docker exec -it tbl-sis-app bash"
+                : kind === "terminal_command"
+                  ? "npm run dev"
+                  : "gulp build"
           }
           className="mt-1 w-full resize-none rounded border border-neutral-800 bg-neutral-900 px-2 py-1 font-mono text-[12px] text-neutral-100 outline-none focus:ring-1 focus:ring-neutral-700"
         />

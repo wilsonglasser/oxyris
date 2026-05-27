@@ -30,7 +30,7 @@ pub enum ProjectionError {
     EventStore(#[from] EventStoreError),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectRow {
     pub id: AggregateId,
     pub name: String,
@@ -44,6 +44,10 @@ pub struct ProjectRow {
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub session_count: u32,
+    /// Sidebar sort key (drag-to-reorder). Lower = higher in the list. Always
+    /// populated on read — projects predating the field are backfilled from
+    /// their `created_at` epoch.
+    pub sort_order: f64,
 }
 
 pub struct Projections {
@@ -142,6 +146,7 @@ impl Projections {
             "ALTER TABLE projections_actions ADD COLUMN show_in_sidebar INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE projections_projects ADD COLUMN logo_path TEXT",
             "ALTER TABLE projections_projects ADD COLUMN workspace TEXT",
+            "ALTER TABLE projections_projects ADD COLUMN sort_order REAL",
         ] {
             if let Err(e) = conn.execute(alter, []) {
                 let msg = e.to_string().to_ascii_lowercase();
@@ -150,6 +155,16 @@ impl Projections {
                 }
             }
         }
+        // Backfill: projects predating the sort_order field get their
+        // `created_at` epoch as the initial key, so the existing list order
+        // (newest first by activity) is preserved-ish — old rows still sort
+        // by creation time, new drag-to-reorder writes override per-project.
+        conn.execute(
+            "UPDATE projections_projects
+                SET sort_order = strftime('%s', created_at) * 1.0
+              WHERE sort_order IS NULL",
+            [],
+        )?;
         Ok(())
     }
 
@@ -282,11 +297,16 @@ impl Projections {
                 created_at,
             } => {
                 let (kind, distro) = environment_columns(environment);
+                // Initial sort_order = created_at epoch, so a fresh project
+                // lands at the chronological end (largest key) until the user
+                // drags it.
+                let initial_sort = created_at.timestamp() as f64;
                 conn.execute(
                     "INSERT OR REPLACE INTO projections_projects
                         (id, name, environment_kind, environment_distro, root_path,
-                         session_count, created_at, last_activity_at, workspace)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
+                         session_count, created_at, last_activity_at, workspace,
+                         sort_order)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9)",
                     params![
                         id.to_string(),
                         name,
@@ -296,6 +316,7 @@ impl Projections {
                         created_at.to_rfc3339(),
                         stored.timestamp.to_rfc3339(),
                         workspace,
+                        initial_sort,
                     ],
                 )?;
             }
@@ -335,6 +356,21 @@ impl Projections {
                     ],
                 )?;
             }
+            ProjectEvent::ProjectSortOrderSet { sort_order } => {
+                // sort_order changes are user-driven UI state; bump
+                // last_activity_at so the project doesn't get demoted to
+                // "stale" in views that mix activity with the explicit order.
+                conn.execute(
+                    "UPDATE projections_projects
+                        SET sort_order = ?1, last_activity_at = ?2
+                      WHERE id = ?3",
+                    params![
+                        sort_order,
+                        stored.timestamp.to_rfc3339(),
+                        stored.aggregate_id.to_string(),
+                    ],
+                )?;
+            }
             ProjectEvent::ProjectDeleted => {
                 conn.execute(
                     "DELETE FROM projections_projects WHERE id = ?1",
@@ -349,9 +385,10 @@ impl Projections {
         let conn = self.conn.lock().expect("projections mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, name, environment_kind, environment_distro, root_path,
-                    session_count, created_at, last_activity_at, logo_path, workspace
+                    session_count, created_at, last_activity_at, logo_path, workspace,
+                    sort_order
                FROM projections_projects
-              ORDER BY last_activity_at DESC",
+              ORDER BY sort_order ASC, last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_project)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -832,6 +869,16 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
 
     let logo_path: Option<String> = row.get(8).unwrap_or(None);
     let workspace: Option<String> = row.get(9).unwrap_or(None);
+    // Fallback to created_at epoch when the column is NULL (pre-migration
+    // rows the backfill missed — defensive, the migration should cover this).
+    let sort_order: f64 = row
+        .get::<_, Option<f64>>(10)
+        .unwrap_or(None)
+        .unwrap_or_else(|| {
+            DateTime::parse_from_rfc3339(&created_text)
+                .map(|dt| dt.timestamp() as f64)
+                .unwrap_or(0.0)
+        });
     Ok(ProjectRow {
         id: AggregateId(id),
         name: row.get(1)?,
@@ -842,6 +889,7 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
         session_count: row.get(5)?,
         created_at: parse_ts(6, &created_text)?,
         last_activity_at: parse_ts(7, &activity_text)?,
+        sort_order,
     })
 }
 

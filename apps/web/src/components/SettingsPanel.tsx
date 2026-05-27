@@ -29,9 +29,11 @@ import {
   checkForUpdate,
 } from "~/lib/updater.ts";
 import {
-  isNotificationSoundEnabled,
-  playTurnCompleteChime,
-  setNotificationSoundEnabled,
+  SOUND_OPTIONS,
+  type SoundChannel,
+  getChannelSound,
+  previewSound,
+  setChannelSound,
 } from "~/lib/notificationSound.ts";
 import { useUpdaterStore } from "~/stores/updaterStore.ts";
 
@@ -96,8 +98,20 @@ function GeneralTab() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(() =>
-    isNotificationSoundEnabled(),
+  const [completionSound, setCompletionSound] = useState<string>(() =>
+    getChannelSound("completion"),
+  );
+  const [inputSound, setInputSound] = useState<string>(() =>
+    getChannelSound("input"),
+  );
+  const updateChannel = useCallback(
+    (ch: SoundChannel, id: string) => {
+      setChannelSound(ch, id);
+      if (ch === "completion") setCompletionSound(id);
+      else setInputSound(id);
+      previewSound(id);
+    },
+    [],
   );
   const pureMode = useAppSettingsStore((s) => s.pureMode);
   const setPureMode = useAppSettingsStore((s) => s.setPureMode);
@@ -253,35 +267,28 @@ function GeneralTab() {
       <Section
         icon={<BellRing className="size-3.5" strokeWidth={1.75} />}
         title={t("section_notifications")}
-        action={
-          <button
-            type="button"
-            onClick={() => playTurnCompleteChime()}
-            className="rounded border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800"
-          >
-            {t("notifications_test")}
-          </button>
-        }
       >
-        <label className="flex items-start gap-2 text-[11px] text-neutral-400">
-          <input
-            type="checkbox"
-            checked={soundEnabled}
-            onChange={(e) => {
-              setSoundEnabled(e.target.checked);
-              setNotificationSoundEnabled(e.target.checked);
-            }}
-            className="mt-0.5"
+        <p className="mb-3 text-[11px] text-neutral-500">
+          {t("notifications_sound_desc")}
+        </p>
+        <div className="flex flex-col gap-3">
+          <ChannelPicker
+            label={t("notifications_channel_completion_title")}
+            description={t("notifications_channel_completion_desc")}
+            value={completionSound}
+            onChange={(id) => updateChannel("completion", id)}
+            offLabel={t("notifications_sound_off")}
+            testLabel={t("notifications_test")}
           />
-          <span>
-            <span className="font-medium text-neutral-200">
-              {t("notifications_sound_title")}
-            </span>
-            <span className="block text-neutral-500">
-              {t("notifications_sound_desc")}
-            </span>
-          </span>
-        </label>
+          <ChannelPicker
+            label={t("notifications_channel_input_title")}
+            description={t("notifications_channel_input_desc")}
+            value={inputSound}
+            onChange={(id) => updateChannel("input", id)}
+            offLabel={t("notifications_sound_off")}
+            testLabel={t("notifications_test")}
+          />
+        </div>
       </Section>
 
       <Section
@@ -455,6 +462,51 @@ function AdvancedTab() {
           {t("section_devtools_desc")}
         </p>
       </Section>
+    </div>
+  );
+}
+
+function ChannelPicker({
+  label,
+  description,
+  value,
+  onChange,
+  offLabel,
+  testLabel,
+}: {
+  label: string;
+  description: string;
+  value: string;
+  onChange: (id: string) => void;
+  offLabel: string;
+  testLabel: string;
+}) {
+  return (
+    <div className="rounded-md border border-neutral-800 bg-neutral-950/40 px-3 py-2">
+      <div className="mb-1.5 flex items-baseline justify-between gap-3">
+        <span className="text-[11px] font-medium text-neutral-200">{label}</span>
+        <button
+          type="button"
+          onClick={() => previewSound(value)}
+          disabled={value === "off"}
+          className="rounded border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
+        >
+          {testLabel}
+        </button>
+      </div>
+      <p className="mb-2 text-[10px] text-neutral-500">{description}</p>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-[11px] text-neutral-200"
+      >
+        <option value="off">{offLabel}</option>
+        {SOUND_OPTIONS.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.label}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
