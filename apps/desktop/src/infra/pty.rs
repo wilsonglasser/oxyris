@@ -24,17 +24,18 @@ use uuid::Uuid;
 /// `cargo run`.
 const REPLAY_CAP_BYTES: usize = 8 * 1024 * 1024;
 
-/// Terminal-query escape sequences that expect a reply from the emulator.
-/// We strip these from the replay snapshot before handing it to the frontend
-/// because xterm.js answers them via `onData` — sending the reply into the
-/// live PTY. A shell already sitting at a cooked-mode prompt then echoes the
-/// reply back as literal text (`^[[1;1R`, etc.), polluting the buffer on every
-/// re-attach. The original interactive session already received whatever reply
-/// it needed at the time; replay must be a pure visual restore.
+/// Terminal-query escape sequences that expect a reply from the emulator
+/// (CSI DSR `\x1b[6n` etc, CSI DA `\x1b[c`/`\x1b[>c`, OSC color `\x1b]10;?\x07`).
+/// On *re-attach* of a shell PTY we strip these from the snapshot — xterm.js
+/// would otherwise re-process the query, emit a reply via `onData`, and the
+/// shell sitting at a cooked-mode prompt would echo it back as literal text
+/// (`^[[1;1R`) polluting the visible buffer. The original session already
+/// received its reply on first attach; replay must be a pure visual restore.
 ///
-/// Covers: CSI DSR (`\x1b[6n`, `\x1b[5n`, `\x1b[?6n`), CSI DA primary/secondary/
-/// tertiary (`\x1b[c`, `\x1b[0c`, `\x1b[>c`, `\x1b[=c`), and OSC color queries
-/// (`\x1b]10;?\x07`, `\x1b]11;?\x07`, …) terminated by BEL or ST.
+/// Never apply to claude PTYs (their TUI re-renders the whole screen on every
+/// repaint so the queries cause no echo trail) and never on the *first* attach
+/// of any PTY — the initial DSR/DA query needs xterm to actually respond, or
+/// the child (e.g. claude waiting on DSR-6 at startup) hangs forever.
 fn query_strip_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -93,6 +94,11 @@ struct LiveTerminal {
 struct ReplayBuffer {
     data: VecDeque<u8>,
     last_seq: u64,
+    /// How many times the frontend has called `attach_snapshot` on this PTY.
+    /// `0` means "first attach" — the query bytes must ride through verbatim so
+    /// xterm.js replies and unblocks the child. Any subsequent call is treated
+    /// as a re-attach; see `query_strip_re` for the kind-gated strip.
+    attach_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -557,10 +563,18 @@ impl PtySupervisor {
         let live = terminals
             .get(id)
             .ok_or_else(|| PtyError::UnknownTerminal(id.to_owned()))?;
-        let rb = live.replay.lock().expect("pty replay mutex poisoned");
+        let kind = live.kind;
+        let mut rb = live.replay.lock().expect("pty replay mutex poisoned");
         let raw =
             String::from_utf8_lossy(&rb.data.iter().copied().collect::<Vec<u8>>()).into_owned();
-        let data = query_strip_re().replace_all(&raw, "").into_owned();
+        // Strip terminal queries only on shell re-attach. See `query_strip_re`
+        // for the reasoning (first attach must be raw, claude TUIs always raw).
+        let data = if matches!(kind, TerminalKind::Shell) && rb.attach_count > 0 {
+            query_strip_re().replace_all(&raw, "").into_owned()
+        } else {
+            raw
+        };
+        rb.attach_count = rb.attach_count.saturating_add(1);
         Ok(TerminalAttachSnapshot {
             data,
             last_seq: rb.last_seq,

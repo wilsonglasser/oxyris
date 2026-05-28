@@ -37,12 +37,24 @@ export function stripAnsi(s: string): string {
   return out;
 }
 
-// The claude TUI renders a numbered menu ("Do you want to proceed?" + "❯ 1.
-// Yes" / "…don't ask again") whenever it needs the user to approve a tool or
-// answer a question. This is the pure-mode equivalent of a tool-approval
-// request: while it's on screen the thread "wants an input" (red bull).
+// The claude TUI renders a numbered menu whenever it needs the user to approve
+// a tool or answer a question — the pure-mode equivalent of a tool-approval
+// request. While it's on screen the thread "wants an input" (red bull).
+//
+// Detection layers, in order of robustness:
+//
+// 1. Structural: a selected option (`❯ 1. <text>`) immediately followed by
+//    another numbered option (`  2. <text>`). Locale-independent — works for
+//    PT/ES/EN menus, tool-approval menus, and the plan-approval menu
+//    ("Claude has written up a plan…") whose footer is different.
+// 2. Footer "Enter to select · ↑/↓ to navigate" — claude TUI chrome, always
+//    English even when the menu body is localized. Catches menus whose option
+//    list is rendered across multiple writes so the structural pattern hasn't
+//    accumulated yet.
+// 3. English fallbacks ("Do you want to proceed?", "yes, and don't ask
+//    again", …) for one-off prompts that skip the numbered menu entirely.
 export const PURE_PROMPT_RE =
-  /(do you want to (proceed|make this edit|create|run|continue))|(❯\s*\d+\.\s*yes)|(yes, and don'?t ask again)|(no, and tell claude)/i;
+  /(❯\s*\d+\.\s+\S[\s\S]{0,400}\n\s+\d+\.\s)|(enter to select[\s\S]{0,200}navigate)|(ctrl-g to edit)|(do you want to (proceed|make this edit|create|run|continue))|(would you like to proceed)|(yes, and don'?t ask again)|(no, and tell claude)/i;
 
 // claude's optional end-of-session feedback poll ("How is Claude doing this
 // session?" + "1: Bad   2: Fine   3: Good   0: Dismiss"). Distinct from the
