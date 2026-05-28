@@ -322,11 +322,14 @@ export function Sidebar({
       }, PURE_TURN_END_RE);
       let armed = false;
       let idleTimer: number | undefined;
-      // Bytes seen since any sniffer last fired. A new turn brings a stream of
-      // real content; the post-fire trickle from cursor-blink redraws is tiny.
-      // Crossing the threshold means "next turn started" → reset all latches
-      // so they can fire again at this turn's end.
+      // Bytes seen since any sniffer last fired. A new turn brings a *burst*
+      // of real content; the post-fire trickle from cursor-blink / footer
+      // redraws is sparse — bytes far apart in time. The counter is gated by a
+      // 2s quiet window so a slow drip can never accumulate to the threshold
+      // (otherwise the watcher false-rearms, the idle timer fires 3s later,
+      // and the session gets re-flagged orange + chimed indefinitely).
       let bytesSinceFire = 0;
+      let lastByteAt = 0;
       void terminalList({ session_id: s.id }).then((rows) => {
         if (cancelled) return;
         const pty = rows.find((r) => r.kind === "claude");
@@ -338,6 +341,10 @@ export function Sidebar({
           // Any sniffer latched: count output to detect a new turn. Cursor-
           // blink redraws are tiny; real content trips the threshold quickly.
           if (sniffer.open || pollSniffer.open || endSniffer.open) {
+            const now = Date.now();
+            // Quiet gap → previous bytes were noise, not part of a burst.
+            if (now - lastByteAt > 2000) bytesSinceFire = 0;
+            lastByteAt = now;
             bytesSinceFire += data.length;
             if (bytesSinceFire > 400) {
               sniffer.reset();
