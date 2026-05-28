@@ -8,6 +8,7 @@ import {
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { FileTreePanel } from "~/components/FileTreePanel.tsx";
 import { FileEditorTabs } from "~/components/FileEditorTabs.tsx";
+import { useDragResize } from "~/lib/useDragResize.ts";
 
 interface Props {
   projectId: string | null;
@@ -31,6 +32,15 @@ export function FilesPanel({ projectId }: Props) {
   // Per-project explicit override of the active worktree. Persists in-memory
   // for the session so switching tabs doesn't lose the user's pick.
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+
+  const treeResize = useDragResize({
+    storageKey: "oxyris.filesPanel.treeWidth",
+    defaultSize: 288,
+    min: 180,
+    max: 640,
+    axis: "horizontal",
+    direction: "right",
+  });
 
   const sessionWorktreeId = useMemo(() => {
     if (!sessionSnapshot) return null;
@@ -57,7 +67,10 @@ export function FilesPanel({ projectId }: Props) {
 
   return (
     <div className="flex h-full min-h-0 flex-1">
-      <div className="w-72 shrink-0">
+      <div
+        className="relative shrink-0"
+        style={{ width: treeResize.size }}
+      >
         <FileTreePanel
           projectId={projectId}
           worktreeId={worktreeId}
@@ -65,6 +78,14 @@ export function FilesPanel({ projectId }: Props) {
             setOverrides((prev) => ({ ...prev, [projectId]: id }))
           }
         />
+        <div
+          onMouseDown={treeResize.onResizeStart}
+          role="separator"
+          aria-orientation="vertical"
+          className="group absolute right-0 top-0 z-10 h-full w-1 cursor-col-resize"
+        >
+          <div className="h-full w-full bg-transparent transition group-hover:bg-emerald-700/50" />
+        </div>
       </div>
       <FileEditorTabs projectId={projectId} worktreeId={worktreeId} />
     </div>

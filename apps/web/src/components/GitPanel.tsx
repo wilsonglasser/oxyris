@@ -33,6 +33,7 @@ import type { DiffMode, StatusEntry } from "~/ipc/git.ts";
 import { MonacoDiffViewer } from "~/components/MonacoDiffViewer.tsx";
 import { RevDiffModal } from "~/components/RevDiffModal.tsx";
 import { MergeEditor } from "~/components/MergeEditor.tsx";
+import { useDragResize } from "~/lib/useDragResize.ts";
 import {
   buildSingleHunkPatch,
   parseUnifiedDiff,
@@ -60,6 +61,14 @@ export function GitPanel({ projectId }: Props) {
   );
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const sideResize = useDragResize({
+    storageKey: "oxyris.gitPanel.sideWidth",
+    defaultSize: 320,
+    min: 200,
+    max: 640,
+    axis: "horizontal",
+    direction: "right",
+  });
 
   const sessionWorktreeId = sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
   const worktreeId =
@@ -88,7 +97,10 @@ export function GitPanel({ projectId }: Props) {
 
   return (
     <div className="flex h-full min-h-0 flex-1">
-      <div className="flex w-80 shrink-0 flex-col border-r border-neutral-800 bg-neutral-950">
+      <div
+        className="relative flex shrink-0 flex-col border-r border-neutral-800 bg-neutral-950"
+        style={{ width: sideResize.size }}
+      >
         <div className="flex items-center gap-1 border-b border-neutral-800 px-2 py-1.5">
           <select
             value={worktreeId}
@@ -110,6 +122,14 @@ export function GitPanel({ projectId }: Props) {
         <GitChangesList projectId={projectId} worktreeId={worktreeId} />
         <LogSection projectId={projectId} worktreeId={worktreeId} />
         <CommitBar projectId={projectId} worktreeId={worktreeId} />
+        <div
+          onMouseDown={sideResize.onResizeStart}
+          role="separator"
+          aria-orientation="vertical"
+          className="group absolute right-0 top-0 z-10 h-full w-1 cursor-col-resize"
+        >
+          <div className="h-full w-full bg-transparent transition group-hover:bg-emerald-700/50" />
+        </div>
       </div>
       <GitDiffPane projectId={projectId} worktreeId={worktreeId} />
     </div>

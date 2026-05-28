@@ -26,6 +26,7 @@ import { TitleBar } from "~/components/TitleBar.tsx";
 import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
+import { useDragResize } from "~/lib/useDragResize.ts";
 import {
   createPromptSniffer,
   PURE_POLL_RE,
@@ -78,6 +79,14 @@ export function App() {
   const setActiveSession = useSessionStore((s) => s.setActive);
   const pureMode = useAppSettingsStore((s) => s.pureMode);
   const multiSidebarHidden = useMultiViewStore((s) => s.sidebarHidden);
+  const terminalResize = useDragResize({
+    storageKey: "oxyris.terminal.height",
+    defaultSize: 288,
+    min: 120,
+    max: 900,
+    axis: "vertical",
+    direction: "up",
+  });
 
   // Clear the taskbar unread badge whenever the window regains focus — the
   // badge counts turns that completed while the user was away (see
@@ -455,7 +464,18 @@ export function App() {
                 )}
               </main>
               {terminalOpen && activeSessionId && (
-                <div className="h-72 shrink-0">
+                <div
+                  className="relative shrink-0"
+                  style={{ height: terminalResize.size }}
+                >
+                  <div
+                    onMouseDown={terminalResize.onResizeStart}
+                    role="separator"
+                    aria-orientation="horizontal"
+                    className="group absolute left-0 right-0 top-0 z-10 h-1 cursor-row-resize"
+                  >
+                    <div className="h-full w-full bg-transparent transition group-hover:bg-emerald-700/50" />
+                  </div>
                   <TerminalPanel
                     sessionId={activeSessionId}
                     onClose={() => setTerminalOpen(false)}
