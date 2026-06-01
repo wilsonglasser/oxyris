@@ -111,7 +111,9 @@ pub fn list_dir(path_str: &str, show_hidden: bool) -> Result<FsListDirResult, Op
     for dent in fs::read_dir(path)? {
         let dent = dent?;
         let name = dent.file_name().to_string_lossy().into_owned();
-        if !show_hidden && name.starts_with('.') {
+        // Only `.git` is hidden by default; other dotfiles (.claude, .env, …)
+        // stay visible. `show_hidden` reveals `.git` too.
+        if !show_hidden && name == ".git" {
             continue;
         }
         let ft = match dent.file_type() {

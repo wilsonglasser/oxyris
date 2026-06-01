@@ -57,6 +57,11 @@ import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
 // longer than the in-view panel's 2500ms so the two don't race on the active
 // thread during the hand-off when you open it.
 const PURE_IDLE_DONE_MS = 3000;
+// After a poll / "✶ Worked for …" marker fires, hold off on flagging orange
+// this long. The marker can surface mid-turn (claude prints it, then keeps
+// working); if a real content burst lands inside the window the burst-reset
+// cancels the pending flag, so the bull only goes orange on a settled turn.
+const PURE_DONE_DEFER_MS = 1500;
 
 interface Props {
   onNewProject: () => void;
@@ -303,25 +308,25 @@ export function Sidebar({
       const pollSniffer = createPromptSniffer(() => {
         window.clearTimeout(idleTimer);
         setBusy(s.id, false);
-        markAttention(s.id);
-        if (shouldNotify()) {
-          playCompletionChime();
-          bumpBadge();
-        }
+        // Defer the orange flag — see scheduleDone. A burst of real content in
+        // the defer window means the turn isn't actually over and cancels it.
+        scheduleDone();
       }, PURE_POLL_RE);
       // "✶ Worked for …" marker: hard turn-end signal in case the cursor-blink
       // or footer redraws keep the PTY dripping past the idle window.
       const endSniffer = createPromptSniffer(() => {
         window.clearTimeout(idleTimer);
         setBusy(s.id, false);
-        markAttention(s.id);
-        if (shouldNotify()) {
-          playCompletionChime();
-          bumpBadge();
-        }
+        scheduleDone();
       }, PURE_TURN_END_RE);
       let armed = false;
       let idleTimer: number | undefined;
+      // One completion chime + attention flag per turn, shared by the poll /
+      // turn-end / idle paths. The sniffers are all fed each chunk before the
+      // open-check, so a turn that emits the "✶ Worked for" marker and then a
+      // poll prompt would otherwise ring twice. Reset when a genuine new turn
+      // burst is detected (see the >400-byte reset below).
+      let notified = false;
       // Bytes seen since any sniffer last fired. A new turn brings a *burst*
       // of real content; the post-fire trickle from cursor-blink / footer
       // redraws is sparse — bytes far apart in time. The counter is gated by a
@@ -330,6 +335,23 @@ export function Sidebar({
       // and the session gets re-flagged orange + chimed indefinitely).
       let bytesSinceFire = 0;
       let lastByteAt = 0;
+      // Pending "turn settled → orange" flag, armed by the poll / turn-end
+      // sniffers and the idle path. Cancelled by the burst-reset below when more
+      // real content proves the turn is still live. The cursor-blink drip is too
+      // sparse to trip the reset, so a genuinely settled turn still flags.
+      let doneDeferTimer: number | undefined;
+      function scheduleDone() {
+        window.clearTimeout(doneDeferTimer);
+        doneDeferTimer = window.setTimeout(() => {
+          if (notified) return;
+          notified = true;
+          markAttention(s.id);
+          if (shouldNotify()) {
+            playCompletionChime();
+            bumpBadge();
+          }
+        }, PURE_DONE_DEFER_MS);
+      }
       void terminalList({ session_id: s.id }).then((rows) => {
         if (cancelled) return;
         const pty = rows.find((r) => r.kind === "claude");
@@ -350,7 +372,11 @@ export function Sidebar({
               sniffer.reset();
               pollSniffer.reset();
               endSniffer.reset();
+              // Real content after a turn-end/poll marker → the turn is still
+              // live. Cancel the pending orange flag so it never flashes.
+              window.clearTimeout(doneDeferTimer);
               bytesSinceFire = 0;
+              notified = false; // genuine new turn → allow its done-chime again
               // Fall through and arm the pulse for the new turn.
             } else {
               armed = false;
@@ -368,7 +394,13 @@ export function Sidebar({
           idleTimer = window.setTimeout(() => {
             armed = false;
             setBusy(s.id, false);
-            if (!sniffer.open && !pollSniffer.open && !endSniffer.open) {
+            if (
+              !sniffer.open &&
+              !pollSniffer.open &&
+              !endSniffer.open &&
+              !notified
+            ) {
+              notified = true;
               markAttention(s.id);
               if (shouldNotify()) {
                 playCompletionChime();
@@ -383,6 +415,7 @@ export function Sidebar({
           }
           unlistens.push(fn);
           unlistens.push(() => window.clearTimeout(idleTimer));
+          unlistens.push(() => window.clearTimeout(doneDeferTimer));
         });
       });
     }
@@ -737,6 +770,34 @@ function ProjectItem({
 }: ProjectItemProps) {
   const { t } = useTranslation("common");
 
+  // Strongest session signal in this project, so a collapsed row still shows
+  // when something inside wants the user. Mirrors StatusDot's priority:
+  // red (needs input / errored) > blue (working) > orange (done, unseen) >
+  // green (recently active).
+  const attnTier = useSessionStore((st) => {
+    let tier = 0;
+    for (const s of sessions) {
+      if (st.needsInput[s.id] || s.status === "errored") return 4;
+      if (st.attention[s.id]) tier = Math.max(tier, 2);
+    }
+    return tier;
+  });
+  const busyTier = useBusyStore((st) =>
+    sessions.some((s) => st.busy[s.id]) ? 3 : 0,
+  );
+  const recentTier = sessions.some((s) => isRecent(s.last_activity_at)) ? 1 : 0;
+  const tier = Math.max(attnTier, busyTier, recentTier);
+  const tierClass =
+    tier === 4
+      ? "bg-red-500/15 text-red-100 hover:bg-red-500/25"
+      : tier === 3
+        ? "bg-sky-500/10 text-sky-100 hover:bg-sky-500/20"
+        : tier === 2
+          ? "bg-orange-500/15 text-orange-100 hover:bg-orange-500/25"
+          : tier === 1
+            ? "bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20"
+            : null;
+
   const envLabel =
     project.environment.kind === "windows"
       ? "Windows"
@@ -792,7 +853,7 @@ function ProjectItem({
         className={`group flex items-center gap-1 rounded-md pr-1 transition ${
           isActive
             ? "bg-neutral-800/70 text-neutral-100"
-            : "text-neutral-300 hover:bg-neutral-800/40"
+            : tierClass ?? "text-neutral-300 hover:bg-neutral-800/40"
         }`}
       >
         <button

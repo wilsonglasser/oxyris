@@ -29,6 +29,7 @@ serde_json.workspace = true
 tauri = { workspace = true }
 tauri-plugin-dialog.workspace = true
 tauri-plugin-updater.workspace = true
+tauri-plugin-opener.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

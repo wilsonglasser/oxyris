@@ -4,6 +4,7 @@ import { Pencil, Plus, X } from "lucide-react";
 import { Terminal, type IDisposable, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 import {
   type TerminalInfo,
@@ -251,6 +252,15 @@ interface ViewProps {
 const PATH_RE =
   /(?:[A-Za-z]:[\\/])?(?:\.{0,2}[\\/])?(?:[\w.@~+-]+[\\/])+[\w.@+-]+\.[A-Za-z0-9]{1,12}(?::\d+(?::\d+)?)?/g;
 
+// http(s) URLs. Stops at whitespace and quotes/brackets so a URL wrapped in
+// parens or quotes in claude's output doesn't drag the delimiter in. A
+// trailing run of sentence punctuation (".,;:!?" and closing brackets) is
+// trimmed off the match below — those almost always belong to the prose, not
+// the URL. Unlike file paths, URLs are linkified in every terminal (dock
+// shells included), so this provider is always registered.
+const URL_RE = /https?:\/\/[^\s'"<>`]+/g;
+const URL_TRAILING_RE = /[.,;:!?)\]}>'"]+$/;
+
 /**
  * Renders one xterm bound to an already-spawned PTY. Stays mounted across
  * tab switches (just toggles `visible`) so scrollback is preserved. Exported
@@ -361,6 +371,37 @@ export function TerminalView({
             activate: (event: MouseEvent, token: string) => {
               if (!(event.ctrlKey || event.metaKey)) return;
               onOpenPathRef.current?.(token);
+            },
+          });
+        }
+        callback(links.length ? links : undefined);
+      },
+    });
+
+    // Linkify http(s) URLs so Ctrl/Cmd+click opens them in the system browser
+    // (via the opener plugin — it escapes the URL, so query strings with `&`
+    // are safe). Always on, independent of the file-path provider above.
+    const urlLinkProvider = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const line = term.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) return callback(undefined);
+        const text = line.translateToString(true);
+        const links: ILink[] = [];
+        URL_RE.lastIndex = 0;
+        for (let m = URL_RE.exec(text); m; m = URL_RE.exec(text)) {
+          const url = m[0].replace(URL_TRAILING_RE, "");
+          if (!url) continue;
+          const start = m.index + 1;
+          links.push({
+            text: url,
+            range: {
+              start: { x: start, y: bufferLineNumber },
+              end: { x: start + url.length - 1, y: bufferLineNumber },
+            },
+            decorations: { pointerCursor: true, underline: true },
+            activate: (event: MouseEvent, token: string) => {
+              if (!(event.ctrlKey || event.metaKey)) return;
+              void openUrl(token).catch(() => {});
             },
           });
         }
@@ -591,6 +632,7 @@ export function TerminalView({
       if (unlistenExit) unlistenExit();
       try {
         linkProvider.dispose();
+        urlLinkProvider.dispose();
       } catch {
         /* noop */
       }
@@ -648,7 +690,7 @@ export function TerminalView({
 
   return (
     <div className={`absolute inset-0 ${visible ? "" : "invisible"}`}>
-      <div ref={containerRef} className="absolute inset-0 p-2" />
+      <div ref={containerRef} className="absolute inset-0 overflow-hidden p-2" />
       {zoomBadge !== null && (
         <div
           className="pointer-events-none absolute bottom-2 left-2 z-10 rounded bg-neutral-900/90 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-neutral-300 ring-1 ring-neutral-700"

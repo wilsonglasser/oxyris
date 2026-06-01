@@ -60,6 +60,7 @@ tauri = { version = "2.0", features = ["protocol-asset"] }
 tauri-build = { version = "2.0", features = [] }
 tauri-plugin-dialog = "2.0"
 tauri-plugin-updater = "2.0"
+tauri-plugin-opener = "2.0"
 
 # HTTP client for downloading language-server binaries from GitHub
 # releases. We piggyback on rustls so we don't pull system OpenSSL.

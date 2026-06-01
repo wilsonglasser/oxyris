@@ -385,6 +385,11 @@ function PureSessionView({
   // Same for claude's "✶ Worked for …" turn-end marker — a hard "done" signal
   // even when the cursor-blink keeps the PTY dripping past the idle window.
   const turnEndSeenRef = useRef(false);
+  // One completion chime + badge per turn, shared by the poll / turn-end / idle
+  // paths. A single turn-end can trip more than one of them (the markers arrive
+  // in sequence), so without this latch the user hears the sound twice. Reset
+  // when the user submits the next turn (see onPtyInput).
+  const completionNotifiedRef = useRef(false);
 
   // Pure sessions get no auto-title from a turn-event stream. Instead we read
   // claude's own transcript (it's written under our `--session-id`) once a turn
@@ -399,6 +404,17 @@ function PureSessionView({
       })
       .catch(() => {});
   }, [sessionId]);
+
+  // Ring the "done" chime + bump the badge at most once per turn, no matter how
+  // many completion markers (poll, "✶ Worked for", idle) fire for it.
+  const notifyCompletion = useCallback(() => {
+    if (completionNotifiedRef.current) return;
+    completionNotifiedRef.current = true;
+    if (shouldNotify()) {
+      playCompletionChime();
+      bumpBadge();
+    }
+  }, []);
 
   const detectPrompt = useCallback(
     (data: string) => {
@@ -430,10 +446,7 @@ function PureSessionView({
         armedRef.current = false;
         window.clearTimeout(idleTimerRef.current);
         setBusy(sessionId, false);
-        if (shouldNotify()) {
-          playCompletionChime();
-          bumpBadge();
-        }
+        notifyCompletion();
         refreshTitle();
         return;
       }
@@ -444,14 +457,11 @@ function PureSessionView({
         armedRef.current = false;
         window.clearTimeout(idleTimerRef.current);
         setBusy(sessionId, false);
-        if (shouldNotify()) {
-          playCompletionChime();
-          bumpBadge();
-        }
+        notifyCompletion();
         refreshTitle();
       }
     },
-    [sessionId, setNeedsInput, setBusy, refreshTitle],
+    [sessionId, setNeedsInput, setBusy, refreshTitle, notifyCompletion],
   );
 
   // One attempt shortly after mount catches resumed sessions whose transcript
@@ -473,6 +483,7 @@ function PureSessionView({
       promptOpenRef.current = false;
       pollOpenRef.current = false;
       turnEndSeenRef.current = false;
+      completionNotifiedRef.current = false;
       outTailRef.current = "";
     }
   }, [sessionId, setBusy, setNeedsInput]);
@@ -487,16 +498,13 @@ function PureSessionView({
         setBusy(sessionId, false); // output went quiet → turn settled
         // If a permission/input prompt is on screen the prompt chime already
         // rang — don't double-ring as a "turn done".
-        if (!promptOpenRef.current && shouldNotify()) {
-          playCompletionChime();
-          bumpBadge();
-        }
+        if (!promptOpenRef.current) notifyCompletion();
         // Turn settled → claude has flushed the user message (and maybe a
         // summary) to its transcript; try to title from it.
         refreshTitle();
       }, IDLE_DONE_MS);
     },
-    [refreshTitle, detectPrompt, sessionId, setBusy],
+    [refreshTitle, detectPrompt, sessionId, setBusy, notifyCompletion],
   );
 
   // NB: no unmount-clear here. Leaving the chat tab unmounts this panel mid-turn

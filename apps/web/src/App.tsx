@@ -421,8 +421,8 @@ export function App() {
               onNewSession={startNewSession}
               onOpenProjectSettings={(id) => setProjectSettingsId(id)}
             />
-            <div className="flex min-h-0 flex-1 flex-col bg-neutral-950">
-              <main className="flex min-h-0 flex-1 flex-col">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-950">
+              <main className="flex min-h-0 min-w-0 flex-1 flex-col">
                 {projects.length === 0 ? (
                   <div className="min-h-0 flex-1 overflow-y-auto p-4">
                     <WelcomeScreen
