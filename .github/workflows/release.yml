@@ -17,8 +17,8 @@ env:
 
 jobs:
   # 1) Cross-compile the WSL agent (Linux x86_64-musl, fully static)
-  #    on Ubuntu — far less painful than musl-from-Windows. Upload the
-  #    binary as an artifact for the Windows job to consume.
+  #    on Ubuntu — far less painful than musl-from-Windows. Only the Windows
+  #    installer bundles it; macOS/Linux hosts have no WSL layer.
   build-agent:
     name: Build WSL agent (linux musl)
     runs-on: ubuntu-latest
@@ -54,9 +54,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # 2) Build the Windows desktop app + bundle the agent into the MSI / NSIS
-  #    installers via `tauri.conf.json#bundle.resources`. Publishes a
-  #    GitHub release on tag pushes.
+  # 2) Windows desktop app + installers (MSI / NSIS). Bundles the agent via
+  #    `tauri.windows.conf.json#bundle.resources`.
   build-windows:
     name: Build Windows installer
     needs: build-agent
@@ -89,20 +88,13 @@ jobs:
       - name: Build desktop (release + bundle)
         run: bun x tauri build
         env:
-          # Updater signing keys (minisign keypair generated via
-          # `bun x tauri signer generate`). Public key lives in
-          # `tauri.conf.json#plugins.updater.pubkey`; private key +
-          # optional password are GH repo secrets.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Collect installers + build updater manifest
+      - name: Collect installers
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          # Cargo workspace puts the build dir at the repo root, not under
-          # `apps/desktop/target/`. With `bundle.createUpdaterArtifacts` on,
-          # tauri build emits a `.sig` next to each installer.
           $bundleDir = "target/release/bundle"
           $patterns = @("msi/*.msi", "msi/*.msi.sig", "nsis/*.exe", "nsis/*.exe.sig")
           foreach ($pat in $patterns) {
@@ -112,43 +104,179 @@ jobs:
           if ((Get-ChildItem release -ErrorAction SilentlyContinue).Count -eq 0) {
               Write-Error "No installers were produced — see the build step above."
           }
-
-          # `tauri build` emits only the per-installer .sig files; the updater
-          # manifest (latest.json) is ours to assemble. The Windows updater
-          # installs through the NSIS setup, so the platform entry points there.
-          $tag = "${{ github.ref_name }}"
-          $version = $tag.TrimStart('v')
-          $repo = "${{ github.repository }}"
-          $setup = Get-ChildItem release -Filter "*-setup.exe" | Select-Object -First 1
-          if (-not $setup) {
-              Write-Error "no NSIS -setup.exe produced; cannot build latest.json"
-          }
-          $sigPath = Join-Path release "$($setup.Name).sig"
-          if (-not (Test-Path $sigPath)) {
-              Write-Error "missing $($setup.Name).sig — is bundle.createUpdaterArtifacts enabled?"
-          }
-          $signature = (Get-Content $sigPath -Raw).Trim()
-          $url = "https://github.com/$repo/releases/download/$tag/$($setup.Name)"
-          $manifest = [ordered]@{
-              version   = $version
-              pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-              platforms = [ordered]@{
-                  "windows-x86_64" = [ordered]@{ signature = $signature; url = $url }
-              }
-          }
-          $manifest | ConvertTo-Json -Depth 5 |
-              Set-Content -Path (Join-Path release "latest.json") -Encoding utf8
           Get-ChildItem release | ForEach-Object { Write-Host "  - $($_.Name)" }
 
-      - name: Upload installers (artifact)
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: oxyris-windows-installers
           path: release/*
 
-      # Only publish to a Release when the run was triggered by a tag.
+  # 3) macOS desktop app (.dmg + updater .app.tar.gz). macos-latest runners
+  #    are Apple Silicon → builds aarch64. No agent / WSL layer.
+  build-macos:
+    name: Build macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-tauri
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Install web deps
+        run: bun install --frozen-lockfile
+
+      - name: Build web bundle
+        run: bun run --cwd apps/web build
+
+      - name: Build desktop (release + bundle)
+        run: bun x tauri build --target aarch64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Collect bundles
+        run: |
+          mkdir -p release
+          bundleDir="target/aarch64-apple-darwin/release/bundle"
+          find "$bundleDir/dmg" -name "*.dmg" -exec cp -f {} release/ \; 2>/dev/null || true
+          find "$bundleDir/macos" -name "*.app.tar.gz" -exec cp -f {} release/ \; 2>/dev/null || true
+          find "$bundleDir/macos" -name "*.app.tar.gz.sig" -exec cp -f {} release/ \; 2>/dev/null || true
+          ls -la release
+          test -n "$(ls -A release)" || { echo "No macOS bundles produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oxyris-macos-bundles
+          path: release/*
+
+  # 4) Linux desktop app (.deb + .AppImage + updater .AppImage.tar.gz).
+  build-linux:
+    name: Build Linux app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-tauri
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: Install Linux system deps (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - name: Install web deps
+        run: bun install --frozen-lockfile
+
+      - name: Build web bundle
+        run: bun run --cwd apps/web build
+
+      - name: Build desktop (release + bundle)
+        run: bun x tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Collect bundles
+        run: |
+          mkdir -p release
+          bundleDir="target/release/bundle"
+          find "$bundleDir/deb" -name "*.deb" -exec cp -f {} release/ \; 2>/dev/null || true
+          find "$bundleDir/appimage" -name "*.AppImage" -exec cp -f {} release/ \; 2>/dev/null || true
+          find "$bundleDir/appimage" -name "*.AppImage.tar.gz" -exec cp -f {} release/ \; 2>/dev/null || true
+          find "$bundleDir/appimage" -name "*.AppImage.tar.gz.sig" -exec cp -f {} release/ \; 2>/dev/null || true
+          ls -la release
+          test -n "$(ls -A release)" || { echo "No Linux bundles produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oxyris-linux-bundles
+          path: release/*
+
+  # 5) Assemble a single cross-platform updater manifest (latest.json) from
+  #    every platform's signed updater artifact, then publish the GitHub
+  #    release. Only runs for tag pushes.
+  publish:
+    name: Publish release
+    needs: [build-windows, build-macos, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release dir + updater manifest
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f -exec cp -f {} release/ \;
+          version="${TAG#v}"
+          base="https://github.com/$REPO/releases/download/$TAG"
+
+          sig() { cat "release/$1.sig" | tr -d '\n'; }
+
+          # Build the platforms map from whichever updater artifacts exist.
+          platforms="{}"
+
+          setup=$(ls release/*-setup.exe 2>/dev/null | head -n1 || true)
+          if [ -n "$setup" ]; then
+            name=$(basename "$setup")
+            platforms=$(echo "$platforms" | jq --arg s "$(sig "$name")" --arg u "$base/$name" \
+              '. + {"windows-x86_64": {signature: $s, url: $u}}')
+          fi
+
+          macupd=$(ls release/*.app.tar.gz 2>/dev/null | head -n1 || true)
+          if [ -n "$macupd" ]; then
+            name=$(basename "$macupd")
+            platforms=$(echo "$platforms" | jq --arg s "$(sig "$name")" --arg u "$base/$name" \
+              '. + {"darwin-aarch64": {signature: $s, url: $u}}')
+          fi
+
+          linupd=$(ls release/*.AppImage.tar.gz 2>/dev/null | head -n1 || true)
+          if [ -n "$linupd" ]; then
+            name=$(basename "$linupd")
+            platforms=$(echo "$platforms" | jq --arg s "$(sig "$name")" --arg u "$base/$name" \
+              '. + {"linux-x86_64": {signature: $s, url: $u}}')
+          fi
+
+          pub_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          jq -n --arg v "$version" --arg d "$pub_date" --argjson p "$platforms" \
+            '{version: $v, pub_date: $d, platforms: $p}' > release/latest.json
+          echo "----- latest.json -----"
+          cat release/latest.json
+          echo "----- release files -----"
+          ls -la release
+
       - name: Publish to GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: release/*

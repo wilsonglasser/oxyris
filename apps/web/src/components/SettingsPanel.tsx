@@ -16,6 +16,7 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import type { Environment } from "~/ipc/commands.ts";
 import { LanguageSwitcher } from "~/components/LanguageSwitcher.tsx";
+import { localEnvLabel } from "~/lib/host.ts";
 import { LanguagePacksPanel } from "~/components/LanguagePacksPanel.tsx";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
@@ -539,8 +540,8 @@ function Section({
 function InstallCard({ install }: { install: DiscoveredInstall }) {
   const { t } = useTranslation("settings");
   const envLabel =
-    install.environment.kind === "windows"
-      ? t("env_windows")
+    install.environment.kind === "local"
+      ? localEnvLabel()
       : t("env_wsl", { distro: install.environment.distro });
   const providerLabel =
     install.provider_id === "claude" ? t("provider_claude") : install.provider_id;

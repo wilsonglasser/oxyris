@@ -66,7 +66,7 @@ pub async fn clone(
     target_dir: &str,
 ) -> Result<RemoteOpResult, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let url = url.to_owned();
             let target = target_dir.to_owned();
             tokio::task::spawn_blocking(move || git_remote::clone(&url, &target))
@@ -97,7 +97,7 @@ pub async fn list_branches(
     repo_path: &str,
 ) -> Result<Vec<BranchInfo>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             tokio::task::spawn_blocking(move || wt::list_branches(&path))
                 .await
@@ -126,7 +126,7 @@ pub async fn list_worktrees(
     repo_path: &str,
 ) -> Result<Vec<WorktreeRef>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             tokio::task::spawn_blocking(move || wt::list_worktrees(&path))
                 .await
@@ -159,7 +159,7 @@ pub async fn create_worktree(
     _create_branch: bool,
 ) -> Result<WorktreeRef, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             let name_owned = name.to_owned();
             let branch_owned = branch.to_owned();
@@ -196,7 +196,7 @@ pub async fn status(
     repo_path: &str,
 ) -> Result<StatusReport, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_status::status(&path))
                 .await
@@ -227,7 +227,7 @@ pub async fn diff_file(
     mode: DiffMode,
 ) -> Result<FileDiff, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             let p = path.to_owned();
             tokio::task::spawn_blocking(move || git_status::diff_file(&repo, &p, mode))
@@ -260,7 +260,7 @@ pub async fn stage(
     paths: Vec<String>,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_status::stage(&repo, &paths))
                 .await
@@ -291,7 +291,7 @@ pub async fn unstage(
     paths: Vec<String>,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_status::unstage(&repo, &paths))
                 .await
@@ -323,7 +323,7 @@ pub async fn commit(
     amend: bool,
 ) -> Result<CommitResult, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_status::commit(&repo, &message, amend))
                 .await
@@ -363,7 +363,7 @@ pub async fn fetch(
     remote: Option<String>,
 ) -> Result<RemoteOpResult, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_remote::fetch(&repo, remote.as_deref()))
                 .await
@@ -396,7 +396,7 @@ pub async fn pull(
     rebase: bool,
 ) -> Result<RemoteOpResult, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             let r = remote.clone();
             let b = branch.clone();
@@ -436,7 +436,7 @@ pub async fn push(
     set_upstream: bool,
 ) -> Result<RemoteOpResult, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             let r = remote.clone();
             let b = branch.clone();
@@ -474,7 +474,7 @@ pub async fn checkout(
     name: String,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_branch::checkout(&repo, &name))
                 .await
@@ -507,7 +507,7 @@ pub async fn branch_create(
     checkout_after: bool,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             let n = name.clone();
             let f = from.clone();
@@ -544,7 +544,7 @@ pub async fn branch_delete(
     name: String,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_branch::delete_branch(&repo, &name))
                 .await
@@ -577,7 +577,7 @@ pub async fn log(
     path: Option<String>,
 ) -> Result<Vec<CommitInfo>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             let r = rev.clone();
             let p = path.clone();
@@ -614,7 +614,7 @@ pub async fn get_conflict(
     path: String,
 ) -> Result<ConflictContents, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_conflict::get_conflict(&repo, &path))
                 .await
@@ -644,7 +644,7 @@ pub async fn stash_list(
     repo_path: &str,
 ) -> Result<Vec<StashEntry>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_stash::list(&p))
                 .await
@@ -675,7 +675,7 @@ pub async fn stash_save(
     include_untracked: bool,
 ) -> Result<String, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_stash::save(&p, &message, include_untracked))
                 .await
@@ -708,7 +708,7 @@ pub async fn stash_apply(
     drop_after: bool,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_stash::apply(&p, index, drop_after))
                 .await
@@ -740,7 +740,7 @@ pub async fn stash_drop(
     index: u32,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_stash::drop(&p, index))
                 .await
@@ -770,7 +770,7 @@ pub async fn tag_list(
     repo_path: &str,
 ) -> Result<Vec<TagInfo>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_tag::list(&p))
                 .await
@@ -803,7 +803,7 @@ pub async fn tag_create(
     force: bool,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             let n = name.clone();
             let t = target.clone();
@@ -842,7 +842,7 @@ pub async fn tag_delete(
     name: String,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_tag::delete(&p, &name))
                 .await
@@ -873,7 +873,7 @@ pub async fn cherry_pick(
     oid: String,
 ) -> Result<Option<String>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_cherry::cherry_pick(&p, &oid))
                 .await
@@ -904,7 +904,7 @@ pub async fn revert(
     oid: String,
 ) -> Result<Option<String>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_cherry::revert(&p, &oid))
                 .await
@@ -937,7 +937,7 @@ pub async fn diff_revs(
     find_renames: bool,
 ) -> Result<Vec<FileDiff>, GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = repo_path.to_owned();
             let f = from.clone();
             let t = to.clone();
@@ -974,7 +974,7 @@ pub async fn apply_patch(
     cached: bool,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || {
                 git_status::apply_patch(&repo, &patch, reverse, cached)
@@ -1010,7 +1010,7 @@ pub async fn resolve_conflict(
     content: String,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo = repo_path.to_owned();
             tokio::task::spawn_blocking(move || git_conflict::resolve(&repo, &path, &content))
                 .await
@@ -1043,7 +1043,7 @@ pub async fn remove_worktree(
     _target_dir: &str,
 ) -> Result<(), GitError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             let name_owned = name.to_owned();
             tokio::task::spawn_blocking(move || wt::remove_worktree(&path, &name_owned))

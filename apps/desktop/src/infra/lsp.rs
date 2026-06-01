@@ -186,7 +186,7 @@ impl LspManager {
         }
 
         let (binary, args) = match env {
-            Environment::Windows => match self.resolve_with_packs(lang).await {
+            Environment::Local => match self.resolve_with_packs(lang).await {
                 Ok(t) => t,
                 Err(hint) => {
                     self.emit(LspStatusEvent::NotInstalled {
@@ -228,7 +228,7 @@ impl LspManager {
             "lsp spawn",
         );
         let result = match env {
-            Environment::Windows => LspClient::spawn(&binary, &args, &workspace).await,
+            Environment::Local => LspClient::spawn(&binary, &args, &workspace).await,
             Environment::Wsl { distro } => {
                 let binary_str = binary.to_string_lossy().into_owned();
                 LspClient::spawn_wsl(distro, &binary_str, &args, &workspace).await

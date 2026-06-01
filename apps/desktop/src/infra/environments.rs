@@ -6,13 +6,19 @@
 //! (`docker-desktop`, `docker-desktop-data`) that are not real dev targets,
 //! so we strip those out.
 
+#[cfg(windows)]
 use std::process::{Command, Output};
 
 use oxyris_core::Environment;
+#[cfg(windows)]
 use oxyris_procutil::HideConsole;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use thiserror::Error;
 
+// WSL discovery is Windows-host-only; the machinery below is compiled out on
+// macOS/Linux, where the only environment is the native `Local` host.
+#[cfg(windows)]
 #[derive(Debug, Error)]
 pub enum EnvironmentsError {
     #[error("failed to run wsl.exe: {0}")]
@@ -32,8 +38,10 @@ pub struct EnvironmentEntry {
 
 /// Internal WSL distros that ship with Docker Desktop — not project targets.
 /// Ordered check is against exact names (case-insensitive).
+#[cfg(windows)]
 const HIDDEN_DISTROS: &[&str] = &["docker-desktop", "docker-desktop-data"];
 
+#[cfg(windows)]
 fn is_hidden(name: &str) -> bool {
     HIDDEN_DISTROS
         .iter()
@@ -42,17 +50,19 @@ fn is_hidden(name: &str) -> bool {
 
 /// Discover all environments the app can host projects in.
 ///
-/// Always includes [`Environment::Windows`] first. Failure to enumerate WSL
-/// is **not** fatal — it just means "no WSL detected on this box" and we
-/// return only Windows.
+/// Always includes [`Environment::Local`] first. WSL distros are only
+/// discoverable on a Windows host; on macOS/Linux the only environment is the
+/// native host. Failure to enumerate WSL on Windows is **not** fatal — it just
+/// means "no WSL detected on this box" and we return only `Local`.
 pub fn environments_list() -> Vec<EnvironmentEntry> {
     let mut out = vec![EnvironmentEntry {
-        environment: Environment::Windows,
+        environment: Environment::Local,
         state: None,
         version: None,
         is_default: true,
     }];
 
+    #[cfg(windows)]
     match run_wsl_list() {
         Ok(distros) => {
             for d in distros {
@@ -75,6 +85,7 @@ pub fn environments_list() -> Vec<EnvironmentEntry> {
     out
 }
 
+#[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WslDistro {
     pub name: String,
@@ -83,6 +94,7 @@ struct WslDistro {
     pub is_default: bool,
 }
 
+#[cfg(windows)]
 fn run_wsl_list() -> Result<Vec<WslDistro>, EnvironmentsError> {
     let out = Command::new("wsl.exe")
         .args(["--list", "--verbose"])
@@ -92,6 +104,7 @@ fn run_wsl_list() -> Result<Vec<WslDistro>, EnvironmentsError> {
     Ok(parse_wsl_list(&out.stdout))
 }
 
+#[cfg(windows)]
 fn check_status(out: &Output) -> Result<(), EnvironmentsError> {
     if !out.status.success() {
         return Err(EnvironmentsError::NonZero {
@@ -106,6 +119,7 @@ fn check_status(out: &Output) -> Result<(), EnvironmentsError> {
 /// with a BOM, sometimes not (depends on Windows build / locale). When there
 /// is no BOM we sniff for UTF-16 by looking at the null-byte cadence. Tests
 /// pass plain ASCII, which we treat as UTF-8.
+#[cfg(windows)]
 fn decode_output(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         let (cow, _, _) = encoding_rs::UTF_16LE.decode(rest);
@@ -129,6 +143,7 @@ fn decode_output(bytes: &[u8]) -> String {
 /// a BOM? Looks at the first chunk and checks that the high byte of every
 /// 16-bit unit is zero — that's true for any ASCII content under UTF-16 LE
 /// and almost never true for genuine UTF-8.
+#[cfg(windows)]
 fn looks_like_utf16le(bytes: &[u8]) -> bool {
     if bytes.len() < 4 || !bytes.len().is_multiple_of(2) {
         return false;
@@ -144,6 +159,7 @@ fn looks_like_utf16le(bytes: &[u8]) -> bool {
     zeros * 5 >= total * 4
 }
 
+#[cfg(windows)]
 fn parse_wsl_list(bytes: &[u8]) -> Vec<WslDistro> {
     let text = decode_output(bytes);
     let mut out = Vec::new();
@@ -193,6 +209,7 @@ fn parse_wsl_list(bytes: &[u8]) -> Vec<WslDistro> {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     fn utf16_bytes(s: &str) -> Vec<u8> {
         let mut v = vec![0xFF, 0xFE];
         for u in s.encode_utf16() {
@@ -201,6 +218,7 @@ mod tests {
         v
     }
 
+    #[cfg(windows)]
     #[test]
     fn parses_typical_output_with_default_marker() {
         let raw = "  NAME                      STATE           VERSION\n\
@@ -214,6 +232,7 @@ mod tests {
         assert!(distros.iter().any(|d| d.name == "docker-desktop"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn handles_output_without_bom() {
         let raw = "  NAME    STATE    VERSION\n  Ubuntu  Running  2\n";
@@ -222,6 +241,7 @@ mod tests {
         assert_eq!(distros[0].name, "Ubuntu");
     }
 
+    #[cfg(windows)]
     #[test]
     fn handles_utf16le_without_bom() {
         // Newer wsl.exe builds drop the BOM but still emit UTF-16 LE.
@@ -236,6 +256,7 @@ mod tests {
         assert!(distros[0].is_default);
     }
 
+    #[cfg(windows)]
     #[test]
     fn is_hidden_matches_case_insensitively() {
         assert!(is_hidden("docker-desktop"));
@@ -247,10 +268,11 @@ mod tests {
     #[test]
     fn environments_list_always_includes_windows_first() {
         let envs = environments_list();
-        assert!(matches!(envs[0].environment, Environment::Windows));
+        assert!(matches!(envs[0].environment, Environment::Local));
         assert!(envs[0].is_default);
     }
 
+    #[cfg(windows)]
     #[test]
     fn environments_list_filters_docker_desktop() {
         // We can't mock wsl.exe here, but we can test the post-filter

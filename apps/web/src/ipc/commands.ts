@@ -13,7 +13,7 @@ export async function greet(name: string): Promise<string> {
 // ────── Sprint 2: Project aggregate ─────────────────────────────────────────
 
 export type Environment =
-  | { kind: "windows" }
+  | { kind: "local" }
   | { kind: "wsl"; distro: string };
 
 export type ProjectRow = {

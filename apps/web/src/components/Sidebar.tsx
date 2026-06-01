@@ -44,6 +44,7 @@ import {
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
+import { localEnvLabel } from "~/lib/host.ts";
 import {
   createPromptSniffer,
   PURE_POLL_RE,
@@ -360,6 +361,9 @@ export function Sidebar({
           sniffer.feed(data);
           pollSniffer.feed(data);
           endSniffer.feed(data);
+          // Keep the green "recent" window alive for pure threads (no Turn
+          // event bumps their projected last_activity_at).
+          useSessionStore.getState().touchActivity(s.id);
           // Any sniffer latched: count output to detect a new turn. Cursor-
           // blink redraws are tiny; real content trips the threshold quickly.
           if (sniffer.open || pollSniffer.open || endSniffer.open) {
@@ -799,8 +803,8 @@ function ProjectItem({
             : null;
 
   const envLabel =
-    project.environment.kind === "windows"
-      ? "Windows"
+    project.environment.kind === "local"
+      ? localEnvLabel()
       : `WSL · ${project.environment.distro}`;
 
   // Split the row vertically at its midpoint to decide "before" vs "after"
@@ -971,6 +975,9 @@ function SessionEntry({
   const needsAttention = useSessionStore((s) => !!s.attention[session.id]);
   // Red — Claude is paused waiting on a tool-approval input.
   const needsInput = useSessionStore((s) => !!s.needsInput[session.id]);
+  // Live PTY activity (pure threads have no Turn event to bump
+  // last_activity_at). Feeds StatusDot's green "recent" window.
+  const liveActivityAt = useSessionStore((s) => s.liveActivity[session.id]);
   const busy = useBusyStore((s) => !!s.busy[session.id]);
 
   const onRename = async (e: React.MouseEvent) => {
@@ -1038,6 +1045,7 @@ function SessionEntry({
           needsInput={needsInput}
           busy={busy}
           lastActivityAt={session.last_activity_at}
+          liveActivityAt={liveActivityAt}
         />
         <button
           type="button"
@@ -1124,12 +1132,15 @@ function StatusDot({
   needsInput,
   busy,
   lastActivityAt,
+  liveActivityAt,
 }: {
   status: string;
   attention?: boolean;
   needsInput?: boolean;
   busy?: boolean;
   lastActivityAt: string;
+  /** Wall-clock ms of last live PTY output (pure threads); overrides recency. */
+  liveActivityAt?: number | undefined;
 }) {
   // Needs you → red. Outranks everything: a paused turn can still be "busy".
   if (needsInput || status === "errored") {
@@ -1152,7 +1163,10 @@ function StatusDot({
       <span className="inline-block size-1.5 shrink-0 rounded-full bg-orange-400" />
     );
   }
-  const color = isRecent(lastActivityAt) ? "bg-emerald-400" : "bg-neutral-600";
+  const recent =
+    isRecent(lastActivityAt) ||
+    (liveActivityAt !== undefined && Date.now() - liveActivityAt < RECENT_MS);
+  const color = recent ? "bg-emerald-400" : "bg-neutral-600";
   return (
     <span className={`inline-block size-1.5 shrink-0 rounded-full ${color}`} />
   );

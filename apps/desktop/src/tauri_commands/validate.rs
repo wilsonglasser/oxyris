@@ -46,7 +46,7 @@ pub async fn project_validate_path(
     state: State<'_, AppState>,
 ) -> Result<PathValidation, TauriValidateError> {
     match input.environment {
-        Environment::Windows => Ok(validate_windows(&input.path)),
+        Environment::Local => Ok(validate_windows(&input.path)),
         Environment::Wsl { distro } => validate_wsl(&state, &distro, &input.path).await,
     }
 }

@@ -199,7 +199,7 @@ impl IndexingService {
         // Watcher only for Windows — `notify` over 9p (\\wsl.localhost)
         // either misses events or fires duplicates depending on the
         // backend. Skip cleanly for WSL; rebuild covers updates.
-        let watch = if matches!(env, Environment::Windows) {
+        let watch = if matches!(env, Environment::Local) {
             match start_watcher(index.clone(), worktree_root) {
                 Ok(w) => Some(w),
                 Err(e) => {
@@ -228,7 +228,7 @@ impl IndexingService {
         worktree_root: &str,
     ) -> PathBuf {
         match env {
-            Environment::Windows => PathBuf::from(worktree_root)
+            Environment::Local => PathBuf::from(worktree_root)
                 .join(".oxyris")
                 .join("index.db"),
             Environment::Wsl { .. } => self
@@ -291,7 +291,7 @@ impl IndexingService {
     ) -> Result<RebuildReport, IndexingError> {
         let index = self.open_for(worktree_id, env, worktree_root).await?;
         match env {
-            Environment::Windows => {
+            Environment::Local => {
                 let root = PathBuf::from(worktree_root);
                 if !root.is_dir() {
                     return Err(IndexingError::InvalidWorktreePath(worktree_root.to_owned()));
@@ -357,6 +357,9 @@ async fn rebuild_wsl(
         }
         let path = Path::new(&entry.path);
         if Lang::from_path(path).is_none() {
+            continue;
+        }
+        if is_generated(path, Path::new(worktree_root)) {
             continue;
         }
         let size = entry.size.unwrap_or(0);
@@ -515,6 +518,9 @@ fn rebuild_blocking(
         let Some(lang) = Lang::from_path(path) else {
             continue;
         };
+        if is_generated(path, root) {
+            continue;
+        }
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(_) => {
@@ -597,11 +603,21 @@ fn count_indexable(root: &Path) -> u64 {
         if !result.file_type().is_some_and(|f| f.is_file()) {
             continue;
         }
-        if Lang::from_path(result.path()).is_some() {
+        if Lang::from_path(result.path()).is_some() && !is_generated(result.path(), root) {
             count += 1;
         }
     }
     count
+}
+
+/// Skip minified/bundled/vendored files so the symbol index isn't polluted
+/// with garbage (single-letter symbols from `*.min.js`, etc.). Mirrors the
+/// path-search filter via the shared [`oxyris_ipc::ops::is_generated_path`].
+fn is_generated(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .map(|rel| oxyris_ipc::ops::is_generated_path(&rel.to_string_lossy()))
+        .unwrap_or(false)
 }
 
 fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
@@ -695,6 +711,9 @@ fn process_change(path: &Path, root: &Path, index: &Index) {
         return;
     }
     let relative = rel.to_string_lossy().replace('\\', "/");
+    if oxyris_ipc::ops::is_generated_path(&relative) {
+        return;
+    }
 
     let exists = path.exists();
     if !exists {

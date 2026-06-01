@@ -54,7 +54,7 @@ impl FsWatchService {
         env: &Environment,
         worktree_root: String,
     ) {
-        if !matches!(env, Environment::Windows) {
+        if !matches!(env, Environment::Local) {
             return;
         }
         {

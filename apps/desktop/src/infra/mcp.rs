@@ -76,7 +76,7 @@ pub fn prepare_for_worktree(
     // because SQLite over 9p is slow/crash-prone — we mount via the
     // Windows UNC for that one file.
     let workspace_for_args = match env {
-        Environment::Windows => worktree_root.to_owned(),
+        Environment::Local => worktree_root.to_owned(),
         Environment::Wsl { distro } => match path_translator::to_posix(distro, worktree_root) {
             Ok(p) => p,
             Err(e) => {

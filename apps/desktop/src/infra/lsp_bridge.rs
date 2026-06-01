@@ -191,7 +191,7 @@ fn bridge_env_for(workspace: &Path) -> Environment {
     {
         return Environment::Wsl { distro };
     }
-    Environment::Windows
+    Environment::Local
 }
 
 fn parse_position(params: &Value) -> Result<(PathBuf, PathBuf, u32, u32), String> {

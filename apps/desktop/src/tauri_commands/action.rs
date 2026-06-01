@@ -274,14 +274,18 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
     tauri::async_runtime::spawn(async move {
         let event_name = format!("action:output:{run_id}");
         let spawn_result = match env {
-            Environment::Windows => Command::new("cmd.exe")
-                .args(["/C", &command])
-                .current_dir(&cwd)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .hide_console()
-                .spawn(),
+            Environment::Local => {
+                let (sh, pre) = oxyris_procutil::host_shell();
+                Command::new(sh)
+                    .args(pre)
+                    .arg(&command)
+                    .current_dir(&cwd)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .hide_console()
+                    .spawn()
+            }
             Environment::Wsl { ref distro } => Command::new("wsl.exe")
                 .args([
                     "-d",

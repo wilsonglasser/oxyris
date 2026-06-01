@@ -76,7 +76,7 @@ pub async fn detect(
 ) -> Result<EnvTemplate, AgentError> {
     let template_path = join(worktree_path, TEMPLATE_RELATIVE, env);
     let exists = match env {
-        Environment::Windows => std::path::Path::new(&template_path).is_file(),
+        Environment::Local => std::path::Path::new(&template_path).is_file(),
         Environment::Wsl { distro } => {
             let value = agent_pool
                 .call(
@@ -103,13 +103,15 @@ pub async fn detect(
 
 fn join(base: &str, relative: &str, env: &Environment) -> String {
     let sep = match env {
-        Environment::Windows => '\\',
+        Environment::Local => std::path::MAIN_SEPARATOR,
         Environment::Wsl { .. } => '/',
     };
-    let normalized = if matches!(env, Environment::Wsl { .. }) {
-        relative.replace('\\', "/")
-    } else {
-        relative.replace('/', "\\")
+    let normalized = match env {
+        Environment::Wsl { .. } => relative.replace('\\', "/"),
+        #[cfg(windows)]
+        Environment::Local => relative.replace('/', "\\"),
+        #[cfg(not(windows))]
+        Environment::Local => relative.replace('\\', "/"),
     };
     if base.ends_with(sep) || base.ends_with('/') || base.ends_with('\\') {
         format!("{base}{normalized}")

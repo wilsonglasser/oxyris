@@ -290,6 +290,9 @@ pub fn search_paths(
             continue;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if oxyris_ipc::ops::is_generated_path(&rel_str) {
+            continue;
+        }
         if !q_lower.is_empty() {
             let hay = rel_str.to_lowercase();
             let Some(_idx) = hay.find(&q_lower) else {

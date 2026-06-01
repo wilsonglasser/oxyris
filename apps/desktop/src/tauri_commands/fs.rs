@@ -284,7 +284,7 @@ pub async fn fs_reveal(
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
     let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
     let windows_path = match &env {
-        Environment::Windows => abs,
+        Environment::Local => abs,
         Environment::Wsl { distro } => crate::infra::path_translator::to_windows(distro, &abs)
             .map_err(|e| TauriFsError::Backend(format!("path translate: {e}")))?,
     };
@@ -619,7 +619,7 @@ mod open_external {
     /// posix path if translation fails (better than nothing).
     fn path_for_editor(env: &Environment, abs_path: &str) -> String {
         match env {
-            Environment::Windows => abs_path.to_owned(),
+            Environment::Local => abs_path.to_owned(),
             Environment::Wsl { distro } => {
                 crate::infra::path_translator::to_windows(distro, abs_path)
                     .unwrap_or_else(|_| abs_path.to_owned())

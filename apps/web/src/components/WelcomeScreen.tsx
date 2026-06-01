@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { localEnvLabel } from "~/lib/host.ts";
 
 type DiscoveredInstall = {
   provider_id: string;
@@ -92,7 +93,7 @@ export function WelcomeScreen({ onNewProject }: Props) {
 }
 
 function envLabel(env: { kind: string; distro?: string }): string {
-  if (env.kind === "windows") return "Windows";
+  if (env.kind === "local") return localEnvLabel();
   if (env.kind === "wsl") return `WSL · ${env.distro ?? ""}`;
   return env.kind;
 }

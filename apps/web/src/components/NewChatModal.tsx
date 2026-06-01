@@ -5,10 +5,11 @@ import type { ProjectRow } from "~/ipc/commands.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { Modal } from "~/components/Modal.tsx";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
+import { localEnvLabel } from "~/lib/host.ts";
 
 function envLabel(p: ProjectRow): string {
-  return p.environment.kind === "windows"
-    ? "Windows"
+  return p.environment.kind === "local"
+    ? localEnvLabel()
     : `WSL · ${p.environment.distro}`;
 }
 

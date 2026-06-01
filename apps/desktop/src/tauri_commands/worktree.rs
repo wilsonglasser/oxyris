@@ -432,7 +432,7 @@ fn load_worktree(
 
 fn worktree_target_path(root: &str, env: &Environment, name: &str) -> String {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             // Use backslashes. `root` should already be canonical.
             let sep = if root.ends_with('\\') || root.ends_with('/') {
                 ""

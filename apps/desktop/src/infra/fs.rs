@@ -5,7 +5,7 @@
 //! rejected if it tries to escape via `..` or contains a drive letter / is
 //! absolute. The dispatcher then routes per `Environment`:
 //!
-//! - `Windows` → `std::fs` directly (off the runtime via `spawn_blocking`).
+//! - `Local` → `std::fs` directly (off the runtime via `spawn_blocking`).
 //! - `Wsl { distro }` → agent ops (`fs.list_dir`, `fs.read`, `fs.write`).
 
 use std::path::{Component, Path, PathBuf};
@@ -116,7 +116,9 @@ pub fn join_inside_worktree(env: &Environment, root: &str, rel: &str) -> Result<
     }
 
     let sep = match env {
-        Environment::Windows => '\\',
+        // Host-native worktree path: follow the host OS separator (`\` on a
+        // Windows host, `/` on macOS/Linux).
+        Environment::Local => std::path::MAIN_SEPARATOR,
         Environment::Wsl { .. } => '/',
     };
     let normalized: Vec<String> = parsed
@@ -140,7 +142,7 @@ pub async fn list_dir(
     show_hidden: bool,
 ) -> Result<FsListDirResult, FsError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             tokio::task::spawn_blocking(move || list_dir_native(&abs_path, show_hidden))
                 .await
                 .map_err(|e| FsError::Agent(format!("join: {e}")))?
@@ -169,7 +171,7 @@ pub async fn read_file(
     max_bytes: Option<u64>,
 ) -> Result<FsReadResult, FsError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             tokio::task::spawn_blocking(move || read_file_native(&abs_path, max_bytes))
                 .await
                 .map_err(|e| FsError::Agent(format!("join: {e}")))?
@@ -198,7 +200,7 @@ pub async fn write_file(
     contents: String,
 ) -> Result<FsWriteResult, FsError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             tokio::task::spawn_blocking(move || write_file_native(&abs_path, &contents))
                 .await
                 .map_err(|e| FsError::Agent(format!("join: {e}")))?
@@ -227,7 +229,7 @@ pub async fn create_file(
     contents: String,
 ) -> Result<(), FsError> {
     match env {
-        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+        Environment::Local => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
             let path = Path::new(&abs_path);
             if path.exists() {
                 return Err(FsError::InvalidPath(format!("already exists: {abs_path}")));
@@ -263,7 +265,7 @@ pub async fn create_dir(
     abs_path: String,
 ) -> Result<(), FsError> {
     match env {
-        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+        Environment::Local => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
             std::fs::create_dir_all(&abs_path)?;
             Ok(())
         })
@@ -290,7 +292,7 @@ pub async fn rename(
     to: String,
 ) -> Result<(), FsError> {
     match env {
-        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+        Environment::Local => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
             let from_p = Path::new(&from);
             let to_p = Path::new(&to);
             if !from_p.exists() {
@@ -325,7 +327,7 @@ pub async fn copy(
     to: String,
 ) -> Result<(), FsError> {
     match env {
-        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+        Environment::Local => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
             let from_p = Path::new(&from);
             let to_p = Path::new(&to);
             if !from_p.exists() {
@@ -380,7 +382,7 @@ pub async fn delete(
     recursive: bool,
 ) -> Result<(), FsError> {
     match env {
-        Environment::Windows => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
+        Environment::Local => tokio::task::spawn_blocking(move || -> Result<(), FsError> {
             let path = Path::new(&abs_path);
             if !path.exists() {
                 return Err(FsError::InvalidPath(format!("not found: {abs_path}")));
@@ -423,7 +425,7 @@ pub async fn read_bytes(
     max_bytes: Option<u64>,
 ) -> Result<FsReadBytesResult, FsError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             tokio::task::spawn_blocking(move || read_bytes_native(&abs_path, max_bytes))
                 .await
                 .map_err(|e| FsError::Agent(format!("join: {e}")))?
@@ -453,7 +455,7 @@ pub async fn search_paths(
     limit: u32,
 ) -> Result<FsSearchPathsResult, FsError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let r = root.clone();
             let q = query.clone();
             tokio::task::spawn_blocking(move || search_paths_native(&r, &q, limit))
@@ -481,7 +483,7 @@ pub async fn search_content(
     args: FsSearchContentArgs,
 ) -> Result<FsSearchContentResult, FsError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let a = FsSearchContentArgs { root, ..args };
             tokio::task::spawn_blocking(move || search_content_native(&a))
                 .await
@@ -648,6 +650,9 @@ fn search_paths_native(
             continue;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if oxyris_ipc::ops::is_generated_path(&rel_str) {
+            continue;
+        }
         if !q_lower.is_empty() {
             let hay = rel_str.to_lowercase();
             if !hay.contains(&q_lower) {
@@ -820,24 +825,44 @@ fn search_content_native(args: &FsSearchContentArgs) -> Result<FsSearchContentRe
 mod tests {
     use super::*;
 
+    // Windows-host Local semantics: backslash separators + drive letters.
+    #[cfg(windows)]
     #[test]
     fn join_rejects_parent_escape() {
-        let err =
-            join_inside_worktree(&Environment::Windows, r"C:\proj", r"..\..\evil").unwrap_err();
+        let err = join_inside_worktree(&Environment::Local, r"C:\proj", r"..\..\evil").unwrap_err();
         assert!(matches!(err, FsError::InvalidPath(_)));
     }
 
+    #[cfg(windows)]
     #[test]
     fn join_allows_internal_parent() {
         let p =
-            join_inside_worktree(&Environment::Windows, r"C:\proj", r"src\..\src\lib.rs").unwrap();
+            join_inside_worktree(&Environment::Local, r"C:\proj", r"src\..\src\lib.rs").unwrap();
         assert_eq!(p, r"C:\proj\src\src\lib.rs");
     }
 
+    #[cfg(windows)]
     #[test]
     fn join_rejects_drive_letter() {
-        let err = join_inside_worktree(&Environment::Windows, r"C:\proj", r"D:\evil").unwrap_err();
+        let err = join_inside_worktree(&Environment::Local, r"C:\proj", r"D:\evil").unwrap_err();
         assert!(matches!(err, FsError::InvalidPath(_)));
+    }
+
+    // Unix-host Local semantics: forward-slash separators.
+    #[cfg(not(windows))]
+    #[test]
+    fn join_rejects_parent_escape_posix() {
+        let err =
+            join_inside_worktree(&Environment::Local, "/home/u/proj", "../../evil").unwrap_err();
+        assert!(matches!(err, FsError::InvalidPath(_)));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn join_allows_internal_parent_posix() {
+        let p =
+            join_inside_worktree(&Environment::Local, "/home/u/proj", "src/../src/lib.rs").unwrap();
+        assert_eq!(p, "/home/u/proj/src/src/lib.rs");
     }
 
     #[test]
@@ -855,7 +880,7 @@ mod tests {
 
     #[test]
     fn empty_rel_returns_root() {
-        let p = join_inside_worktree(&Environment::Windows, r"C:\proj", "").unwrap();
+        let p = join_inside_worktree(&Environment::Local, r"C:\proj", "").unwrap();
         assert_eq!(p, r"C:\proj");
     }
 }

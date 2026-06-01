@@ -73,7 +73,7 @@ pub async fn capture(
     phase: Phase,
 ) -> Result<Option<String>, CheckpointError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             let sid = session_id.to_owned();
             let tid = turn_id.to_owned();
@@ -112,7 +112,7 @@ pub async fn diff(
     turn_id: &str,
 ) -> Result<TurnDiff, CheckpointError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             let sid = session_id.to_owned();
             let tid = turn_id.to_owned();
@@ -147,7 +147,7 @@ pub async fn revert_to_pre(
     turn_id: &str,
 ) -> Result<(), CheckpointError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let path = repo_path.to_owned();
             let sid = session_id.to_owned();
             let tid = turn_id.to_owned();

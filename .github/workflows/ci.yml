@@ -15,8 +15,15 @@ env:
 
 jobs:
   rust:
-    name: Rust (fmt + clippy + build + test)
-    runs-on: windows-latest
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Validate every host: the backend routes by env at compile time, so the
+      # macOS/Linux `Environment::Local` branches only get type-checked on their
+      # own runners. Windows additionally compiles the WSL-only code paths.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,12 +32,31 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
 
-      - name: Stub WSL agent binary
-        # `tauri.conf.json#bundle.resources` lists `dist/agent/oxyris-agent`,
-        # which `tauri-build` validates at compile time. Regular CI doesn't
-        # cross-compile the real agent (that's the release pipeline) — drop
-        # an empty placeholder so the build proceeds.
+      - name: Install Linux system deps (Tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - name: Stub WSL agent binary (Windows only)
+        # `tauri.windows.conf.json#bundle.resources` lists
+        # `dist/agent/oxyris-agent`, which `tauri-build` validates at compile
+        # time on Windows. Regular CI doesn't cross-compile the real agent
+        # (that's the release pipeline) — drop an empty placeholder. The agent
+        # is not referenced on macOS/Linux, so this step is Windows-only.
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/agent | Out-Null

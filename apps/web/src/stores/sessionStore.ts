@@ -21,11 +21,21 @@ interface SessionStoreState {
    * *not* cleared by opening the thread — only by answering or the turn ending.
    */
   needsInput: Record<string, boolean>;
+  /**
+   * Wall-clock ms of the last live PTY output seen for a thread. Pure (claude
+   * TUI) sessions emit no Turn events, so their projected `last_activity_at`
+   * never advances on a turn — the bull would read stale-gray right after a
+   * reply. The output watchers (App for the active thread, Sidebar for
+   * background ones) stamp this; StatusDot treats it as recency.
+   */
+  liveActivity: Record<string, number>;
   setActive: (id: string | null) => void;
   /** Flag a background thread as needing attention (no-op for the active one). */
   markAttention: (id: string) => void;
   /** Set/clear the "Claude wants your input" (red) flag for a thread. */
   setNeedsInput: (id: string, on: boolean) => void;
+  /** Stamp a thread as active *now* (live PTY output). Throttled by callers. */
+  touchActivity: (id: string) => void;
   hydrate: (snapshot: SessionSnapshot) => void;
   applyEvent: (ev: EmittedSessionEvent) => void;
   clear: (id: string) => void;
@@ -37,6 +47,7 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   activeSessionId: null,
   attention: {},
   needsInput: {},
+  liveActivity: {},
 
   setActive: (id) =>
     set((state) => {
@@ -65,6 +76,16 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
       return { needsInput: rest };
     }),
 
+  touchActivity: (id) =>
+    set((state) => {
+      // Coarse: 30s granularity is plenty against a 1h recency window, and
+      // skipping sub-30s writes keeps a chatty PTY from churning the store.
+      const prev = state.liveActivity[id] ?? 0;
+      const now = Date.now();
+      if (now - prev < 30_000) return {};
+      return { liveActivity: { ...state.liveActivity, [id]: now } };
+    }),
+
   hydrate: (snapshot) =>
     set((state) => ({
       snapshots: { ...state.snapshots, [snapshot.id]: snapshot },
@@ -81,10 +102,12 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
       const { [id]: _removed, ...rest } = state.snapshots;
       const { [id]: _seen, ...attRest } = state.attention;
       const { [id]: _input, ...inputRest } = state.needsInput;
+      const { [id]: _live, ...liveRest } = state.liveActivity;
       return {
         snapshots: rest,
         attention: attRest,
         needsInput: inputRest,
+        liveActivity: liveRest,
         activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
       };
     }),

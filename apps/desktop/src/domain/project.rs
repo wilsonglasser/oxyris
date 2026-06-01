@@ -295,7 +295,7 @@ mod tests {
         ProjectCommand::Create {
             id: AggregateId::new(),
             name: name.into(),
-            environment: Environment::Windows,
+            environment: Environment::Local,
             root_path: root_path.into(),
             workspace: None,
             now: now(),
@@ -538,7 +538,7 @@ mod tests {
         let created = ProjectEvent::ProjectCreated {
             id: AggregateId::new(),
             name: "x".into(),
-            environment: Environment::Windows,
+            environment: Environment::Local,
             root_path: "p".into(),
             workspace: None,
             created_at: now(),

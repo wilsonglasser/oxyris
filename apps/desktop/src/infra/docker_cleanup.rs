@@ -201,7 +201,7 @@ async fn tear_down_project(
 
 async fn run_docker(env: &Environment, args: &[&str]) -> Result<String, String> {
     let mut cmd = match env {
-        Environment::Windows => {
+        Environment::Local => {
             let mut c = Command::new("docker");
             c.args(args);
             c
@@ -224,7 +224,7 @@ async fn run_docker(env: &Environment, args: &[&str]) -> Result<String, String> 
 
 fn same_env(a: &Environment, b: &Environment) -> bool {
     match (a, b) {
-        (Environment::Windows, Environment::Windows) => true,
+        (Environment::Local, Environment::Local) => true,
         (Environment::Wsl { distro: x }, Environment::Wsl { distro: y }) => x == y,
         _ => false,
     }

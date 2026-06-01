@@ -414,6 +414,12 @@ export function TerminalView({
     // can fire for the same paste, so debounce: the second call within the
     // window is dropped.
     let lastImageRoute = 0;
+    // Ctrl+C burst tracking. A lone Ctrl+C copies the selection (so it can't be
+    // fat-fingered into interrupting claude); pressing it again within the
+    // window forwards SIGINT (\x03) to the PTY, and every further press in the
+    // burst keeps forwarding. Gaps longer than the window reset to "copy".
+    const CTRL_C_BURST_MS = 500;
+    let lastCtrlC = 0;
     const routeImage = (file: File) => {
       const now = Date.now();
       if (now - lastImageRoute < 500) return;
@@ -423,8 +429,8 @@ export function TerminalView({
 
     // Ctrl+C in a terminal is SIGINT (interrupts claude), so it can't be copy.
     // Bind the conventional terminal shortcuts instead: Ctrl+Shift+C copies the
-    // selection; Ctrl+Shift+V pastes (image → @path ref, else text). Returning
-    // false stops xterm from forwarding the keystroke to the PTY.
+    // selection; Ctrl+V / Ctrl+Shift+V pastes (image → @path ref, else text).
+    // Returning false stops xterm from forwarding the keystroke to the PTY.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       // Zoom: Ctrl +/- steps the shared font size, Ctrl+0 resets. Shift is
@@ -444,38 +450,62 @@ export function TerminalView({
           store.resetTerminalFontSize();
           return false;
         }
+        // Paste on Ctrl+V *and* Ctrl+Shift+V. Plain Ctrl+V is what users
+        // expect, but if it reaches the PTY it's forwarded as \x16 and the
+        // browser's native paste never fires — so it was previously a no-op
+        // and only the Shift variant worked. Handle it here, before the
+        // ctrl+shift `combo` gate below.
+        if (e.code === "KeyV") {
+          // Images only. A screenshot lives on the clipboard as a bitmap,
+          // which WebView2's native `paste` event does NOT expose as a file
+          // item — only the async Clipboard API reconstitutes it as image/png
+          // — so read it here and route to the host (deduped via `routeImage`
+          // against any native paste that also catches a real image *file*).
+          // We deliberately do NOT write text here: returning false stops
+          // xterm forwarding the keystroke to the PTY but leaves the native
+          // paste untouched, so xterm pastes the text once. The old code
+          // wrote text too and the keydown preventDefault does NOT reliably
+          // suppress the native paste in WebView2, so text landed twice.
+          void (async () => {
+            try {
+              if (!navigator.clipboard.read || !onImagePasteRef.current) return;
+              for (const ci of await navigator.clipboard.read()) {
+                const imgType = ci.types.find((tp) => tp.startsWith("image/"));
+                if (!imgType) continue;
+                const blob = await ci.getType(imgType);
+                const ext = imgType.split("/")[1] || "png";
+                routeImage(new File([blob], `pasted.${ext}`, { type: imgType }));
+                return;
+              }
+            } catch {
+              /* no image / no permission — native paste handles text */
+            }
+          })();
+          return false;
+        }
+        // Plain Ctrl+C: first press copies, consecutive presses interrupt.
+        // (Ctrl+Shift+C below always copies, regardless of burst state.)
+        if (e.code === "KeyC" && !e.shiftKey) {
+          const now = Date.now();
+          const consecutive = now - lastCtrlC < CTRL_C_BURST_MS;
+          lastCtrlC = now;
+          if (consecutive) {
+            // Forward SIGINT to the PTY ourselves and swallow the keystroke so
+            // xterm doesn't also send a second \x03.
+            void terminalWrite({ id: terminalId, data: "\x03" });
+            return false;
+          }
+          // First press in a burst: copy the selection, don't interrupt.
+          const sel = term.getSelection();
+          if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+          return false;
+        }
       }
       const combo = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
       if (!combo) return true;
       if (e.code === "KeyC") {
         const sel = term.getSelection();
         if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
-        return false;
-      }
-      if (e.code === "KeyV") {
-        // Images only. A screenshot lives on the clipboard as a bitmap, which
-        // WebView2's native `paste` event does NOT expose as a file item — only
-        // the async Clipboard API reconstitutes it as image/png — so read it
-        // here and route to the host (deduped via `routeImage` against any
-        // native paste that also catches a real image *file*). We deliberately
-        // do NOT write text here: the native paste lets xterm paste text once.
-        // The old code wrote text too and the keydown preventDefault does NOT
-        // reliably suppress the native paste in WebView2, so text landed twice.
-        void (async () => {
-          try {
-            if (!navigator.clipboard.read || !onImagePasteRef.current) return;
-            for (const ci of await navigator.clipboard.read()) {
-              const imgType = ci.types.find((tp) => tp.startsWith("image/"));
-              if (!imgType) continue;
-              const blob = await ci.getType(imgType);
-              const ext = imgType.split("/")[1] || "png";
-              routeImage(new File([blob], `pasted.${ext}`, { type: imgType }));
-              return;
-            }
-          } catch {
-            /* no image / no permission — native paste handles text */
-          }
-        })();
         return false;
       }
       return true;

@@ -303,7 +303,7 @@ pub fn project_autodetect_logo(
 
 fn unc_for_root(env: &Environment, root: &str) -> String {
     match env {
-        Environment::Windows => root.to_owned(),
+        Environment::Local => root.to_owned(),
         Environment::Wsl { distro } => {
             // Render the POSIX path as a Windows-side UNC so std::fs can
             // walk it. Hot-path ops still go through the agent — this is

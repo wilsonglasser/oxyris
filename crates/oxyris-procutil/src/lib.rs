@@ -43,3 +43,38 @@ impl HideConsole for tokio::process::Command {
         self
     }
 }
+
+/// Program + fixed argument prefix for running a shell-script *string* on the
+/// host. Append the script as the final argument.
+///
+/// - Windows host → `("cmd.exe", ["/C"])`
+/// - Unix host    → `("sh", ["-c"])`
+///
+/// Works for both `std::process::Command` and `tokio::process::Command`:
+/// `let (sh, pre) = host_shell(); Command::new(sh).args(pre).arg(script)`.
+/// Used only for `Environment::Local` spawns — `Wsl` routes through `wsl.exe`.
+pub fn host_shell() -> (&'static str, &'static [&'static str]) {
+    #[cfg(windows)]
+    {
+        ("cmd.exe", &["/C"])
+    }
+    #[cfg(not(windows))]
+    {
+        ("sh", &["-c"])
+    }
+}
+
+/// The current user's home directory, read from the host's native env var.
+///
+/// - Windows host → `%USERPROFILE%`
+/// - Unix host    → `$HOME`
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(Into::into)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(Into::into)
+    }
+}

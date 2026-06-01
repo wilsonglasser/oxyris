@@ -11,6 +11,7 @@ import {
   projectValidatePath,
 } from "~/ipc/commands.ts";
 import { useProjectStore, workspacesOf } from "~/stores/projectStore.ts";
+import { isWindowsHost } from "~/lib/host.ts";
 
 type EnvKind = Environment["kind"];
 
@@ -41,7 +42,7 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
   const [error, setError] = useState<string | null>(null);
 
   const [name, setName] = useState("");
-  const [envKind, setEnvKind] = useState<EnvKind>("windows");
+  const [envKind, setEnvKind] = useState<EnvKind>("local");
   const [distro, setDistro] = useState("Ubuntu");
   const [rootPath, setRootPath] = useState("");
   const [workspace, setWorkspace] = useState("");
@@ -62,7 +63,7 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
     window.clearTimeout(validateTimer.current);
     validateTimer.current = window.setTimeout(() => {
       const environment: Environment =
-        envKind === "windows" ? { kind: "windows" } : { kind: "wsl", distro };
+        envKind === "local" ? { kind: "local" } : { kind: "wsl", distro };
       void projectValidatePath({ environment, path: trimmed })
         .then(setValidation)
         .catch(() => setValidation(null));
@@ -84,7 +85,7 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
         if (leaf) setName(leaf);
       }
     } else {
-      setEnvKind("windows");
+      setEnvKind("local");
       setRootPath(picked);
       if (!name.trim()) {
         const leaf = picked.split(/[\\/]/).filter(Boolean).pop();
@@ -99,7 +100,7 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
     setError(null);
     try {
       const environment: Environment =
-        envKind === "windows" ? { kind: "windows" } : { kind: "wsl", distro };
+        envKind === "local" ? { kind: "local" } : { kind: "wsl", distro };
       // When a git URL is supplied, clone into the selected folder first; the
       // project is then created pointing at that freshly-cloned tree.
       const url = gitUrl.trim();
@@ -160,10 +161,12 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
             onChange={(e) => setEnvKind(e.target.value as EnvKind)}
             className="rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100"
           >
-            <option value="windows">{t("create.environment_windows")}</option>
-            <option value="wsl">
-              {t("create.environment_wsl", { distro: distro || "Ubuntu" })}
-            </option>
+            <option value="local">{t("create.environment_local")}</option>
+            {isWindowsHost && (
+              <option value="wsl">
+                {t("create.environment_wsl", { distro: distro || "Ubuntu" })}
+              </option>
+            )}
           </select>
         </label>
 
@@ -203,8 +206,10 @@ export function ProjectPanel({ onCreated }: ProjectPanelProps = {}) {
               value={rootPath}
               onChange={(e) => setRootPath(e.target.value)}
               placeholder={
-                envKind === "windows"
-                  ? t("create.root_path_placeholder_windows")
+                envKind === "local"
+                  ? isWindowsHost
+                    ? t("create.root_path_placeholder_windows")
+                    : t("create.root_path_placeholder_unix")
                   : t("create.root_path_placeholder_wsl")
               }
               required

@@ -594,3 +594,70 @@ pub struct GitDiffRevsArgs {
 fn default_true() -> bool {
     true
 }
+
+// ────── generated / vendored file filter ───────────────────────────────────
+
+/// True for minified, bundled, or vendored files that pollute path search and
+/// the symbol index with garbage (single-letter symbols, multi-MB one-liners).
+///
+/// `.gitignore` already hides most build output, but plenty of repos commit
+/// `dist/` bundles and `*.min.js` straight into the tree — those still reach
+/// the walker. Used by both the desktop and agent path searchers and by the
+/// symbol indexer so the two stay in sync.
+///
+/// `rel` is a worktree-relative path; forward or back slashes, any case.
+pub fn is_generated_path(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    // Minified / bundled artifacts, matched on the basename suffix.
+    const SUFFIXES: &[&str] = &[
+        ".min.js",
+        ".min.cjs",
+        ".min.mjs",
+        ".min.css",
+        ".bundle.js",
+        ".bundle.css",
+        ".map",
+    ];
+    if SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return true;
+    }
+    // Vendored / build-output directories anywhere in the path. `\` is
+    // normalised so Windows callers don't need to pre-clean the separator.
+    const DIRS: &[&str] = &[
+        "node_modules",
+        "bower_components",
+        "vendor",
+        "vendors",
+        "dist",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        "coverage",
+    ];
+    lower.split(['/', '\\']).any(|seg| DIRS.contains(&seg))
+}
+
+#[cfg(test)]
+mod generated_path_tests {
+    use super::is_generated_path;
+
+    #[test]
+    fn flags_minified_and_vendored() {
+        assert!(is_generated_path("app/assets/js/dist/fuse.min.js"));
+        assert!(is_generated_path("app/lib/vendors/velocity.min.js"));
+        assert!(is_generated_path(
+            "public/vendor/highcharts/highcharts-3d.js"
+        ));
+        assert!(is_generated_path("foo\\node_modules\\bar.js"));
+        assert!(is_generated_path("build/out.bundle.js"));
+        assert!(is_generated_path("src/app.js.map"));
+    }
+
+    #[test]
+    fn keeps_source() {
+        assert!(!is_generated_path("src/main.rs"));
+        assert!(!is_generated_path("apps/web/src/App.tsx"));
+        assert!(!is_generated_path("lib/helpers.ts"));
+        assert!(!is_generated_path("distribution.ts"));
+    }
+}

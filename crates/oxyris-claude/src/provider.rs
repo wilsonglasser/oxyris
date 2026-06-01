@@ -306,7 +306,7 @@ fn build_command(opts: &SessionOptions) -> Result<Command, ProviderError> {
 
     let claude_args = claude_args; // freeze
     let mut cmd = match &opts.environment {
-        Environment::Windows => {
+        Environment::Local => {
             // Claude is usually installed as `claude.cmd` (npm shim) rather
             // than `claude.exe`, so `Command::new("claude.exe")` misses it
             // even when PATH has claude. `which` resolves PATH + PATHEXT.

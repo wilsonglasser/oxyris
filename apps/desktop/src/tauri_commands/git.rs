@@ -403,7 +403,7 @@ pub async fn git_generate_commit_message(
         Output the commit message only — no preamble, no markdown fences.";
 
     let (diff, claude_path) = match env {
-        Environment::Windows => {
+        Environment::Local => {
             let repo_path = root.clone();
             let diff_out = tokio::task::spawn_blocking(move || -> Result<String, String> {
                 let out = std::process::Command::new("git")

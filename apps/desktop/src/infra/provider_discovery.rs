@@ -32,7 +32,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn discover_claude(env: Environment) -> DiscoveredInstall {
     match env {
-        Environment::Windows => discover_windows().await,
+        Environment::Local => discover_windows().await,
         Environment::Wsl { ref distro } => discover_wsl(distro.clone(), env.clone()).await,
     }
 }
@@ -47,7 +47,7 @@ async fn discover_windows() -> DiscoveredInstall {
         Err(e) => {
             return DiscoveredInstall {
                 provider_id: "claude".into(),
-                environment: Environment::Windows,
+                environment: Environment::Local,
                 path: None,
                 version: None,
                 error: Some(format!("not on PATH: {e}")),
@@ -59,7 +59,7 @@ async fn discover_windows() -> DiscoveredInstall {
     let version = run_version_windows(&path).await;
     DiscoveredInstall {
         provider_id: "claude".into(),
-        environment: Environment::Windows,
+        environment: Environment::Local,
         path: Some(path.to_string_lossy().into_owned()),
         version: version.clone().ok(),
         error: version.err(),

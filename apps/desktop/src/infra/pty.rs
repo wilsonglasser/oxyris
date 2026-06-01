@@ -173,28 +173,40 @@ fn build_cmd(
     program: &PtyProgram,
 ) -> Result<CommandBuilder, PtyError> {
     match (env, program) {
-        (Environment::Windows, PtyProgram::Shell) => {
-            // PowerShell first, fall back to cmd.
-            let pwsh = which::which("pwsh.exe").or_else(|_| which::which("powershell.exe"));
-            let mut cmd = match pwsh {
-                Ok(p) => {
-                    let mut c = CommandBuilder::new(p.to_string_lossy().into_owned());
-                    // Mute the PSReadLine "ding". Its BellStyle defaults to
-                    // Audible, which calls [Console]::Beep host-side (during
-                    // startup VT probing and on empty-buffer/failed edits) —
-                    // that's the beep heard every time a shell PTY spawns or a
-                    // thread/terminal regains focus and respawns. The bell rings
-                    // out-of-band via Win32 Beep(), so it can't be filtered from
-                    // the xterm byte stream; the only fix is at the source.
-                    // -NoExit keeps the REPL interactive; the user profile still
-                    // loads first, so this overrides whatever it sets. try/catch
-                    // swallows the error if PSReadLine isn't present.
-                    c.arg("-NoExit");
-                    c.arg("-Command");
-                    c.arg("try { Set-PSReadLineOption -BellStyle None } catch {}");
-                    c
+        (Environment::Local, PtyProgram::Shell) => {
+            #[cfg(windows)]
+            let mut cmd = {
+                // PowerShell first, fall back to cmd.
+                let pwsh = which::which("pwsh.exe").or_else(|_| which::which("powershell.exe"));
+                match pwsh {
+                    Ok(p) => {
+                        let mut c = CommandBuilder::new(p.to_string_lossy().into_owned());
+                        // Mute the PSReadLine "ding". Its BellStyle defaults to
+                        // Audible, which calls [Console]::Beep host-side (during
+                        // startup VT probing and on empty-buffer/failed edits) —
+                        // that's the beep heard every time a shell PTY spawns or a
+                        // thread/terminal regains focus and respawns. The bell rings
+                        // out-of-band via Win32 Beep(), so it can't be filtered from
+                        // the xterm byte stream; the only fix is at the source.
+                        // -NoExit keeps the REPL interactive; the user profile still
+                        // loads first, so this overrides whatever it sets. try/catch
+                        // swallows the error if PSReadLine isn't present.
+                        c.arg("-NoExit");
+                        c.arg("-Command");
+                        c.arg("try { Set-PSReadLineOption -BellStyle None } catch {}");
+                        c
+                    }
+                    Err(_) => CommandBuilder::new("cmd.exe"),
                 }
-                Err(_) => CommandBuilder::new("cmd.exe"),
+            };
+            #[cfg(not(windows))]
+            let mut cmd = {
+                // The user's login shell ($SHELL), falling back to bash. `-l`
+                // loads the login profile so PATH/aliases match a real terminal.
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_owned());
+                let mut c = CommandBuilder::new(shell);
+                c.arg("-l");
+                c
             };
             cmd.cwd(cwd);
             apply_env(&mut cmd, extra_env);
@@ -210,7 +222,7 @@ fn build_cmd(
             apply_wslenv(&mut cmd, extra_env);
             Ok(cmd)
         }
-        (Environment::Windows, PtyProgram::Claude(opts)) => {
+        (Environment::Local, PtyProgram::Claude(opts)) => {
             let full = which::which("claude")
                 .or_else(|_| which::which("claude.cmd"))
                 .or_else(|_| which::which("claude.exe"))

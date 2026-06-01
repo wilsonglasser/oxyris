@@ -217,7 +217,7 @@ async fn docker_ps_services(
     // to the compose project label gives us the live service list.
     let label = format!("label=com.docker.compose.project={project_name}");
     let mut cmd = match env {
-        Environment::Windows => {
+        Environment::Local => {
             let mut c = Command::new("docker");
             c.args([
                 "ps",

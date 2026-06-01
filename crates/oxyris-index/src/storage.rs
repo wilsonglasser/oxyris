@@ -8,7 +8,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::language::Lang;
 use crate::{IndexError, Symbol, SymbolHit, SymbolKind};
 
-const SCHEMA_VERSION: i32 = 1;
+// v2: started excluding minified/vendored files (`*.min.js`, `dist/`, …) from
+// the symbol index. Bumping forces existing v1 DBs to wipe + rebuild so the
+// old garbage symbols drop out.
+const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -74,11 +77,17 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
         .optional()?;
     match stored {
         Some(v) if v == SCHEMA_VERSION.to_string() => {}
-        Some(other) => {
-            return Err(IndexError::SchemaVersion {
-                stored: other,
-                expected: SCHEMA_VERSION.to_string(),
-            });
+        Some(_) => {
+            // The index is a rebuildable cache, not a source of truth. On any
+            // version mismatch (up- or down-grade) wipe the data tables and
+            // re-stamp — `ensure_indexed` then sees zero files and rebuilds
+            // (per PLAN.md "drop and rebuild from events when schema changes").
+            conn.execute_batch("DROP TABLE IF EXISTS symbols; DROP TABLE IF EXISTS files;")?;
+            conn.execute_batch(SCHEMA_SQL)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?1)",
+                params![SCHEMA_VERSION.to_string()],
+            )?;
         }
         None => {
             conn.execute(

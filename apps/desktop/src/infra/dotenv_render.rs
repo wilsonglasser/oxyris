@@ -168,7 +168,7 @@ async fn stat(
     path: &str,
 ) -> Result<FsStatResult, RenderError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = std::path::Path::new(path);
             match std::fs::symlink_metadata(p) {
                 Ok(md) => Ok(FsStatResult {
@@ -217,7 +217,7 @@ async fn read_text(
     path: &str,
 ) -> Result<Option<String>, RenderError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             let p = std::path::Path::new(path);
             if !p.exists() {
                 return Ok(None);
@@ -256,7 +256,7 @@ async fn write_text(
     contents: &str,
 ) -> Result<(), RenderError> {
     match env {
-        Environment::Windows => {
+        Environment::Local => {
             if let Some(parent) = std::path::Path::new(path).parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -281,13 +281,15 @@ async fn write_text(
 
 fn path_join(base: &str, relative: &str, env: &Environment) -> String {
     let sep = match env {
-        Environment::Windows => '\\',
+        Environment::Local => std::path::MAIN_SEPARATOR,
         Environment::Wsl { .. } => '/',
     };
-    let normalized = if matches!(env, Environment::Wsl { .. }) {
-        relative.replace('\\', "/")
-    } else {
-        relative.replace('/', "\\")
+    let normalized = match env {
+        Environment::Wsl { .. } => relative.replace('\\', "/"),
+        #[cfg(windows)]
+        Environment::Local => relative.replace('/', "\\"),
+        #[cfg(not(windows))]
+        Environment::Local => relative.replace('\\', "/"),
     };
     if base.ends_with(sep) || base.ends_with('/') || base.ends_with('\\') {
         format!("{base}{normalized}")

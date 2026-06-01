@@ -170,7 +170,7 @@ pub async fn claude_pty_spawn(
     // inside a WSL distro, so we don't wire MCP there yet (matches the
     // structured provider's WSL limitation). Missing binary just means claude
     // runs without it.
-    let (mcp_config_path, mcp_nudge) = if matches!(env, Environment::Windows) {
+    let (mcp_config_path, mcp_nudge) = if matches!(env, Environment::Local) {
         let lsp_port = state.session_supervisor.lsp_bridge_port();
         match crate::infra::mcp::prepare_for_worktree(&env, &cwd, lsp_port) {
             Ok(Some(setup)) => (Some(setup.config_path), Some(setup.system_prompt_nudge)),
@@ -382,11 +382,11 @@ async fn claude_transcript_exists(
 ) -> bool {
     let filename = format!("{session_id}.jsonl");
     match env {
-        Environment::Windows => {
-            let Some(home) = std::env::var_os("USERPROFILE") else {
+        Environment::Local => {
+            let Some(home) = oxyris_procutil::home_dir() else {
                 return false;
             };
-            let projects = std::path::Path::new(&home).join(".claude").join("projects");
+            let projects = home.join(".claude").join("projects");
             let Ok(entries) = std::fs::read_dir(&projects) else {
                 return false;
             };
@@ -445,9 +445,9 @@ async fn read_claude_transcript(
     const HEAD_CAP: u64 = 512 * 1024;
     let filename = format!("{session_id}.jsonl");
     match env {
-        Environment::Windows => {
-            let home = std::env::var_os("USERPROFILE")?;
-            let projects = std::path::Path::new(&home).join(".claude").join("projects");
+        Environment::Local => {
+            let home = oxyris_procutil::home_dir()?;
+            let projects = home.join(".claude").join("projects");
             for entry in std::fs::read_dir(&projects).ok()?.flatten() {
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     let candidate = entry.path().join(&filename);

@@ -169,6 +169,9 @@ export function App() {
         sniffer.feed(data);
         pollSniffer.feed(data);
         endSniffer.feed(data);
+        // Pure turns emit no Turn event to bump last_activity_at — stamp live
+        // activity so the bull reads green (recent), not stale-gray.
+        useSessionStore.getState().touchActivity(sid);
         if (useBusyStore.getState().busy[sid]) scheduleClear();
       }).then((fn) => {
         if (cancelled) fn();

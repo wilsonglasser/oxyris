@@ -37,6 +37,9 @@ pub enum IndexError {
     Parser(String),
     #[error("tree-sitter query: {0}")]
     Query(String),
+    // Retained for the diagnostic message; the storage layer now self-heals a
+    // version mismatch by wiping + rebuilding rather than returning this.
+    #[allow(dead_code)]
     #[error(
         "schema version mismatch: stored={stored} expected={expected}; delete the index db to rebuild"
     )]

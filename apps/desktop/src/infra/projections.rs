@@ -828,7 +828,7 @@ fn row_to_worktree(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRow> {
 
 fn environment_columns(env: &Environment) -> (&'static str, Option<&str>) {
     match env {
-        Environment::Windows => ("windows", None),
+        Environment::Local => ("windows", None),
         Environment::Wsl { distro } => ("wsl", Some(distro.as_str())),
     }
 }
@@ -841,7 +841,7 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
     let env_kind: String = row.get(2)?;
     let env_distro: Option<String> = row.get(3)?;
     let environment = match env_kind.as_str() {
-        "windows" => Environment::Windows,
+        "windows" => Environment::Local,
         "wsl" => Environment::Wsl {
             distro: env_distro.unwrap_or_default(),
         },
@@ -924,7 +924,7 @@ mod tests {
             ProjectEvent::ProjectCreated {
                 id,
                 name: "Oxyris".into(),
-                environment: Environment::Windows,
+                environment: Environment::Local,
                 root_path: r"C:\dev\oxyris".into(),
                 workspace: None,
                 created_at: Utc::now(),
@@ -934,7 +934,7 @@ mod tests {
         let rows = p.list_projects().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Oxyris");
-        assert_eq!(rows[0].environment, Environment::Windows);
+        assert_eq!(rows[0].environment, Environment::Local);
     }
 
     #[test]
@@ -985,7 +985,7 @@ mod tests {
             ProjectEvent::ProjectCreated {
                 id,
                 name: "a".into(),
-                environment: Environment::Windows,
+                environment: Environment::Local,
                 root_path: "r".into(),
                 workspace: None,
                 created_at: Utc::now(),
@@ -1011,7 +1011,7 @@ mod tests {
             ProjectCommand::Create {
                 id,
                 name: "Oxyris".into(),
-                environment: Environment::Windows,
+                environment: Environment::Local,
                 root_path: "C:\\oxyris".into(),
                 workspace: None,
                 now,
