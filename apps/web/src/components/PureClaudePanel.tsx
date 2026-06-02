@@ -692,11 +692,15 @@ function PureSessionView({
   }, [project.root_path, addAttachment]);
 
   // Image pasted (Ctrl/Cmd+V) directly into the xterm. Save the blob, then
-  // inject the plain path (trailing space) straight into claude's live prompt.
-  // No leading `@`: claude resolves a bare path on its own, and the `@` only
-  // opened claude's file-autocomplete popup without consuming the injected
-  // path — leaving a stale popup that hijacked the *next* `@` the user typed
-  // (showing `@/home…`). No chip: the path lands in the TUI for further typing.
+  // inject the saved file's path into claude's live prompt wrapped in bracketed
+  // paste markers (\e[200~ … \e[201~). claude runs its path→image detection
+  // only on *pasted* text, never on typed text: a bare write landed the path as
+  // literal characters (no conversion), whereas a bracketed paste makes claude
+  // ingest the file and render it as `[Image #N]` — matching a native-terminal
+  // paste. The trailing space sits OUTSIDE the markers so it's a normal keypress
+  // separating the chip from whatever the user types next. No leading `@`: that
+  // opened claude's file-autocomplete popup without consuming the path, leaving
+  // a stale popup that hijacked the next `@` the user typed.
   const onTerminalImagePaste = useCallback(
     async (file: File) => {
       try {
@@ -708,9 +712,10 @@ function PureSessionView({
           ...(file.name ? { filename: file.name } : {}),
         });
         if (termId) {
-          void terminalWrite({ id: termId, data: `${info.path} ` }).catch(
-            () => {},
-          );
+          void terminalWrite({
+            id: termId,
+            data: `\x1b[200~${info.path}\x1b[201~ `,
+          }).catch(() => {});
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));

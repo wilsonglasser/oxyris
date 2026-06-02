@@ -70,12 +70,22 @@ export const PURE_POLL_RE =
 
 // claude's turn-end summary line: a star-like glyph followed by a past-tense
 // verb and "for <duration>" — e.g. "✶ Worked for 3m 9s", "✻ Brewed for 12s",
-// "✼ Crunched for 42s". When this appears the turn is settled; we use it as a
-// hard "done" signal because the composer's blinking cursor (and the TUI's
-// ticking footer) can keep the PTY output dripping past the idle-clear window,
-// stranding the blue pulse on. The leading glyph filters out prose mentions.
+// "✼ Crunched for 42s", "✻ Sautéed for 11s". When this appears the turn is
+// settled; we use it as a hard "done" signal because the composer's blinking
+// cursor (and the TUI's ticking footer) can keep the PTY output dripping past
+// the idle-clear window, stranding the blue pulse on. The leading glyph filters
+// out prose mentions. The verb is matched with \S+ (not \w+) so accented verbs
+// like "Sautéed" don't break on the non-ASCII letter mid-word.
 export const PURE_TURN_END_RE =
-  /[✱-✽]\s+\w+\s+for\s+\d+[ms]/i;
+  /[✱-✽]\s+\S+\s+for\s+\d+[ms]/i;
+
+// claude's end-of-conversation recap line — a reference-mark glyph (※, U+203B)
+// followed by "recap". Like the "✶ Worked for …" marker it's a settled-turn
+// signal, but its glyph falls outside the [✱-✽] range above so PURE_TURN_END_RE
+// can't catch it. The recap is rendered after the turn is fully done, so a
+// background thread that ends on a recap should flag orange (attention). The
+// glyph + literal "recap" keeps prose that merely says "recap" from firing it.
+export const PURE_RECAP_RE = /※\s*recap/i;
 
 /**
  * Rolling-tail sniffer for a pure-mode TUI pattern. Feed it raw PTY output;

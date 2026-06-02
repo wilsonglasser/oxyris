@@ -30,6 +30,7 @@ import { useDragResize } from "~/lib/useDragResize.ts";
 import {
   createPromptSniffer,
   PURE_POLL_RE,
+  PURE_RECAP_RE,
   PURE_TURN_END_RE,
 } from "~/lib/pureTurn.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
@@ -145,6 +146,12 @@ export function App() {
       window.clearTimeout(timer);
       useBusyStore.getState().setBusy(sid, false);
     }, PURE_TURN_END_RE);
+    // "※ recap" end-of-conversation line: same settled-turn busy-clear; its
+    // glyph falls outside PURE_TURN_END_RE's range so it needs its own sniffer.
+    const recapSniffer = createPromptSniffer(() => {
+      window.clearTimeout(timer);
+      useBusyStore.getState().setBusy(sid, false);
+    }, PURE_RECAP_RE);
     // Reset every latched sniffer when a new turn starts (busy goes true), so
     // their once-per-turn signals fire again at the next turn-end. Without
     // this, the second turn's "✶ Worked for …" would be ignored and the bull
@@ -157,6 +164,7 @@ export function App() {
         sniffer.reset();
         pollSniffer.reset();
         endSniffer.reset();
+        recapSniffer.reset();
       }
       prevBusy = now;
     });
@@ -169,6 +177,7 @@ export function App() {
         sniffer.feed(data);
         pollSniffer.feed(data);
         endSniffer.feed(data);
+        recapSniffer.feed(data);
         // Pure turns emit no Turn event to bump last_activity_at — stamp live
         // activity so the bull reads green (recent), not stale-gray.
         useSessionStore.getState().touchActivity(sid);

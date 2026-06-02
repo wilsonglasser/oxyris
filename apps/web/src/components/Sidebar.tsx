@@ -48,6 +48,7 @@ import { localEnvLabel } from "~/lib/host.ts";
 import {
   createPromptSniffer,
   PURE_POLL_RE,
+  PURE_RECAP_RE,
   PURE_TURN_END_RE,
 } from "~/lib/pureTurn.ts";
 import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
@@ -320,6 +321,13 @@ export function Sidebar({
         setBusy(s.id, false);
         scheduleDone();
       }, PURE_TURN_END_RE);
+      // "※ recap" end-of-conversation line: another settled-turn signal whose
+      // glyph PURE_TURN_END_RE can't match. Same orange-flag path as the marker.
+      const recapSniffer = createPromptSniffer(() => {
+        window.clearTimeout(idleTimer);
+        setBusy(s.id, false);
+        scheduleDone();
+      }, PURE_RECAP_RE);
       let armed = false;
       let idleTimer: number | undefined;
       // One completion chime + attention flag per turn, shared by the poll /
@@ -361,12 +369,18 @@ export function Sidebar({
           sniffer.feed(data);
           pollSniffer.feed(data);
           endSniffer.feed(data);
+          recapSniffer.feed(data);
           // Keep the green "recent" window alive for pure threads (no Turn
           // event bumps their projected last_activity_at).
           useSessionStore.getState().touchActivity(s.id);
           // Any sniffer latched: count output to detect a new turn. Cursor-
           // blink redraws are tiny; real content trips the threshold quickly.
-          if (sniffer.open || pollSniffer.open || endSniffer.open) {
+          if (
+            sniffer.open ||
+            pollSniffer.open ||
+            endSniffer.open ||
+            recapSniffer.open
+          ) {
             const now = Date.now();
             // Quiet gap → previous bytes were noise, not part of a burst.
             if (now - lastByteAt > 2000) bytesSinceFire = 0;
@@ -376,6 +390,7 @@ export function Sidebar({
               sniffer.reset();
               pollSniffer.reset();
               endSniffer.reset();
+              recapSniffer.reset();
               // Real content after a turn-end/poll marker → the turn is still
               // live. Cancel the pending orange flag so it never flashes.
               window.clearTimeout(doneDeferTimer);
@@ -402,6 +417,7 @@ export function Sidebar({
               !sniffer.open &&
               !pollSniffer.open &&
               !endSniffer.open &&
+              !recapSniffer.open &&
               !notified
             ) {
               notified = true;
