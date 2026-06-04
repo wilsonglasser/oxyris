@@ -32,6 +32,8 @@ import {
   PURE_POLL_RE,
   PURE_RECAP_RE,
   PURE_TURN_END_RE,
+  PURE_WORKING_RE,
+  stripAnsi,
 } from "~/lib/pureTurn.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
@@ -112,13 +114,18 @@ export function App() {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     let timer: number | undefined;
+    // True while the latest PTY output was the live "…" working spinner. Keeps
+    // the busy pulse through long thinking pauses (extended thinking can stall
+    // output past the clear window without the turn being over).
+    let liveWorking = false;
     const scheduleClear = () => {
       window.clearTimeout(timer);
       // Slightly longer than the panel's 2500ms so the two don't race.
-      timer = window.setTimeout(
-        () => useBusyStore.getState().setBusy(sid, false),
-        3000,
-      );
+      timer = window.setTimeout(() => {
+        // Still thinking (last output was the "…" spinner) → keep blue.
+        if (liveWorking) return;
+        useBusyStore.getState().setBusy(sid, false);
+      }, 3000);
     };
     // Light the red "wants input" bull when the claude TUI shows its
     // permission/question menu, so it survives leaving the chat tab (which
@@ -130,6 +137,7 @@ export function App() {
     const sniffer = createPromptSniffer(() => {
       useSessionStore.getState().setNeedsInput(sid, true);
       window.clearTimeout(timer);
+      liveWorking = false;
       useBusyStore.getState().setBusy(sid, false);
     });
     // claude's optional end-of-session poll has the same "PTY drips forever"
@@ -138,18 +146,21 @@ export function App() {
     // never attention since the user is viewing it).
     const pollSniffer = createPromptSniffer(() => {
       window.clearTimeout(timer);
+      liveWorking = false;
       useBusyStore.getState().setBusy(sid, false);
     }, PURE_POLL_RE);
     // "✶ Worked for …" turn-end marker: a hard "done" signal in case the
     // cursor-blink keeps the PTY dripping past the idle window.
     const endSniffer = createPromptSniffer(() => {
       window.clearTimeout(timer);
+      liveWorking = false;
       useBusyStore.getState().setBusy(sid, false);
     }, PURE_TURN_END_RE);
     // "※ recap" end-of-conversation line: same settled-turn busy-clear; its
     // glyph falls outside PURE_TURN_END_RE's range so it needs its own sniffer.
     const recapSniffer = createPromptSniffer(() => {
       window.clearTimeout(timer);
+      liveWorking = false;
       useBusyStore.getState().setBusy(sid, false);
     }, PURE_RECAP_RE);
     // Reset every latched sniffer when a new turn starts (busy goes true), so
@@ -165,6 +176,7 @@ export function App() {
         pollSniffer.reset();
         endSniffer.reset();
         recapSniffer.reset();
+        liveWorking = false;
       }
       prevBusy = now;
     });
@@ -178,6 +190,10 @@ export function App() {
         pollSniffer.feed(data);
         endSniffer.feed(data);
         recapSniffer.feed(data);
+        // Live "…" working spinner = still thinking; a done line never matches.
+        // Latch (don't unset on a partial redraw) — only a real done/needs-input
+        // signal above clears it.
+        if (PURE_WORKING_RE.test(stripAnsi(data))) liveWorking = true;
         // Pure turns emit no Turn event to bump last_activity_at — stamp live
         // activity so the bull reads green (recent), not stale-gray.
         useSessionStore.getState().touchActivity(sid);

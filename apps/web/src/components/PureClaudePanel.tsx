@@ -27,6 +27,7 @@ import { fsOpenExternal } from "~/ipc/fs.ts";
 import {
   claudePtySpawn,
   claudePureRefreshTitle,
+  terminalKill,
   terminalList,
   terminalWrite,
 } from "~/ipc/terminal.ts";
@@ -355,6 +356,44 @@ function PureSessionView({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const ensuredRef = useRef<string | null>(null);
 
+  // Auto-recover a dead claude PTY. The interactive `claude` TUI exits on a
+  // double Ctrl+C (and on any crash); without this the pane just freezes on
+  // "[process exited]" and the user has to leave and re-enter the session. On
+  // exit we respawn — and because `claude_pty_spawn` resumes from the existing
+  // `<session-id>.jsonl` transcript, the conversation continues where it died.
+  //
+  // Crash-loop guard: if claude keeps dying within RESPAWN_MIN_MS of being
+  // (re)spawned, count strikes; after RESPAWN_MAX consecutive fast deaths stop
+  // respawning and surface an error instead of thrashing forever. A death after
+  // a healthy run (≥ RESPAWN_MIN_MS uptime) resets the strike counter.
+  const RESPAWN_MIN_MS = 4000;
+  const RESPAWN_MAX = 3;
+  const [spawnNonce, setSpawnNonce] = useState(0);
+  const spawnAtRef = useRef(0);
+  const respawnStrikesRef = useRef(0);
+  const termIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    termIdRef.current = termId;
+  }, [termId]);
+
+  const onPtyExit = useCallback(() => {
+    const uptime = Date.now() - spawnAtRef.current;
+    respawnStrikesRef.current =
+      uptime < RESPAWN_MIN_MS ? respawnStrikesRef.current + 1 : 0;
+    if (respawnStrikesRef.current > RESPAWN_MAX) {
+      setError(t("pure_respawn_failed"));
+      return;
+    }
+    // Purge the dead PTY from the backend registry — it lingers there after a
+    // child exit (only `kill` removes it), so a plain remount would re-attach
+    // to the corpse via `terminalList` instead of spawning fresh.
+    const dead = termIdRef.current;
+    if (dead) void terminalKill({ id: dead }).catch(() => {});
+    ensuredRef.current = null;
+    setTermId(null);
+    setSpawnNonce((n) => n + 1);
+  }, [t]);
+
   // "Agent done" chime for pure mode. There's no turn event stream to hook
   // (that's structured mode) — the claude TUI is opaque bytes — so we use an
   // output-idle heuristic: once the user submits a prompt we arm, and the
@@ -530,6 +569,7 @@ function PureSessionView({
         const existing = await terminalList({ session_id: sessionId });
         const claudePty = existing.find((tinfo) => tinfo.kind === "claude");
         if (claudePty) {
+          spawnAtRef.current = Date.now();
           setTermId(claudePty.id);
           setCwd(claudePty.cwd);
           return;
@@ -542,6 +582,7 @@ function PureSessionView({
             useAppSettingsStore.getState().claudeLanguage,
           ),
         });
+        spawnAtRef.current = Date.now();
         setTermId(info.id);
         setCwd(info.cwd);
       } catch (e) {
@@ -550,7 +591,7 @@ function PureSessionView({
         ensuredRef.current = null;
       }
     })();
-  }, [sessionId]);
+  }, [sessionId, spawnNonce]);
 
   // Surface the PTY id upward (Multi View broadcast targets it).
   useEffect(() => {
@@ -785,6 +826,7 @@ function PureSessionView({
           <TerminalView
             terminalId={termId}
             visible
+            onExit={onPtyExit}
             onImagePaste={onTerminalImagePaste}
             onInput={onPtyInput}
             onOutput={onPtyOutput}

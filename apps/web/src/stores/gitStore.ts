@@ -507,9 +507,12 @@ export const useGitStore = create<GitState>((set, get) => ({
       commitError: { ...state.commitError, [worktreeId]: null },
     }));
     try {
-      // The backend reads the *staged* diff. Mirror the commit flow: if
-      // nothing is staged, stage everything first so Claude has a diff to
-      // summarize (and the panel reflects what will be committed).
+      // The backend reads the *staged* diff (falling back to the full
+      // working-tree diff). Mirror the commit flow: if nothing is staged,
+      // stage everything first so the panel reflects what will be committed.
+      // Refresh first so the staged/unstaged decision isn't made off a stale
+      // snapshot — that mismatch is what produced spurious "nothing staged".
+      await get().refreshStatus(projectId, worktreeId);
       const status = get().status[worktreeId] ?? null;
       const hasStaged =
         status?.entries.some((e) => e.bucket === "staged") ?? false;

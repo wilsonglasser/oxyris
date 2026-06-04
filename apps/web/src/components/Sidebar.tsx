@@ -50,6 +50,8 @@ import {
   PURE_POLL_RE,
   PURE_RECAP_RE,
   PURE_TURN_END_RE,
+  PURE_WORKING_RE,
+  stripAnsi,
 } from "~/lib/pureTurn.ts";
 import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
 
@@ -298,6 +300,7 @@ export function Sidebar({
         // blinking cursor keeps the PTY dripping output, so the idle-clear
         // below would otherwise never fire while the menu is on screen.
         window.clearTimeout(idleTimer);
+        liveWorking = false;
         setBusy(s.id, false);
         if (shouldNotify()) {
           playInputChime();
@@ -309,6 +312,7 @@ export function Sidebar({
       // bull), not as a "needs input" (red). No red.
       const pollSniffer = createPromptSniffer(() => {
         window.clearTimeout(idleTimer);
+        liveWorking = false;
         setBusy(s.id, false);
         // Defer the orange flag — see scheduleDone. A burst of real content in
         // the defer window means the turn isn't actually over and cancels it.
@@ -318,6 +322,7 @@ export function Sidebar({
       // or footer redraws keep the PTY dripping past the idle window.
       const endSniffer = createPromptSniffer(() => {
         window.clearTimeout(idleTimer);
+        liveWorking = false;
         setBusy(s.id, false);
         scheduleDone();
       }, PURE_TURN_END_RE);
@@ -325,11 +330,17 @@ export function Sidebar({
       // glyph PURE_TURN_END_RE can't match. Same orange-flag path as the marker.
       const recapSniffer = createPromptSniffer(() => {
         window.clearTimeout(idleTimer);
+        liveWorking = false;
         setBusy(s.id, false);
         scheduleDone();
       }, PURE_RECAP_RE);
       let armed = false;
       let idleTimer: number | undefined;
+      // True while the most recent PTY output was the live "…" working spinner
+      // (see PURE_WORKING_RE). Extended thinking can stall output past the idle
+      // window without the turn being over; flagging orange then is wrong. Set
+      // per-chunk below; cleared by any real done/needs-input signal.
+      let liveWorking = false;
       // One completion chime + attention flag per turn, shared by the poll /
       // turn-end / idle paths. The sniffers are all fed each chunk before the
       // open-check, so a turn that emits the "✶ Worked for" marker and then a
@@ -352,7 +363,9 @@ export function Sidebar({
       function scheduleDone() {
         window.clearTimeout(doneDeferTimer);
         doneDeferTimer = window.setTimeout(() => {
-          if (notified) return;
+          // A live working spinner arrived inside the defer window → the turn is
+          // still thinking, not settled. Don't flag orange.
+          if (notified || liveWorking) return;
           notified = true;
           markAttention(s.id);
           if (shouldNotify()) {
@@ -370,6 +383,14 @@ export function Sidebar({
           pollSniffer.feed(data);
           endSniffer.feed(data);
           recapSniffer.feed(data);
+          // Live "…" working spinner = still thinking. Latch it so a long
+          // thinking pause (output stalled past the idle window) can't be
+          // mistaken for a finished turn below. A real done/needs-input signal
+          // above already cleared it; a done line never matches PURE_WORKING_RE.
+          if (PURE_WORKING_RE.test(stripAnsi(data))) {
+            liveWorking = true;
+            window.clearTimeout(doneDeferTimer);
+          }
           // Keep the green "recent" window alive for pure threads (no Turn
           // event bumps their projected last_activity_at).
           useSessionStore.getState().touchActivity(s.id);
@@ -396,6 +417,7 @@ export function Sidebar({
               window.clearTimeout(doneDeferTimer);
               bytesSinceFire = 0;
               notified = false; // genuine new turn → allow its done-chime again
+              liveWorking = false; // re-detected from this turn's own spinner
               // Fall through and arm the pulse for the new turn.
             } else {
               armed = false;
@@ -411,6 +433,9 @@ export function Sidebar({
           }
           window.clearTimeout(idleTimer);
           idleTimer = window.setTimeout(() => {
+            // Last output was the live "…" spinner → thinking paused, not done.
+            // Keep the blue pulse; a real turn-end marker will settle it later.
+            if (liveWorking) return;
             armed = false;
             setBusy(s.id, false);
             if (

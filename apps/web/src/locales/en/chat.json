@@ -160,6 +160,7 @@
   "pure_start_button": "Start Claude Code",
   "pure_header": "Claude Code (pure)",
   "pure_spawning": "Launching Claude Code…",
+  "pure_respawn_failed": "Claude Code keeps exiting on launch. Auto-restart stopped — leave and re-enter the session to try again.",
   "pure_composer_placeholder": "Type here, or straight into the terminal above…",
   "pure_attach": "Attach a file",
   "pure_attach_hint": "Attach a file, or paste an image",

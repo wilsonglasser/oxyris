@@ -79,6 +79,15 @@ export const PURE_POLL_RE =
 export const PURE_TURN_END_RE =
   /[✱-✽]\s+\S+\s+for\s+\d+[ms]/i;
 
+// claude's LIVE working spinner — the same star-like glyph as the turn-end
+// marker, but a *present-participle* verb and a trailing ellipsis instead of
+// "for <duration>": "✻ Flummoxing… (8m 38s · ↓ 34.3k tokens …)". The ellipsis
+// (U+2026 or literal "...") is the reliable "still thinking" tell — the settled
+// "✶ Worked for …" line never has one. We use it to keep the bull blue and to
+// stop the idle-timer from mistaking a long thinking pause (extended thinking
+// can stall output past the idle window) for a finished turn.
+export const PURE_WORKING_RE = /[✱-✽][^\n…]*(…|\.\.\.)/;
+
 // claude's end-of-conversation recap line — a reference-mark glyph (※, U+203B)
 // followed by "recap". Like the "✶ Worked for …" marker it's a settled-turn
 // signal, but its glyph falls outside the [✱-✽] range above so PURE_TURN_END_RE

@@ -406,15 +406,26 @@ pub async fn git_generate_commit_message(
         Environment::Local => {
             let repo_path = root.clone();
             let diff_out = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                let out = std::process::Command::new("git")
-                    .args(["-C", &repo_path, "diff", "--cached"])
-                    .hide_console()
-                    .output()
-                    .map_err(|e| e.to_string())?;
-                if !out.status.success() {
-                    return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+                let run = |args: &[&str]| -> Result<String, String> {
+                    let out = std::process::Command::new("git")
+                        .args(args)
+                        .hide_console()
+                        .output()
+                        .map_err(|e| e.to_string())?;
+                    if !out.status.success() {
+                        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+                    }
+                    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+                };
+                // Prefer the staged diff. Fall back to the full working-tree diff
+                // (`git diff HEAD` = staged + unstaged tracked) so generation still
+                // works when nothing is staged yet — matching the `commit -a` flow.
+                let staged = run(&["-C", &repo_path, "diff", "--cached"])?;
+                if staged.trim().is_empty() {
+                    run(&["-C", &repo_path, "diff", "HEAD"])
+                } else {
+                    Ok(staged)
                 }
-                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
             })
             .await
             .map_err(|e| TauriGitError::Backend(format!("join: {e}")))?
@@ -435,6 +446,7 @@ pub async fn git_generate_commit_message(
             let script = format!(
                 "set -euo pipefail; cd '{posix_repo}'; \
                  diff=\"$(git diff --cached)\"; \
+                 if [ -z \"$diff\" ]; then diff=\"$(git diff HEAD)\"; fi; \
                  if [ -z \"$diff\" ]; then echo 'NOTHING_STAGED' >&2; exit 2; fi; \
                  printf '%s' \"$diff\" | claude -p '{escaped_prompt}'"
             );
