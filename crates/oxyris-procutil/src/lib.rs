@@ -64,6 +64,38 @@ pub fn host_shell() -> (&'static str, &'static [&'static str]) {
     }
 }
 
+/// Kill a process **and its entire descendant tree**.
+///
+/// `child.kill()` (portable-pty, `std::process`) terminates only the direct
+/// child. When that child is a shell running `cargo run`, the actual app is a
+/// *grandchild*: killing the shell leaves the app orphaned and still running.
+/// A real terminal kills the whole tree on close; this mirrors that.
+///
+/// - Windows → `taskkill /PID <pid> /T /F` (`/T` walks the tree, `/F` forces).
+///   The console window is hidden so no terminal flashes during shutdown.
+/// - Unix    → `kill -KILL -<pid>`: the negative pid targets the *process
+///   group*. A PTY child is its own session/group leader (the slave becomes
+///   its controlling terminal), so `pgid == pid` and the whole foreground
+///   tree under the shell goes down with it.
+///
+/// Best-effort: a process that already exited yields a non-zero status which
+/// we ignore. Returns once the kill command has been spawned and waited on.
+pub fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .hide_console()
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .output();
+    }
+}
+
 /// The current user's home directory, read from the host's native env var.
 ///
 /// - Windows host → `%USERPROFILE%`

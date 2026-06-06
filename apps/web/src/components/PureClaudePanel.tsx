@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  Bot,
   FileText,
   Image as ImageIcon,
   Mic,
@@ -27,6 +28,7 @@ import { fsOpenExternal } from "~/ipc/fs.ts";
 import {
   claudePtySpawn,
   claudePureRefreshTitle,
+  onPureSignal,
   terminalKill,
   terminalList,
   terminalWrite,
@@ -39,12 +41,6 @@ import {
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
-import {
-  PURE_POLL_RE,
-  PURE_PROMPT_RE,
-  PURE_TURN_END_RE,
-  stripAnsi,
-} from "~/lib/pureTurn.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import {
   toSpeechLocale,
@@ -54,6 +50,9 @@ import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import { TerminalView } from "~/components/TerminalPanel.tsx";
 import { FileViewerModal } from "~/components/FileViewerModal.tsx";
+import { AutopilotPanel } from "~/components/AutopilotPanel.tsx";
+import { useAutopilotStore } from "~/stores/autopilotStore.ts";
+import { onAutopilotEvent } from "~/ipc/autopilot.ts";
 
 /**
  * Turn a path token clicked in the terminal into a worktree-relative path the
@@ -356,6 +355,37 @@ function PureSessionView({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const ensuredRef = useRef<string | null>(null);
 
+  // Auto-pilot: floating mission panel + engaged indicator on the header button.
+  const [autopilotOpen, setAutopilotOpen] = useState(false);
+  const autopilotHydrate = useAutopilotStore((s) => s.hydrate);
+  const autopilotOn = useAutopilotStore((s) => s.enabled[sessionId] ?? false);
+  const autopilotPushLog = useAutopilotStore((s) => s.pushLog);
+  const autopilotSetEnabled = useAutopilotStore((s) => s.setEnabled);
+  useEffect(() => {
+    autopilotHydrate(sessionId);
+  }, [sessionId, autopilotHydrate]);
+
+  // Stream the backend pilot's decisions into the store log. Lives here (not the
+  // panel) so the log accumulates and a Halt auto-disengages even with the panel
+  // closed. The backend already stopped driving on Halt; we just sync UI state.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void onAutopilotEvent(sessionId, (event) => {
+      autopilotPushLog(sessionId, event);
+      if (event.kind === "halted" || event.kind === "error") {
+        autopilotSetEnabled(sessionId, false);
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [sessionId, autopilotPushLog, autopilotSetEnabled]);
+
   // Auto-recover a dead claude PTY. The interactive `claude` TUI exits on a
   // double Ctrl+C (and on any crash); without this the pane just freezes on
   // "[process exited]" and the user has to leave and re-enter the session. On
@@ -394,40 +424,14 @@ function PureSessionView({
     setSpawnNonce((n) => n + 1);
   }, [t]);
 
-  // "Agent done" chime for pure mode. There's no turn event stream to hook
-  // (that's structured mode) — the claude TUI is opaque bytes — so we use an
-  // output-idle heuristic: once the user submits a prompt we arm, and the
-  // first stretch of PTY silence after live output declares the turn done.
-  // Only chimes when the window is unfocused, so an occasional early fire
-  // (e.g. a long quiet tool run) is harmless. Mirrors ChatPanel's chime.
-  const IDLE_DONE_MS = 2500;
-  const armedRef = useRef(false);
-  const idleTimerRef = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(idleTimerRef.current), []);
-
-  // Permission / input-request detection. The claude TUI renders a numbered
-  // menu ("Do you want to proceed?" + "❯ 1. Yes" / "…don't ask again") whenever
-  // it needs the user to approve a tool or answer a question — the pure-mode
-  // equivalent of a tool-approval prompt. Sniffing the raw PTY for that menu
-  // drives the red "wants input" bull (via setNeedsInput) and rings once,
-  // immediately, when the window is unfocused. A rolling, ANSI-stripped tail
-  // handles the prompt being split across output chunks.
-  const outTailRef = useRef("");
   const taRef = useRef<HTMLTextAreaElement | null>(null);
-  // Latched true while a prompt is on screen so we fire once per request, not
-  // once per redraw. Cleared when the user submits a response (see onPtyInput).
+  // True while a permission/question prompt is on screen, so a turn-end signal
+  // racing in behind it doesn't also ring the "done" chime. Set on needs_input,
+  // cleared when the user submits an answer.
   const promptOpenRef = useRef(false);
-  // Same latching for claude's optional end-of-session poll, which does NOT
-  // need an answer but does keep the PTY dripping output forever (defeating
-  // the idle-clear). When detected we end the turn the same way idle would.
-  const pollOpenRef = useRef(false);
-  // Same for claude's "✶ Worked for …" turn-end marker — a hard "done" signal
-  // even when the cursor-blink keeps the PTY dripping past the idle window.
-  const turnEndSeenRef = useRef(false);
-  // One completion chime + badge per turn, shared by the poll / turn-end / idle
-  // paths. A single turn-end can trip more than one of them (the markers arrive
-  // in sequence), so without this latch the user hears the sound twice. Reset
-  // when the user submits the next turn (see onPtyInput).
+  // One completion chime + badge per turn — a turn-end can be signalled by more
+  // than one marker (poll / "✶ Worked for" / recap / idle), so without this
+  // latch the user hears the sound twice. Reset on submit (see onPtyInput).
   const completionNotifiedRef = useRef(false);
 
   // Pure sessions get no auto-title from a turn-event stream. Instead we read
@@ -444,8 +448,7 @@ function PureSessionView({
       .catch(() => {});
   }, [sessionId]);
 
-  // Ring the "done" chime + bump the badge at most once per turn, no matter how
-  // many completion markers (poll, "✶ Worked for", idle) fire for it.
+  // Ring the "done" chime + bump the badge at most once per turn.
   const notifyCompletion = useCallback(() => {
     if (completionNotifiedRef.current) return;
     completionNotifiedRef.current = true;
@@ -455,53 +458,48 @@ function PureSessionView({
     }
   }, []);
 
-  const detectPrompt = useCallback(
-    (data: string) => {
-      const stripped = stripAnsi(data);
-      const tail = (outTailRef.current + stripped).slice(-2000);
-      outTailRef.current = tail;
-      if (PURE_PROMPT_RE.test(tail) && !promptOpenRef.current) {
-        promptOpenRef.current = true;
-        // Light the red bull: this thread wants an input. Outranks the blue
-        // busy pulse (see StatusDot). Cleared when the user answers.
-        setNeedsInput(sessionId, true);
-        // Work is paused on this prompt — drop the blue pulse immediately.
-        // The prompt's blinking cursor keeps the PTY dripping output, so the
-        // idle-clear would otherwise never fire while it's on screen.
-        armedRef.current = false;
-        window.clearTimeout(idleTimerRef.current);
-        setBusy(sessionId, false);
-        if (shouldNotify()) {
-          playInputChime();
-          bumpBadge();
-        }
-        return;
+  // Backend-driven turn state. The claude TUI is opaque bytes, so the backend
+  // sniffs its raw PTY stream (`infra::pure_signals`) and emits discrete
+  // signals. Consuming those here — instead of a frontend regex + `setTimeout`
+  // idle-clear — is what makes detection survive the window losing focus: the
+  // WebView throttles background timers and pauses xterm rendering, which is the
+  // "fails when the window hasn't had focus" bug. The backend has no such
+  // throttle.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void onPureSignal(sessionId, (signal) => {
+      switch (signal) {
+        case "needs_input":
+          // Red bull: this thread wants input. Outranks the blue busy pulse.
+          promptOpenRef.current = true;
+          setNeedsInput(sessionId, true);
+          setBusy(sessionId, false);
+          if (shouldNotify()) {
+            playInputChime();
+            bumpBadge();
+          }
+          break;
+        case "turn_ended":
+          setBusy(sessionId, false);
+          // Don't double-ring when a prompt is already waiting (input chime
+          // rang for it).
+          if (!promptOpenRef.current) notifyCompletion();
+          refreshTitle();
+          break;
+        case "working":
+          setBusy(sessionId, true);
+          break;
       }
-      if (PURE_POLL_RE.test(tail) && !pollOpenRef.current) {
-        pollOpenRef.current = true;
-        // Optional poll → claude has effectively finished. Treat as a turn end:
-        // drop the blue pulse, ring the done chime, try to title. No red bull
-        // (no input required) and no attention flag (this is the active view).
-        armedRef.current = false;
-        window.clearTimeout(idleTimerRef.current);
-        setBusy(sessionId, false);
-        notifyCompletion();
-        refreshTitle();
-        return;
-      }
-      if (PURE_TURN_END_RE.test(tail) && !turnEndSeenRef.current) {
-        turnEndSeenRef.current = true;
-        // "✶ Worked for X" marker — turn settled. Same treatment as the poll
-        // case, in case the cursor-blink or footer redraws keep dripping bytes.
-        armedRef.current = false;
-        window.clearTimeout(idleTimerRef.current);
-        setBusy(sessionId, false);
-        notifyCompletion();
-        refreshTitle();
-      }
-    },
-    [sessionId, setNeedsInput, setBusy, refreshTitle, notifyCompletion],
-  );
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [sessionId, setNeedsInput, setBusy, notifyCompletion, refreshTitle]);
 
   // One attempt shortly after mount catches resumed sessions whose transcript
   // already exists from a previous run.
@@ -511,40 +509,16 @@ function PureSessionView({
   }, [refreshTitle]);
 
   const onPtyInput = useCallback((data: string) => {
-    // A submit from the user (Enter, unless Shift held for a newline) arms the
-    // done-detector. Other keystrokes (navigation, autocomplete) don't.
+    // A submit (Enter, unless Shift held for a newline) starts a turn. The
+    // backend arms its own idle watchdog + resets its latches on the `\r`; here
+    // we just reflect it in the UI immediately. Other keystrokes don't.
     if (data.includes("\r")) {
-      armedRef.current = true;
-      setBusy(sessionId, true); // typing Enter into the TUI starts a turn
-      // The user just answered a prompt (or started a turn): drop the red bull,
-      // release the latch, and reset the sniff buffer so the next request fires.
+      setBusy(sessionId, true);
       setNeedsInput(sessionId, false);
       promptOpenRef.current = false;
-      pollOpenRef.current = false;
-      turnEndSeenRef.current = false;
       completionNotifiedRef.current = false;
-      outTailRef.current = "";
     }
   }, [sessionId, setBusy, setNeedsInput]);
-
-  const onPtyOutput = useCallback(
-    (data: string) => {
-      detectPrompt(data);
-      if (!armedRef.current) return;
-      window.clearTimeout(idleTimerRef.current);
-      idleTimerRef.current = window.setTimeout(() => {
-        armedRef.current = false;
-        setBusy(sessionId, false); // output went quiet → turn settled
-        // If a permission/input prompt is on screen the prompt chime already
-        // rang — don't double-ring as a "turn done".
-        if (!promptOpenRef.current) notifyCompletion();
-        // Turn settled → claude has flushed the user message (and maybe a
-        // summary) to its transcript; try to title from it.
-        refreshTitle();
-      }, IDLE_DONE_MS);
-    },
-    [refreshTitle, detectPrompt, sessionId, setBusy, notifyCompletion],
-  );
 
   // NB: no unmount-clear here. Leaving the chat tab unmounts this panel mid-turn
   // and clearing on unmount made the sidebar dot vanish while still working. The
@@ -677,12 +651,11 @@ function PureSessionView({
     // THEN a single Enter to submit. Sending `@path\r` alone only picks the
     // autocomplete entry without submitting — the bug the chips UX fixes.
     const refs = attachments.map((a) => `@${a.path} `).join("");
-    armedRef.current = true; // arm the done-chime detector
+    // The trailing `\r` sendToPty emits drives the backend's arm + latch reset;
+    // reflect the turn start in the UI immediately. The backend owns detection.
     setBusy(sessionId, true); // sidebar pulse on
-    promptOpenRef.current = false; // fresh turn → re-arm the prompt chime
-    pollOpenRef.current = false;
-    turnEndSeenRef.current = false;
-    outTailRef.current = "";
+    promptOpenRef.current = false;
+    completionNotifiedRef.current = false;
     sendToPty(`${refs}${trimmed}`);
     setText("");
     setAttachments([]);
@@ -797,22 +770,46 @@ function PureSessionView({
           <TerminalIcon className="size-3.5" strokeWidth={1.75} />
           <span className="font-medium">{t("pure_header")}</span>
           <span className="truncate text-neutral-500">· {project.name}</span>
-          {onToggleTerminal && (
+          <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
-              onClick={onToggleTerminal}
-              aria-label={t("terminal_heading")}
-              title={t("terminal_heading")}
-              className={`ml-auto flex size-6 items-center justify-center rounded transition ${
-                terminalOpen
+              onClick={() => setAutopilotOpen((v) => !v)}
+              aria-label={t("autopilot_open")}
+              title={autopilotOn ? t("autopilot_on") : t("autopilot_off")}
+              className={`flex size-6 items-center justify-center rounded transition ${
+                autopilotOpen
                   ? "bg-neutral-800 text-neutral-100"
-                  : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+                  : autopilotOn
+                    ? "text-emerald-400 hover:bg-neutral-800"
+                    : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
               }`}
             >
-              <SquareTerminal className="size-3.5" strokeWidth={1.75} />
+              <Bot className="size-3.5" strokeWidth={1.75} />
             </button>
-          )}
+            {onToggleTerminal && (
+              <button
+                type="button"
+                onClick={onToggleTerminal}
+                aria-label={t("terminal_heading")}
+                title={t("terminal_heading")}
+                className={`flex size-6 items-center justify-center rounded transition ${
+                  terminalOpen
+                    ? "bg-neutral-800 text-neutral-100"
+                    : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+                }`}
+              >
+                <SquareTerminal className="size-3.5" strokeWidth={1.75} />
+              </button>
+            )}
+          </div>
         </header>
+      )}
+
+      {autopilotOpen && (
+        <AutopilotPanel
+          sessionId={sessionId}
+          onClose={() => setAutopilotOpen(false)}
+        />
       )}
 
       {error && (
@@ -829,7 +826,6 @@ function PureSessionView({
             onExit={onPtyExit}
             onImagePaste={onTerminalImagePaste}
             onInput={onPtyInput}
-            onOutput={onPtyOutput}
             onOpenPath={onOpenPath}
           />
         ) : (

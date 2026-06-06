@@ -3,6 +3,7 @@
 //! world lives here.
 
 pub mod agent_pool;
+pub mod autopilot;
 pub mod checkpoint;
 pub mod docker_cleanup;
 pub mod dotenv_render;
@@ -138,4 +139,5 @@ pub mod path_translator;
 pub mod projections;
 pub mod provider_discovery;
 pub mod pty;
+pub mod pure_signals;
 pub mod session_supervisor;

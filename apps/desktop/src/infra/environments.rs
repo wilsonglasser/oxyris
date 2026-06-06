@@ -55,6 +55,7 @@ fn is_hidden(name: &str) -> bool {
 /// native host. Failure to enumerate WSL on Windows is **not** fatal — it just
 /// means "no WSL detected on this box" and we return only `Local`.
 pub fn environments_list() -> Vec<EnvironmentEntry> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut out = vec![EnvironmentEntry {
         environment: Environment::Local,
         state: None,

@@ -116,3 +116,29 @@ export async function onTerminalExit(
 ): Promise<UnlistenFn> {
   return listen<string>(`terminal:${id}:exit`, (e) => cb(e.payload));
 }
+
+/** Pure-mode turn-state signal, detected backend-side from the claude TUI's
+ * raw PTY stream (see `infra::pure_signals`). Driving this from the backend —
+ * instead of a frontend sniffer + `setTimeout` — is what makes detection
+ * survive the window losing focus (the WebView throttles background timers). */
+export type PureSignal = "needs_input" | "turn_ended" | "working";
+
+export type PureSignalEvent = {
+  terminal_id: string;
+  signal: PureSignal;
+};
+
+/**
+ * Subscribe to a pure session's backend turn-state signals, keyed by the
+ * session id (not the terminal id — the backend emits per session so background
+ * watchers can listen without first resolving the claude PTY).
+ */
+export async function onPureSignal(
+  sessionId: string,
+  cb: (signal: PureSignal, terminalId: string) => void,
+): Promise<UnlistenFn> {
+  return listen<PureSignalEvent>(
+    `session:${sessionId}:pure-signal`,
+    (e) => cb(e.payload.signal, e.payload.terminal_id),
+  );
+}

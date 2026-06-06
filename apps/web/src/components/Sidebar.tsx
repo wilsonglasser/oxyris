@@ -45,27 +45,7 @@ import {
 } from "~/lib/notificationSound.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { localEnvLabel } from "~/lib/host.ts";
-import {
-  createPromptSniffer,
-  PURE_POLL_RE,
-  PURE_RECAP_RE,
-  PURE_TURN_END_RE,
-  PURE_WORKING_RE,
-  stripAnsi,
-} from "~/lib/pureTurn.ts";
-import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
-
-// Pure threads have no turn-event stream, so a background pure thread's bull is
-// driven off its claude PTY: a live turn is a stretch of output (the TUI
-// spinner), and this much silence after it declares the turn settled. Slightly
-// longer than the in-view panel's 2500ms so the two don't race on the active
-// thread during the hand-off when you open it.
-const PURE_IDLE_DONE_MS = 3000;
-// After a poll / "✶ Worked for …" marker fires, hold off on flagging orange
-// this long. The marker can surface mid-turn (claude prints it, then keeps
-// working); if a real content burst lands inside the window the burst-reset
-// cancels the pending flag, so the bull only goes orange on a settled turn.
-const PURE_DONE_DEFER_MS = 1500;
+import { onPureSignal } from "~/ipc/terminal.ts";
 
 interface Props {
   onNewProject: () => void;
@@ -289,179 +269,46 @@ export function Sidebar({
         if (cancelled) fn();
         else unlistens.push(fn);
       });
-      // Pure threads emit none of the events above — drive their bull off the
-      // claude PTY. Output flowing = a turn is live (blue); the TUI's
-      // permission/question menu = red; a quiet finish with no menu on screen =
-      // orange (it finished while you were on another thread). The idle TUI is
-      // silent, so output-presence is a sound "working" signal.
-      const sniffer = createPromptSniffer(() => {
-        setNeedsInput(s.id, true);
-        // Work is paused on this prompt — drop the blue pulse. The TUI's
-        // blinking cursor keeps the PTY dripping output, so the idle-clear
-        // below would otherwise never fire while the menu is on screen.
-        window.clearTimeout(idleTimer);
-        liveWorking = false;
-        setBusy(s.id, false);
-        if (shouldNotify()) {
-          playInputChime();
-          bumpBadge();
-        }
-      });
-      // Optional end-of-session poll: not a real input request, but it does
-      // keep the PTY dripping output. Treat it as a turn end (orange attention
-      // bull), not as a "needs input" (red). No red.
-      const pollSniffer = createPromptSniffer(() => {
-        window.clearTimeout(idleTimer);
-        liveWorking = false;
-        setBusy(s.id, false);
-        // Defer the orange flag — see scheduleDone. A burst of real content in
-        // the defer window means the turn isn't actually over and cancels it.
-        scheduleDone();
-      }, PURE_POLL_RE);
-      // "✶ Worked for …" marker: hard turn-end signal in case the cursor-blink
-      // or footer redraws keep the PTY dripping past the idle window.
-      const endSniffer = createPromptSniffer(() => {
-        window.clearTimeout(idleTimer);
-        liveWorking = false;
-        setBusy(s.id, false);
-        scheduleDone();
-      }, PURE_TURN_END_RE);
-      // "※ recap" end-of-conversation line: another settled-turn signal whose
-      // glyph PURE_TURN_END_RE can't match. Same orange-flag path as the marker.
-      const recapSniffer = createPromptSniffer(() => {
-        window.clearTimeout(idleTimer);
-        liveWorking = false;
-        setBusy(s.id, false);
-        scheduleDone();
-      }, PURE_RECAP_RE);
-      let armed = false;
-      let idleTimer: number | undefined;
-      // True while the most recent PTY output was the live "…" working spinner
-      // (see PURE_WORKING_RE). Extended thinking can stall output past the idle
-      // window without the turn being over; flagging orange then is wrong. Set
-      // per-chunk below; cleared by any real done/needs-input signal.
-      let liveWorking = false;
-      // One completion chime + attention flag per turn, shared by the poll /
-      // turn-end / idle paths. The sniffers are all fed each chunk before the
-      // open-check, so a turn that emits the "✶ Worked for" marker and then a
-      // poll prompt would otherwise ring twice. Reset when a genuine new turn
-      // burst is detected (see the >400-byte reset below).
-      let notified = false;
-      // Bytes seen since any sniffer last fired. A new turn brings a *burst*
-      // of real content; the post-fire trickle from cursor-blink / footer
-      // redraws is sparse — bytes far apart in time. The counter is gated by a
-      // 2s quiet window so a slow drip can never accumulate to the threshold
-      // (otherwise the watcher false-rearms, the idle timer fires 3s later,
-      // and the session gets re-flagged orange + chimed indefinitely).
-      let bytesSinceFire = 0;
-      let lastByteAt = 0;
-      // Pending "turn settled → orange" flag, armed by the poll / turn-end
-      // sniffers and the idle path. Cancelled by the burst-reset below when more
-      // real content proves the turn is still live. The cursor-blink drip is too
-      // sparse to trip the reset, so a genuinely settled turn still flags.
-      let doneDeferTimer: number | undefined;
-      function scheduleDone() {
-        window.clearTimeout(doneDeferTimer);
-        doneDeferTimer = window.setTimeout(() => {
-          // A live working spinner arrived inside the defer window → the turn is
-          // still thinking, not settled. Don't flag orange.
-          if (notified || liveWorking) return;
-          notified = true;
-          markAttention(s.id);
-          if (shouldNotify()) {
-            playCompletionChime();
-            bumpBadge();
-          }
-        }, PURE_DONE_DEFER_MS);
-      }
-      void terminalList({ session_id: s.id }).then((rows) => {
-        if (cancelled) return;
-        const pty = rows.find((r) => r.kind === "claude");
-        if (!pty) return; // structured session — handled by the event path above
-        void onTerminalOutput(pty.id, (_seq, data) => {
-          sniffer.feed(data);
-          pollSniffer.feed(data);
-          endSniffer.feed(data);
-          recapSniffer.feed(data);
-          // Live "…" working spinner = still thinking. Latch it so a long
-          // thinking pause (output stalled past the idle window) can't be
-          // mistaken for a finished turn below. A real done/needs-input signal
-          // above already cleared it; a done line never matches PURE_WORKING_RE.
-          if (PURE_WORKING_RE.test(stripAnsi(data))) {
-            liveWorking = true;
-            window.clearTimeout(doneDeferTimer);
-          }
-          // Keep the green "recent" window alive for pure threads (no Turn
-          // event bumps their projected last_activity_at).
-          useSessionStore.getState().touchActivity(s.id);
-          // Any sniffer latched: count output to detect a new turn. Cursor-
-          // blink redraws are tiny; real content trips the threshold quickly.
-          if (
-            sniffer.open ||
-            pollSniffer.open ||
-            endSniffer.open ||
-            recapSniffer.open
-          ) {
-            const now = Date.now();
-            // Quiet gap → previous bytes were noise, not part of a burst.
-            if (now - lastByteAt > 2000) bytesSinceFire = 0;
-            lastByteAt = now;
-            bytesSinceFire += data.length;
-            if (bytesSinceFire > 400) {
-              sniffer.reset();
-              pollSniffer.reset();
-              endSniffer.reset();
-              recapSniffer.reset();
-              // Real content after a turn-end/poll marker → the turn is still
-              // live. Cancel the pending orange flag so it never flashes.
-              window.clearTimeout(doneDeferTimer);
-              bytesSinceFire = 0;
-              notified = false; // genuine new turn → allow its done-chime again
-              liveWorking = false; // re-detected from this turn's own spinner
-              // Fall through and arm the pulse for the new turn.
-            } else {
-              armed = false;
-              window.clearTimeout(idleTimer);
-              return;
-            }
-          } else {
-            bytesSinceFire = 0;
-          }
-          if (!armed) {
-            armed = true;
-            setBusy(s.id, true);
-          }
-          window.clearTimeout(idleTimer);
-          idleTimer = window.setTimeout(() => {
-            // Last output was the live "…" spinner → thinking paused, not done.
-            // Keep the blue pulse; a real turn-end marker will settle it later.
-            if (liveWorking) return;
-            armed = false;
+      // Pure threads emit none of the structured events above — drive their
+      // bull off the backend's pure-signal stream (sniffed from the claude PTY
+      // in `infra::pure_signals`). Driving this from the backend, instead of a
+      // frontend sniffer + idle timers, keeps background pure threads correct
+      // even when the window has no focus (the WebView throttled the old timers).
+      // working = live turn (blue); needs_input = the TUI's permission/question
+      // menu (red); turn_ended = a quiet finish (orange "attention", since it
+      // finished while you were on another thread).
+      void onPureSignal(s.id, (signal) => {
+        useSessionStore.getState().touchActivity(s.id);
+        switch (signal) {
+          case "needs_input":
+            setNeedsInput(s.id, true);
             setBusy(s.id, false);
-            if (
-              !sniffer.open &&
-              !pollSniffer.open &&
-              !endSniffer.open &&
-              !recapSniffer.open &&
-              !notified
-            ) {
-              notified = true;
-              markAttention(s.id);
-              if (shouldNotify()) {
-                playCompletionChime();
-                bumpBadge();
-              }
+            if (shouldNotify()) {
+              playInputChime();
+              bumpBadge();
             }
-          }, PURE_IDLE_DONE_MS);
-        }).then((fn) => {
-          if (cancelled) {
-            fn();
-            return;
+            break;
+          case "turn_ended": {
+            // Chime only when this thread was actually working (a marker on a
+            // freshly-resumed idle session shouldn't ring out of nowhere).
+            const wasBusy = useBusyStore.getState().busy[s.id];
+            setBusy(s.id, false);
+            markAttention(s.id);
+            void refreshProjectSessions(s.project_id);
+            if (wasBusy && shouldNotify()) {
+              playCompletionChime();
+              bumpBadge();
+            }
+            break;
           }
-          unlistens.push(fn);
-          unlistens.push(() => window.clearTimeout(idleTimer));
-          unlistens.push(() => window.clearTimeout(doneDeferTimer));
-        });
+          case "working":
+            setBusy(s.id, true);
+            setNeedsInput(s.id, false);
+            break;
+        }
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlistens.push(fn);
       });
     }
     return () => {
@@ -470,14 +317,16 @@ export function Sidebar({
     };
   }, [watchKey, markAttention, setNeedsInput, setBusy, refreshProjectSessions]);
 
-  // Auto-expand the active project so the user always sees its threads.
+  // Auto-expand the active project so the user always sees its threads —
+  // but only when it is the sole project. With multiple projects every group
+  // stays collapsed on open; the user expands the one they want.
   useEffect(() => {
-    if (activeProjectId) {
+    if (activeProjectId && projects.length === 1) {
       setExpanded((prev) =>
         prev[activeProjectId] ? prev : { ...prev, [activeProjectId]: true },
       );
     }
-  }, [activeProjectId]);
+  }, [activeProjectId, projects.length]);
 
   const q = query.trim().toLowerCase();
   const searching = q.length > 0;

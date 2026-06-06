@@ -27,18 +27,10 @@ import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useDragResize } from "~/lib/useDragResize.ts";
-import {
-  createPromptSniffer,
-  PURE_POLL_RE,
-  PURE_RECAP_RE,
-  PURE_TURN_END_RE,
-  PURE_WORKING_RE,
-  stripAnsi,
-} from "~/lib/pureTurn.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
 import { sessionStart } from "~/ipc/session.ts";
-import { onTerminalOutput, terminalList } from "~/ipc/terminal.ts";
+import { onPureSignal } from "~/ipc/terminal.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import { useIndexingStore } from "~/stores/indexingStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
@@ -101,114 +93,39 @@ export function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  // Keep the ACTIVE pure session's "busy" dot alive across tab switches. Its
-  // PureClaudePanel unmounts when you leave the chat tab, taking the in-view
-  // idle detector with it — so the clear must live here (App never unmounts on
-  // tab change). Pure threads have no turn-event stream: the panel *arms* busy
-  // on submit; here we watch the claude PTY's output and clear once it goes
-  // quiet, regardless of which tab is shown.
+  // Keep the ACTIVE pure session's "busy"/"needs input" dot correct across tab
+  // switches. Its PureClaudePanel unmounts when you leave the chat tab, so the
+  // state must also be driven here (App never unmounts on tab change). The
+  // backend sniffs the claude PTY (`infra::pure_signals`) and emits discrete
+  // turn-state signals — consuming those here (instead of a frontend sniffer +
+  // throttled `setTimeout`) is what makes this survive the window losing focus.
+  // No chime here: the mounted panel owns notifications, so we'd double-ring.
   const activeIsPure = sessionSnapshot?.kind === "pure";
   useEffect(() => {
     const sid = activeSessionId;
     if (!sid || !activeIsPure) return;
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    let timer: number | undefined;
-    // True while the latest PTY output was the live "…" working spinner. Keeps
-    // the busy pulse through long thinking pauses (extended thinking can stall
-    // output past the clear window without the turn being over).
-    let liveWorking = false;
-    const scheduleClear = () => {
-      window.clearTimeout(timer);
-      // Slightly longer than the panel's 2500ms so the two don't race.
-      timer = window.setTimeout(() => {
-        // Still thinking (last output was the "…" spinner) → keep blue.
-        if (liveWorking) return;
-        useBusyStore.getState().setBusy(sid, false);
-      }, 3000);
-    };
-    // Light the red "wants input" bull when the claude TUI shows its
-    // permission/question menu, so it survives leaving the chat tab (which
-    // unmounts PureClaudePanel and its own detector). No chime here — the
-    // mounted panel owns that, same as the busy clear below stays silent to
-    // avoid a double-ring. Cleared when the user answers (panel's onPtyInput).
-    // Also force-clears busy: a prompt's blinking cursor keeps dripping output
-    // so the idle-clear below never settles while it's on screen.
-    const sniffer = createPromptSniffer(() => {
-      useSessionStore.getState().setNeedsInput(sid, true);
-      window.clearTimeout(timer);
-      liveWorking = false;
-      useBusyStore.getState().setBusy(sid, false);
-    });
-    // claude's optional end-of-session poll has the same "PTY drips forever"
-    // problem but is NOT a real input request — just force the busy clear and
-    // leave the bull to settle to its natural state (green for active sessions,
-    // never attention since the user is viewing it).
-    const pollSniffer = createPromptSniffer(() => {
-      window.clearTimeout(timer);
-      liveWorking = false;
-      useBusyStore.getState().setBusy(sid, false);
-    }, PURE_POLL_RE);
-    // "✶ Worked for …" turn-end marker: a hard "done" signal in case the
-    // cursor-blink keeps the PTY dripping past the idle window.
-    const endSniffer = createPromptSniffer(() => {
-      window.clearTimeout(timer);
-      liveWorking = false;
-      useBusyStore.getState().setBusy(sid, false);
-    }, PURE_TURN_END_RE);
-    // "※ recap" end-of-conversation line: same settled-turn busy-clear; its
-    // glyph falls outside PURE_TURN_END_RE's range so it needs its own sniffer.
-    const recapSniffer = createPromptSniffer(() => {
-      window.clearTimeout(timer);
-      liveWorking = false;
-      useBusyStore.getState().setBusy(sid, false);
-    }, PURE_RECAP_RE);
-    // Reset every latched sniffer when a new turn starts (busy goes true), so
-    // their once-per-turn signals fire again at the next turn-end. Without
-    // this, the second turn's "✶ Worked for …" would be ignored and the bull
-    // would only clear via the idle-timer fallback (which can't settle while
-    // the TUI keeps redrawing).
-    let prevBusy = useBusyStore.getState().busy[sid] ?? false;
-    const unsubBusy = useBusyStore.subscribe((state) => {
-      const now = state.busy[sid] ?? false;
-      if (now && !prevBusy) {
-        sniffer.reset();
-        pollSniffer.reset();
-        endSniffer.reset();
-        recapSniffer.reset();
-        liveWorking = false;
+    void onPureSignal(sid, (signal) => {
+      useSessionStore.getState().touchActivity(sid);
+      switch (signal) {
+        case "needs_input":
+          useSessionStore.getState().setNeedsInput(sid, true);
+          useBusyStore.getState().setBusy(sid, false);
+          break;
+        case "turn_ended":
+          useBusyStore.getState().setBusy(sid, false);
+          break;
+        case "working":
+          useBusyStore.getState().setBusy(sid, true);
+          break;
       }
-      prevBusy = now;
-    });
-    void terminalList({ session_id: sid }).then((rows) => {
-      if (cancelled) return;
-      const pty = rows.find((r) => r.kind === "claude");
-      if (!pty) return;
-      // Output only flows during a turn; each chunk pushes the idle clear out.
-      void onTerminalOutput(pty.id, (_seq, data) => {
-        sniffer.feed(data);
-        pollSniffer.feed(data);
-        endSniffer.feed(data);
-        recapSniffer.feed(data);
-        // Live "…" working spinner = still thinking; a done line never matches.
-        // Latch (don't unset on a partial redraw) — only a real done/needs-input
-        // signal above clears it.
-        if (PURE_WORKING_RE.test(stripAnsi(data))) liveWorking = true;
-        // Pure turns emit no Turn event to bump last_activity_at — stamp live
-        // activity so the bull reads green (recent), not stale-gray.
-        useSessionStore.getState().touchActivity(sid);
-        if (useBusyStore.getState().busy[sid]) scheduleClear();
-      }).then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      });
-      // Guarantee a clear path even if the turn ended right as we subscribed.
-      if (useBusyStore.getState().busy[sid]) scheduleClear();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
     });
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
-      unsubBusy();
       unlisten?.();
       // Switching to another session: don't strand a stuck dot on this one.
       useBusyStore.getState().setBusy(sid, false);

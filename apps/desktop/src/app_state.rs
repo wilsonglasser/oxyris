@@ -16,6 +16,7 @@ use thiserror::Error;
 
 use crate::domain::session::{Session, SessionCommand, SessionEvent};
 use crate::infra::agent_pool::AgentPool;
+use crate::infra::autopilot::AutopilotManager;
 use crate::infra::event_store::{EventStore, EventStoreError};
 use crate::infra::fs_watcher::FsWatchService;
 use crate::infra::indexing::IndexingService;
@@ -37,7 +38,10 @@ pub struct AppState {
     #[allow(dead_code)]
     pub providers: Arc<ProviderRegistry>,
     pub session_supervisor: SessionSupervisor,
-    pub pty: PtySupervisor,
+    pub pty: Arc<PtySupervisor>,
+    /// Drives engaged pure sessions toward their mission. Reacts to the PTY
+    /// reader's pure-signals in-process (works with the window unfocused).
+    pub autopilot: Arc<AutopilotManager>,
     pub indexing: Arc<IndexingService>,
     pub fs_watcher: Arc<FsWatchService>,
     pub lsp: Arc<LspManager>,
@@ -124,6 +128,7 @@ impl AppState {
 
         let app_for_cleanup = app.clone();
         let app_for_lsp = app.clone();
+        let app_for_autopilot = app.clone();
         let lsp_bridge_port: Arc<StdMutex<Option<u16>>> = Arc::new(StdMutex::new(None));
         let session_supervisor = SessionSupervisor::new(
             providers.clone(),
@@ -186,13 +191,26 @@ impl AppState {
             });
         }
 
+        // Auto-pilot: the PTY supervisor pushes pure-signal notices into a
+        // channel the manager drains. Wire the sink before any PTY can spawn so
+        // every reader thread captures it.
+        let pty = Arc::new(PtySupervisor::new());
+        let (sig_tx, sig_rx) = tokio::sync::mpsc::unbounded_channel();
+        pty.set_signal_sink(sig_tx);
+        let autopilot = Arc::new(AutopilotManager::new(pty.clone(), app_for_autopilot));
+        {
+            let manager = autopilot.clone();
+            tauri::async_runtime::spawn(async move { manager.run(sig_rx).await });
+        }
+
         Ok(Self {
             event_store,
             projections,
             agent_pool,
             providers,
             session_supervisor,
-            pty: PtySupervisor::new(),
+            pty,
+            autopilot,
             indexing,
             fs_watcher,
             lsp,

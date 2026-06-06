@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use oxyris_core::{AggregateId, Environment};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -14,7 +16,21 @@ use regex::Regex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use thiserror::Error;
+use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
+
+use crate::infra::pure_signals::{PureSignal, PureSniffer, strip_ansi};
+
+/// In-process notification of a pure-signal, pushed from the PTY reader to the
+/// auto-pilot controller (in addition to the `session:<id>:pure-signal` Tauri
+/// event the frontend consumes). Lets the backend react with the window
+/// unfocused — the whole point of moving detection off the WebView.
+#[derive(Debug, Clone)]
+pub struct PureSignalNotice {
+    pub session_id: AggregateId,
+    pub terminal_id: String,
+    pub signal: PureSignal,
+}
 
 /// Cap on the per-terminal replay buffer. This is the source of truth for how
 /// much scrollback survives a re-attach (tab switch / remount): on attach the
@@ -78,11 +94,46 @@ struct LiveTerminal {
     master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     /// Held so the spawned process is waited on / killable.
     _child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    /// OS pid of the direct child (the shell). Used to kill the **whole**
+    /// process tree on close — `Child::kill()` only reaps the shell itself,
+    /// leaving grandchildren like a `cargo run` app orphaned and alive.
+    pid: Option<u32>,
     session_id: AggregateId,
     title: String,
     cwd: String,
     kind: TerminalKind,
     replay: Arc<Mutex<ReplayBuffer>>,
+    /// Pure-mode signal sniffer — present only for `Claude` PTYs. The reader
+    /// thread feeds it raw output and emits `session:<id>:pure-signal` events;
+    /// `write` resets its latches when the user submits a turn. `None` for
+    /// shells. See `infra::pure_signals`.
+    pure: Option<Arc<Mutex<PureSniffer>>>,
+    /// Idle watchdog state for claude PTYs — armed on submit, refreshed on each
+    /// output chunk, fires a fallback `TurnEnded` when output goes quiet with no
+    /// marker. `None` for shells.
+    idle: Option<Arc<Mutex<IdleState>>>,
+}
+
+/// Tracks output silence so the backend can declare a pure turn "done" even when
+/// claude prints no explicit "✶ Worked for…" marker (the idle fallback the
+/// frontend used to do with a throttled `setTimeout`). Armed when the user
+/// submits a turn; disarmed by a marker signal or by the watchdog firing.
+struct IdleState {
+    armed: bool,
+    last_output: Instant,
+}
+
+/// Output silence (ms) after which an armed turn with no marker is declared
+/// done. Matches the frontend's `IDLE_DONE_MS`.
+const IDLE_DONE_MS: u64 = 2500;
+
+/// Payload for the `session:<session_id>:pure-signal` Tauri event. Driven from
+/// the backend PTY reader so detection survives the window losing focus (the
+/// frontend sniffer was throttled when backgrounded).
+#[derive(Debug, Clone, Serialize)]
+struct PureSignalEvent {
+    terminal_id: String,
+    signal: PureSignal,
 }
 
 /// Bytes that the reader thread has emitted so far, kept around so a late
@@ -348,11 +399,44 @@ fn apply_wslenv(cmd: &mut CommandBuilder, extra_env: &[(String, String)]) {
 #[derive(Default)]
 pub struct PtySupervisor {
     terminals: Mutex<HashMap<String, LiveTerminal>>,
+    /// Optional in-process sink for pure-signal notices (the auto-pilot
+    /// controller). Set once at boot via [`PtySupervisor::set_signal_sink`].
+    signal_sink: Mutex<Option<UnboundedSender<PureSignalNotice>>>,
 }
 
 impl PtySupervisor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Wire the auto-pilot controller's notice channel. Called once at boot,
+    /// before any PTY spawns, so every reader thread captures it.
+    pub fn set_signal_sink(&self, tx: UnboundedSender<PureSignalNotice>) {
+        if let Ok(mut slot) = self.signal_sink.lock() {
+            *slot = Some(tx);
+        }
+    }
+
+    /// ANSI-stripped tail of a terminal's scrollback, capped at `max_chars`.
+    /// Used to build the auto-pilot's transcript context. Does not touch
+    /// `attach_count` (unlike `attach_snapshot`), so it's safe to poll.
+    pub fn scrollback_tail(&self, id: &str, max_chars: usize) -> Option<String> {
+        let terminals = self.terminals.lock().ok()?;
+        let live = terminals.get(id)?;
+        let rb = live.replay.lock().ok()?;
+        let raw =
+            String::from_utf8_lossy(&rb.data.iter().copied().collect::<Vec<u8>>()).into_owned();
+        let stripped = strip_ansi(&raw);
+        let len = stripped.chars().count();
+        if len <= max_chars {
+            return Some(stripped);
+        }
+        let start = stripped
+            .char_indices()
+            .nth(len - max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        Some(stripped[start..].to_owned())
     }
 
     /// Spawn a new terminal in `cwd`. Returns its id; output streams as
@@ -454,6 +538,9 @@ impl PtySupervisor {
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::Other(e.to_string()))?;
+        // Grab the pid before wrapping the child in a mutex — needed to kill
+        // the whole descendant tree on close (not just this direct child).
+        let pid = child.process_id();
         // The slave handle is no longer needed once spawn_command consumes it.
         drop(pair.slave);
 
@@ -466,6 +553,19 @@ impl PtySupervisor {
         let master = Arc::new(Mutex::new(pair.master));
         let child = Arc::new(Mutex::new(child));
         let replay = Arc::new(Mutex::new(ReplayBuffer::default()));
+        // Only claude PTYs get a pure-signal sniffer + idle watchdog — shells
+        // have no TUI prompts/turns to detect.
+        let is_claude = matches!(kind, TerminalKind::Claude);
+        let pure: Option<Arc<Mutex<PureSniffer>>> =
+            is_claude.then(|| Arc::new(Mutex::new(PureSniffer::new())));
+        let idle: Option<Arc<Mutex<IdleState>>> = is_claude.then(|| {
+            Arc::new(Mutex::new(IdleState {
+                armed: false,
+                last_output: Instant::now(),
+            }))
+        });
+        // Lets the idle watchdog stop itself when the PTY hits EOF.
+        let alive = Arc::new(AtomicBool::new(true));
 
         // Reader task — pulls bytes off the PTY, appends them to the replay
         // buffer (so a late attach can catch up), and forwards as events.
@@ -473,6 +573,13 @@ impl PtySupervisor {
         let reader_id = id.clone();
         let reader_master = master.clone();
         let reader_replay = replay.clone();
+        let reader_pure = pure.clone();
+        let reader_idle = idle.clone();
+        let reader_alive = alive.clone();
+        let reader_session = session_id;
+        // Snapshot the auto-pilot sink (if any) so signal notices reach the
+        // controller in-process, not just the frontend via Tauri events.
+        let reader_sink = self.signal_sink.lock().ok().and_then(|g| g.clone());
         std::thread::spawn(move || {
             let mut reader = {
                 let Ok(guard) = reader_master.lock() else {
@@ -516,14 +623,102 @@ impl PtySupervisor {
                         };
                         let _ = reader_app.emit(
                             &format!("terminal:{reader_id}:output"),
-                            OutputEvent { seq, data: chunk },
+                            OutputEvent {
+                                seq,
+                                data: chunk.clone(),
+                            },
                         );
+                        // Pure-mode detection: feed the raw chunk and surface
+                        // any newly-triggered signal to the frontend (red bull /
+                        // done chime) and — later — the auto-pilot controller.
+                        if let Some(pure) = &reader_pure
+                            && let Ok(mut sniffer) = pure.lock()
+                        {
+                            let signals = sniffer.feed(&chunk);
+                            // Refresh idle bookkeeping: every chunk pushes the
+                            // silence window out; an explicit marker disarms it
+                            // so the watchdog won't fire a redundant TurnEnded.
+                            if let Some(idle) = &reader_idle
+                                && let Ok(mut st) = idle.lock()
+                            {
+                                st.last_output = Instant::now();
+                                if signals.iter().any(|s| {
+                                    matches!(s, PureSignal::NeedsInput | PureSignal::TurnEnded)
+                                }) {
+                                    st.armed = false;
+                                }
+                            }
+                            for signal in signals {
+                                let _ = reader_app.emit(
+                                    &format!("session:{reader_session}:pure-signal"),
+                                    PureSignalEvent {
+                                        terminal_id: reader_id.clone(),
+                                        signal,
+                                    },
+                                );
+                                if let Some(sink) = &reader_sink {
+                                    let _ = sink.send(PureSignalNotice {
+                                        session_id: reader_session,
+                                        terminal_id: reader_id.clone(),
+                                        signal,
+                                    });
+                                }
+                            }
+                        }
                     }
                     Err(_) => break,
                 }
             }
+            reader_alive.store(false, Ordering::Relaxed);
             let _ = reader_app.emit(&format!("terminal:{reader_id}:exit"), "eof");
         });
+
+        // Idle watchdog (claude PTYs only) — declares a turn done when output
+        // goes quiet with no explicit marker. This is the backend home of the
+        // frontend's old throttled `setTimeout` idle-clear; running it here makes
+        // turn-end detection survive the window losing focus.
+        if let (Some(idle), Some(pure)) = (idle.clone(), pure.clone()) {
+            let wd_app = app.clone();
+            let wd_id = id.clone();
+            let wd_alive = alive.clone();
+            let wd_session = session_id;
+            std::thread::spawn(move || {
+                while wd_alive.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let fire = {
+                        let Ok(mut st) = idle.lock() else { break };
+                        if !st.armed
+                            || st.last_output.elapsed() < Duration::from_millis(IDLE_DONE_MS)
+                        {
+                            false
+                        } else {
+                            // Don't call a turn done while claude is still
+                            // thinking (live "…" spinner), while a prompt waits
+                            // for an answer, or if a marker already settled it.
+                            let block = pure
+                                .lock()
+                                .map(|s| s.is_working() || s.prompt_open() || s.turn_settled())
+                                .unwrap_or(true);
+                            if block {
+                                false
+                            } else {
+                                st.armed = false;
+                                true
+                            }
+                        }
+                    };
+                    if fire {
+                        let _ = wd_app.emit(
+                            &format!("session:{wd_session}:pure-signal"),
+                            PureSignalEvent {
+                                terminal_id: wd_id.clone(),
+                                signal: PureSignal::TurnEnded,
+                            },
+                        );
+                    }
+                }
+            });
+        }
 
         // Reaper — waits on the child so the process doesn't zombie.
         let reaper_child = child.clone();
@@ -549,11 +744,14 @@ impl PtySupervisor {
                 writer,
                 master,
                 _child: child,
+                pid,
                 session_id,
                 title: title.clone(),
                 cwd: cwd_owned.clone(),
                 kind,
                 replay,
+                pure,
+                idle,
             },
         );
 
@@ -624,6 +822,23 @@ impl PtySupervisor {
         let live = terminals
             .get(id)
             .ok_or_else(|| PtyError::UnknownTerminal(id.to_owned()))?;
+        // A carriage return submits the current turn (answers a prompt / sends a
+        // message). Clear the pure-signal latches so the next prompt or turn-end
+        // fires fresh, and arm the idle watchdog. Matches the frontend's
+        // `onPtyInput` reset on `\r`.
+        if data.contains('\r') {
+            if let Some(pure) = &live.pure
+                && let Ok(mut sniffer) = pure.lock()
+            {
+                sniffer.reset();
+            }
+            if let Some(idle) = &live.idle
+                && let Ok(mut st) = idle.lock()
+            {
+                st.armed = true;
+                st.last_output = Instant::now();
+            }
+        }
         let mut writer = live.writer.lock().expect("pty writer mutex poisoned");
         writer.write_all(data.as_bytes())?;
         writer.flush()?;
@@ -659,6 +874,13 @@ impl PtySupervisor {
             return Ok(());
         };
         std::thread::spawn(move || {
+            // Kill the whole descendant tree first — `Child::kill()` below only
+            // terminates the direct child (the shell), so a `cargo run` app it
+            // spawned would survive as an orphan. taskkill /T (Windows) /
+            // process-group kill (unix) takes the shell and everything under it.
+            if let Some(pid) = live.pid {
+                oxyris_procutil::kill_tree(pid);
+            }
             if let Ok(mut child) = live._child.lock() {
                 let _ = child.kill();
             }

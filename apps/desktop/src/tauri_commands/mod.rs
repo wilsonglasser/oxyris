@@ -6,6 +6,7 @@
 
 pub mod action;
 pub mod attachments;
+pub mod autopilot;
 pub mod badge;
 pub mod env;
 pub mod environment;

@@ -1,6 +1,6 @@
 [package]
 name = "oxyris-desktop"
-version = "0.3.2"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -44,6 +44,8 @@ oxyris-lsp.workspace = true
 oxyris-procutil.workspace = true
 oxyris-provider.workspace = true
 oxyris-claude.workspace = true
+oxyris-supervisor.workspace = true
+async-trait.workspace = true
 ignore.workspace = true
 regex.workspace = true
 notify.workspace = true
@@ -53,7 +55,7 @@ git2.workspace = true
 which.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 flate2.workspace = true
 futures-util.workspace = true
 zip.workspace = true

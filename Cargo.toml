@@ -13,6 +13,7 @@ members = [
     "crates/oxyris-procutil",
     "crates/oxyris-provider",
     "crates/oxyris-claude",
+    "crates/oxyris-supervisor",
 ]
 
 [workspace.package]
@@ -34,6 +35,9 @@ serde_json = "1.0"
 # Errors
 anyhow = "1.0"
 thiserror = "2.0"
+
+# Async traits (object-safe async methods for provider/supervisor traits)
+async-trait = "0.1"
 
 # Time / IDs
 uuid = { version = "1.18", features = ["v7", "serde"] }
@@ -79,6 +83,7 @@ oxyris-lsp = { path = "crates/oxyris-lsp" }
 oxyris-procutil = { path = "crates/oxyris-procutil" }
 oxyris-provider = { path = "crates/oxyris-provider" }
 oxyris-claude = { path = "crates/oxyris-claude" }
+oxyris-supervisor = { path = "crates/oxyris-supervisor" }
 
 [profile.dev]
 opt-level = 0

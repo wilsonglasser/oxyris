@@ -2817,9 +2817,10 @@ dependencies = [
 
 [[package]]
 name = "oxyris-desktop"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "encoding_rs",
@@ -2836,6 +2837,7 @@ dependencies = [
  "oxyris-lsp",
  "oxyris-procutil",
  "oxyris-provider",
+ "oxyris-supervisor",
  "portable-pty",
  "regex",
  "reqwest 0.12.28",
@@ -2959,6 +2961,19 @@ name = "oxyris-provider"
 version = "0.1.0"
 dependencies = [
  "oxyris-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "oxyris-supervisor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "oxyris-core",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
