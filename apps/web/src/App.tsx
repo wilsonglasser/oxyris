@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ActionSidebar } from "~/components/ActionSidebar.tsx";
 import { ChatPanel } from "~/components/ChatPanel.tsx";
@@ -62,7 +62,13 @@ export function App() {
   const [projectSettingsId, setProjectSettingsId] = useState<string | null>(
     null,
   );
-  const [terminalOpen, setTerminalOpen] = useState(false);
+  // Terminal dock visibility is per-session, not global: switching threads must
+  // reflect *that* thread's own dock state, not carry the previous one's open
+  // flag over (which also made the dock auto-spawn a fresh shell into the new
+  // session). Keyed by session id; absent = closed.
+  const [terminalOpenBySession, setTerminalOpenBySession] = useState<
+    Record<string, boolean>
+  >({});
   const [quickOpen, setQuickOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTab, setSearchTab] = useState<SearchTab>("symbols");
@@ -72,6 +78,27 @@ export function App() {
     activeSessionId ? s.snapshots[activeSessionId] : null,
   );
   const setActiveSession = useSessionStore((s) => s.setActive);
+  const terminalOpen = activeSessionId
+    ? !!terminalOpenBySession[activeSessionId]
+    : false;
+  const toggleTerminal = useCallback(() => {
+    setTerminalOpenBySession((prev) => {
+      if (!activeSessionId) return prev;
+      return { ...prev, [activeSessionId]: !prev[activeSessionId] };
+    });
+  }, [activeSessionId]);
+  const closeTerminal = useCallback(() => {
+    setTerminalOpenBySession((prev) => {
+      if (!activeSessionId) return prev;
+      return { ...prev, [activeSessionId]: false };
+    });
+  }, [activeSessionId]);
+  const openTerminal = useCallback(() => {
+    setTerminalOpenBySession((prev) => {
+      if (!activeSessionId) return prev;
+      return { ...prev, [activeSessionId]: true };
+    });
+  }, [activeSessionId]);
   const pureMode = useAppSettingsStore((s) => s.pureMode);
   const multiSidebarHidden = useMultiViewStore((s) => s.sidebarHidden);
   const terminalResize = useDragResize({
@@ -255,7 +282,7 @@ export function App() {
       if (matchesKey(e, bindings.toggle_terminal)) {
         if (!activeSessionId) return;
         e.preventDefault();
-        setTerminalOpen((v) => !v);
+        toggleTerminal();
         return;
       }
       if (matchesKey(e, bindings.focus_search) && !isTypingTarget(e.target)) {
@@ -281,7 +308,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [bindings, activeSessionId, activeId, setActiveSession, tab]);
+  }, [bindings, activeSessionId, activeId, setActiveSession, tab, toggleTerminal]);
 
   const quickWorktreeId =
     sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
@@ -318,6 +345,11 @@ export function App() {
           thinking: "auto",
           runtime: "supervised",
           env_mode: "default",
+          // Persist the kind that matches the current display toggle. Pure mode
+          // renders the claude PTY, so the session must be stored as `pure` —
+          // otherwise Multi View (which reads `session.kind`) embeds the
+          // structured ChatPanel for a session that has no event-sourced turns.
+          kind: pureMode ? "pure" : "structured",
           system_prompt: claudeLanguageDirective(
             useAppSettingsStore.getState().claudeLanguage,
           ),
@@ -381,11 +413,7 @@ export function App() {
                   <PureClaudePanel
                     key={activeSessionId ?? "new"}
                     project={active}
-                    onToggleTerminal={
-                      activeSessionId
-                        ? () => setTerminalOpen((v) => !v)
-                        : undefined
-                    }
+                    onToggleTerminal={activeSessionId ? toggleTerminal : undefined}
                     terminalOpen={terminalOpen}
                   />
                 ) : (
@@ -399,11 +427,7 @@ export function App() {
                     // fired while the user was on a different conversation.
                     key={activeSessionId ?? "new"}
                     project={active}
-                    onToggleTerminal={
-                      activeSessionId
-                        ? () => setTerminalOpen((v) => !v)
-                        : undefined
-                    }
+                    onToggleTerminal={activeSessionId ? toggleTerminal : undefined}
                     terminalOpen={terminalOpen}
                   />
                 )}
@@ -422,8 +446,9 @@ export function App() {
                     <div className="h-full w-full bg-transparent transition group-hover:bg-emerald-700/50" />
                   </div>
                   <TerminalPanel
+                    key={activeSessionId}
                     sessionId={activeSessionId}
-                    onClose={() => setTerminalOpen(false)}
+                    onClose={closeTerminal}
                   />
                 </div>
               )}
@@ -483,7 +508,7 @@ export function App() {
             projectId={activeId}
             worktreeId={sessionSnapshot?.worktree_id ?? null}
             sessionId={activeSessionId}
-            onOpenTerminal={() => setTerminalOpen(true)}
+            onOpenTerminal={openTerminal}
           />
         )}
       </div>

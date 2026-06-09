@@ -692,12 +692,24 @@ impl PtySupervisor {
                         {
                             false
                         } else {
-                            // Don't call a turn done while claude is still
-                            // thinking (live "…" spinner), while a prompt waits
-                            // for an answer, or if a marker already settled it.
+                            // Don't call a turn done while a prompt waits for an
+                            // answer, or if a marker already settled it.
+                            //
+                            // NB: we deliberately do NOT gate on `is_working()`
+                            // here. The live "…" spinner ticks its elapsed
+                            // counter ~once a second, so it emits PTY output that
+                            // refreshes `last_output` — meaning a genuinely-live
+                            // spinner can never let us reach this fire-check (it'd
+                            // reset the 2500ms silence window first). The only
+                            // spinner `is_working()` can see at this point is a
+                            // STALE one: `working_active` latches off the
+                            // append-only rolling tail, which retains old spinner
+                            // frames after claude redraws over them, so it stays
+                            // `true` forever. Gating on it froze the watchdog and
+                            // left marker-less turns stuck "busy" (blue dot).
                             let block = pure
                                 .lock()
-                                .map(|s| s.is_working() || s.prompt_open() || s.turn_settled())
+                                .map(|s| s.prompt_open() || s.turn_settled())
                                 .unwrap_or(true);
                             if block {
                                 false

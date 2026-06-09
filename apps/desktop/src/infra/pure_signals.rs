@@ -212,13 +212,6 @@ impl PureSniffer {
         out
     }
 
-    /// True while the live "…" working spinner was the last thing seen — the
-    /// idle watchdog must not declare a turn done while claude is still thinking
-    /// (extended thinking can stall output past the idle window).
-    pub fn is_working(&self) -> bool {
-        self.working_active
-    }
-
     /// True while a permission/question menu is on screen. The idle watchdog
     /// must not treat a waiting prompt as a finished turn.
     pub fn prompt_open(&self) -> bool {

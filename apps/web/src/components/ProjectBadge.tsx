@@ -44,6 +44,11 @@ export function ProjectBadge({ name, size = 20, projectId, logoPath }: Props) {
       <img
         src={src}
         alt={name}
+        // Images are natively draggable; without this the browser starts an
+        // image drag when the user grabs a project by its logo, preempting the
+        // row's HTML5 drag-to-reorder (sidebar reorder silently breaks for any
+        // project that has a logo).
+        draggable={false}
         className="shrink-0 rounded-[4px] object-cover"
         style={{ width: size, height: size }}
       />

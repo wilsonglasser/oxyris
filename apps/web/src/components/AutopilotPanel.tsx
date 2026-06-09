@@ -13,6 +13,11 @@ interface Props {
   onClose: () => void;
 }
 
+// Stable reference for the empty-log case. Returning a fresh `[]` from the
+// zustand selector makes useSyncExternalStore see a new snapshot every render →
+// infinite re-render loop ("Maximum update depth exceeded").
+const EMPTY_LOG: AutopilotEvent[] = [];
+
 /**
  * Floating mission panel for the auto-pilot. Anchored under the header's
  * auto-pilot button. The user pastes a mission (spec / changelog) the Supervisor
@@ -25,7 +30,7 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
   const mission = useAutopilotStore((s) => s.mission[sessionId] ?? "");
   const enabled = useAutopilotStore((s) => s.enabled[sessionId] ?? false);
   const config = useAutopilotStore((s) => s.config[sessionId]);
-  const log = useAutopilotStore((s) => s.log[sessionId] ?? []);
+  const log = useAutopilotStore((s) => s.log[sessionId] ?? EMPTY_LOG);
   const setMission = useAutopilotStore((s) => s.setMission);
   const setEnabled = useAutopilotStore((s) => s.setEnabled);
   const setConfig = useAutopilotStore((s) => s.setConfig);
