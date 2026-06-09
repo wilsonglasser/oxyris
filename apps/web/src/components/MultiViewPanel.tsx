@@ -21,6 +21,7 @@ import {
 } from "~/ipc/session.ts";
 import { terminalWrite } from "~/ipc/terminal.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
+import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import {
   type MvCols,
   gridColsClass,
@@ -51,6 +52,11 @@ type SessionsByProject = Record<string, SessionSummary[]>;
 export function MultiViewPanel() {
   const { t } = useTranslation("chat");
   const projects = useProjectStore((s) => s.projects);
+  // Global "Claude Code puro" toggle. App.tsx renders the pure PTY purely off
+  // this flag (ignoring stored kind), so Multi must mirror it — otherwise a
+  // session created before kind was persisted (stored "structured" but shown
+  // pure everywhere else) embeds the empty ChatPanel here.
+  const pureMode = useAppSettingsStore((s) => s.pureMode);
 
   const panes = useMultiViewStore((s) => s.panes);
   const cols = useMultiViewStore((s) => s.cols);
@@ -285,6 +291,7 @@ export function MultiViewPanel() {
           <PaneCard
             key={pane.paneId}
             sessionId={pane.sessionId}
+            pureMode={pureMode}
             projects={projects}
             sessionsByProject={sessionsByProject}
             paneProject={
@@ -362,6 +369,7 @@ export function MultiViewPanel() {
 
 function PaneCard({
   sessionId,
+  pureMode,
   projects,
   sessionsByProject,
   paneProject,
@@ -379,6 +387,7 @@ function PaneCard({
   onDropPane,
 }: {
   sessionId: string | null;
+  pureMode: boolean;
   projects: ProjectRow[];
   sessionsByProject: SessionsByProject;
   paneProject: ProjectRow | null;
@@ -413,16 +422,18 @@ function PaneCard({
     void sessionGet({ session_id: sessionId })
       .then((snap) => {
         if (cancelled || !snap) return;
-        setKind(snap.kind);
-        onInfo({ sessionId, kind: snap.kind, ptyId: null });
+        // The global pure toggle overrides a stale stored kind (see parent).
+        const effective = pureMode ? "pure" : snap.kind;
+        setKind(effective);
+        onInfo({ sessionId, kind: effective, ptyId: null });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-    // onInfo is stable (useCallback in parent); sessionId drives this.
+    // onInfo is stable (useCallback in parent); sessionId + pureMode drive this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [sessionId, pureMode]);
 
   return (
     // Capture-phase mousedown so focusing the pane works even when the click
