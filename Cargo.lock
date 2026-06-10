@@ -2777,6 +2777,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "ignore",
+ "notify",
  "oxyris-git",
  "oxyris-ipc",
  "regex",
@@ -2817,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "oxyris-desktop"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
