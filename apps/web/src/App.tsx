@@ -267,13 +267,15 @@ export function App() {
         setSearchOpen(true);
         return;
       }
-      // Ctrl+Shift+F → Find in Files (full-text search + preview).
+      // Ctrl+Shift+F → Find in Files (full-text search + preview). Scoped to
+      // the Files tab so it doesn't fire while typing in a chat.
       if (
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
         !e.altKey &&
         e.key.toLowerCase() === "f" &&
-        activeId
+        activeId &&
+        tab === "files"
       ) {
         e.preventDefault();
         setFindOpen(true);

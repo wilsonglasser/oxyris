@@ -19,7 +19,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-use crate::infra::pure_signals::{PureSignal, PureSniffer, strip_ansi};
+use crate::infra::pure_signals::{PureSignal, PureSniffer, has_content, strip_ansi};
 
 /// In-process notification of a pure-signal, pushed from the PTY reader to the
 /// auto-pilot controller (in addition to the `session:<id>:pure-signal` Tauri
@@ -635,13 +635,19 @@ impl PtySupervisor {
                             && let Ok(mut sniffer) = pure.lock()
                         {
                             let signals = sniffer.feed(&chunk);
-                            // Refresh idle bookkeeping: every chunk pushes the
-                            // silence window out; an explicit marker disarms it
-                            // so the watchdog won't fire a redundant TurnEnded.
+                            // Refresh idle bookkeeping: a content-bearing chunk
+                            // pushes the silence window out; an explicit marker
+                            // disarms it so the watchdog won't fire a redundant
+                            // TurnEnded. A chrome-only redraw (animated "Tip:"
+                            // hint, cursor blink) must NOT refresh the window, or
+                            // a finished-but-still-animating turn never goes idle
+                            // and stays stuck "busy" (blue dot).
                             if let Some(idle) = &reader_idle
                                 && let Ok(mut st) = idle.lock()
                             {
-                                st.last_output = Instant::now();
+                                if has_content(&chunk) {
+                                    st.last_output = Instant::now();
+                                }
                                 if signals.iter().any(|s| {
                                     matches!(s, PureSignal::NeedsInput | PureSignal::TurnEnded)
                                 }) {
@@ -693,23 +699,21 @@ impl PtySupervisor {
                             false
                         } else {
                             // Don't call a turn done while a prompt waits for an
-                            // answer, or if a marker already settled it.
+                            // answer, a marker already settled it, or the current
+                            // TUI frame still shows a live working spinner.
                             //
-                            // NB: we deliberately do NOT gate on `is_working()`
-                            // here. The live "…" spinner ticks its elapsed
-                            // counter ~once a second, so it emits PTY output that
-                            // refreshes `last_output` — meaning a genuinely-live
-                            // spinner can never let us reach this fire-check (it'd
-                            // reset the 2500ms silence window first). The only
-                            // spinner `is_working()` can see at this point is a
-                            // STALE one: `working_active` latches off the
-                            // append-only rolling tail, which retains old spinner
-                            // frames after claude redraws over them, so it stays
-                            // `true` forever. Gating on it froze the watchdog and
-                            // left marker-less turns stuck "busy" (blue dot).
+                            // `is_working_now()` (not the old `working_active`
+                            // latch) checks only the last painted line, so a
+                            // STALE spinner frame retained earlier in the
+                            // append-only tail can't freeze the watchdog. Pairing
+                            // it with the content-aware `last_output` refresh
+                            // (chrome redraws no longer reset the silence window)
+                            // closes both holes: a quiet-but-live think can't be
+                            // declared idle, and a finished-but-animating turn
+                            // does go idle instead of sticking "busy" (blue dot).
                             let block = pure
                                 .lock()
-                                .map(|s| s.prompt_open() || s.turn_settled())
+                                .map(|s| s.prompt_open() || s.turn_settled() || s.is_working_now())
                                 .unwrap_or(true);
                             if block {
                                 false

@@ -4,6 +4,7 @@
 //! and must outlive individual IPC calls. Tauri hands this out via
 //! [`tauri::State`] so handlers can reach the durable layer.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -64,6 +65,12 @@ pub struct AppState {
     /// App data root — surfaced so the Settings UI can derive paths like
     /// `keybindings.json` consistently.
     pub data_dir: PathBuf,
+    /// Live modal-action runs keyed by `run_id` → OS pid of the spawned shell.
+    /// `action_run` registers on spawn and clears on exit; `action_kill` reads
+    /// it to tree-kill a still-running command (e.g. a `watch`) when the user
+    /// closes its modal tab — otherwise the detached reader task keeps the
+    /// process alive forever.
+    pub action_procs: Arc<StdMutex<HashMap<String, u32>>>,
 }
 
 #[derive(Debug, Error)]
@@ -223,6 +230,7 @@ impl AppState {
             log_guard,
             logs_dir,
             data_dir,
+            action_procs: Arc::new(StdMutex::new(HashMap::new())),
         })
     }
 }

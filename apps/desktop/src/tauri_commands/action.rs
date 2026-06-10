@@ -255,12 +255,40 @@ pub async fn action_run(
     }
 
     let run_id = format!("run-{}", uuid::Uuid::now_v7());
-    spawn_streaming(app, project.environment, cwd, command, run_id.clone());
+    spawn_streaming(
+        app,
+        project.environment,
+        cwd,
+        command,
+        run_id.clone(),
+        state.action_procs.clone(),
+    );
 
     Ok(ActionRunOutput { run_id })
 }
 
-fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: String, run_id: String) {
+/// Tree-kill a still-running modal action by its `run_id`. Best-effort: an
+/// already-finished run is simply absent from the registry and returns `Ok`.
+#[tauri::command]
+pub fn action_kill(run_id: String, state: State<'_, AppState>) {
+    let pid = state
+        .action_procs
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&run_id));
+    if let Some(pid) = pid {
+        oxyris_procutil::kill_tree(pid);
+    }
+}
+
+fn spawn_streaming(
+    app: AppHandle,
+    env: Environment,
+    cwd: String,
+    command: String,
+    run_id: String,
+    procs: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u32>>>,
+) {
     use oxyris_procutil::HideConsole;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
@@ -323,6 +351,14 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
                 return;
             }
         };
+        // Register the shell's pid so `action_kill` can tree-kill it. The shell
+        // (cmd.exe / wsl.exe) is the direct child; `kill_tree` walks down to the
+        // real command and any grandchildren a `watch` spawns.
+        if let Some(pid) = child.id()
+            && let Ok(mut m) = procs.lock()
+        {
+            m.insert(run_id.clone(), pid);
+        }
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -410,6 +446,11 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
         // All `tx` clones now dropped → flusher drains and exits. Awaiting it
         // guarantees every output batch is emitted before the exit event.
         let _ = flusher.await;
+        // Process is gone — drop its registry entry so a later `action_kill`
+        // for a recycled run_id can't target an unrelated pid.
+        if let Ok(mut m) = procs.lock() {
+            m.remove(&run_id);
+        }
         let line = match exit {
             Ok(status) => ActionStreamLine::Exit {
                 code: status.code().unwrap_or(-1),

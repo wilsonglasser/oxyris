@@ -1,11 +1,12 @@
 import { create } from "zustand";
 import {
+  actionKill,
   actionRun,
   listenActionOutput,
   type ActionKind,
   type ActionStreamLine,
 } from "~/ipc/actions.ts";
-import { terminalSpawn, terminalWrite } from "~/ipc/terminal.ts";
+import { useTerminalDockStore } from "~/stores/terminalDockStore.ts";
 
 /**
  * In-memory store of every action run that's been started this session.
@@ -74,12 +75,10 @@ export const useActionRunsStore = create<State>((set, get) => ({
           "An active session is required to run an interactive terminal action.",
         );
       }
-      const term = await terminalSpawn({
-        session_id: sessionId,
-        cols: 80,
-        rows: 24,
-      });
-      await terminalWrite({ id: term.id, data: `${action.command}\r` });
+      // Hand off to the dock — it owns the PTY tabs, so it must be the one to
+      // spawn (otherwise the new tab is invisible until an unrelated refresh).
+      // Open the dock first so it mounts and drains this request.
+      useTerminalDockStore.getState().enqueue(sessionId, action.command);
       onOpenTerminal();
       return;
     }
@@ -155,6 +154,9 @@ export const useActionRunsStore = create<State>((set, get) => ({
       const list = (s.runs[actionId] ?? []).filter((r) => {
         if (r.runId === runId) {
           r.unlisten?.();
+          // Tree-kill the OS process so a closed `watch` actually stops
+          // instead of running on headless. No-op once it has exited.
+          if (r.status.kind === "running") void actionKill(runId);
           return false;
         }
         return true;

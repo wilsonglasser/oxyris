@@ -128,6 +128,19 @@ fn strip_tip_lines(s: &str) -> String {
     tip_re().replace_all(s, "").into_owned()
 }
 
+/// True if `data`, once chrome is stripped (ANSI escapes + the animated tip
+/// hint), still carries visible text. The idle watchdog uses this so a pure
+/// chrome redraw — the rotating "Tip:" hint, a cursor blink, a bare repaint —
+/// does NOT push the silence window out and keep a finished turn stuck "busy".
+/// A live working spinner ("✻ Drizzling…") DOES count as content, so it keeps
+/// the turn alive while it's on screen.
+pub fn has_content(data: &str) -> bool {
+    let stripped = strip_tip_lines(&strip_ansi(data));
+    stripped
+        .chars()
+        .any(|c| !c.is_whitespace() && !c.is_control())
+}
+
 /// A signal the sniffer emits when a marker first appears in the PTY stream.
 /// Latched per turn so a redraw doesn't re-fire — cleared by [`PureSniffer::reset`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -222,6 +235,22 @@ impl PureSniffer {
     /// recap), so the idle watchdog can skip a redundant `TurnEnded`.
     pub fn turn_settled(&self) -> bool {
         self.poll_open || self.turn_end_seen || self.recap_seen
+    }
+
+    /// True if the **current** TUI frame shows a live working spinner. Unlike
+    /// the `working_active` latch (which matches the whole append-only tail and
+    /// so stays `true` forever once a spinner has ever appeared), this checks
+    /// only the last non-empty line — the most recently painted row. When claude
+    /// redraws over the spinner with its turn-end output, the last line is no
+    /// longer a spinner and this goes `false`. The idle watchdog gates on it so a
+    /// genuinely-live-but-quiet spinner can't be declared idle.
+    pub fn is_working_now(&self) -> bool {
+        self.tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| working_re().is_match(l))
+            .unwrap_or(false)
     }
 
     /// Clear all per-turn latches and the rolling tail. Call when the user (or
@@ -341,6 +370,44 @@ mod tests {
         // No leading glyph — must not match the turn-end marker.
         let sigs = s.feed("I worked for 3 minutes on this");
         assert!(!sigs.contains(&PureSignal::TurnEnded));
+    }
+
+    #[test]
+    fn has_content_ignores_chrome_only_chunks() {
+        // Animated tip hint — chrome, must not count as content.
+        assert!(!has_content(
+            "├ Tip: Use /btw to ask a quick side question …\n"
+        ));
+        // ANSI-only redraw (cursor moves + clear), no visible text.
+        assert!(!has_content("\x1b[2K\x1b[1;1H\x1b[0m"));
+        // Whitespace / control bytes only.
+        assert!(!has_content("\r\n  \r"));
+    }
+
+    #[test]
+    fn has_content_keeps_live_spinner_and_prose() {
+        // The working spinner is real output — it should keep a turn alive.
+        assert!(has_content("✻ Drizzling… (36s · ↓ 1.8k tokens)"));
+        // Ordinary assistant text.
+        assert!(has_content("\x1b[32mdeu certo, foi NETWORK SERVICE\x1b[0m"));
+    }
+
+    #[test]
+    fn is_working_now_true_while_spinner_is_last_line() {
+        let mut s = PureSniffer::new();
+        s.feed("some streamed thinking text\n✻ Drizzling… (36s)");
+        assert!(s.is_working_now());
+    }
+
+    #[test]
+    fn is_working_now_false_after_spinner_redrawn_to_turn_end() {
+        let mut s = PureSniffer::new();
+        // Stale spinner frame retained earlier in the append-only tail …
+        s.feed("✻ Cogitating… (1m)\n");
+        // … then claude paints the turn-end summary + recap below it.
+        s.feed("✶ Cogitated for 1m 15s\n✶ recap: fixed the upload perms\n› ");
+        // Last painted line is the prompt, not a spinner → not working.
+        assert!(!s.is_working_now());
     }
 
     #[test]

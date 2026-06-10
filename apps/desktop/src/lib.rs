@@ -136,6 +136,7 @@ pub fn run() {
             tauri_commands::action::action_upsert,
             tauri_commands::action::action_delete,
             tauri_commands::action::action_run,
+            tauri_commands::action::action_kill,
             tauri_commands::env::env_template_for_worktree,
             tauri_commands::env::env_status_for_worktree,
             tauri_commands::env::env_up_for_worktree,

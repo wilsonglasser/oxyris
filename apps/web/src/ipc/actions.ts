@@ -55,6 +55,11 @@ export async function actionRun(input: {
   return invoke("action_run", { input });
 }
 
+/** Tree-kill a still-running modal action by its run id. Best-effort. */
+export async function actionKill(runId: string): Promise<void> {
+  await invoke("action_kill", { runId });
+}
+
 export type ActionStreamChunk = { stream: "stdout" | "stderr"; text: string };
 
 export type ActionStreamLine =

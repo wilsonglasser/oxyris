@@ -1,6 +1,6 @@
 import { actionList } from "~/ipc/actions.ts";
 import { envDotenvRenderForWorktree } from "~/ipc/env.ts";
-import { terminalSpawn, terminalWrite } from "~/ipc/terminal.ts";
+import { useTerminalDockStore } from "~/stores/terminalDockStore.ts";
 
 /**
  * Things to do right after a new worktree is created:
@@ -35,16 +35,9 @@ export async function runAutoActionsOnWorktreeCreate(input: {
   const autoRun = actions.filter((a) => a.auto_run_on_worktree_create);
   if (autoRun.length === 0) return;
   input.onBeforeRun?.();
+  // Queue each command for the dock to spawn — it owns the PTY tabs. Requests
+  // wait in the queue until a dock for this session mounts, then drain in order.
   for (const action of autoRun) {
-    try {
-      const term = await terminalSpawn({
-        session_id: input.sessionId,
-        cols: 80,
-        rows: 24,
-      });
-      await terminalWrite({ id: term.id, data: `${action.command}\r` });
-    } catch {
-      /* continue — one failing action shouldn't block the rest */
-    }
+    useTerminalDockStore.getState().enqueue(input.sessionId, action.command);
   }
 }

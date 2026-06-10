@@ -22,6 +22,7 @@ import {
   TERM_FONT_DEFAULT,
   useAppSettingsStore,
 } from "~/stores/appSettingsStore.ts";
+import { useTerminalDockStore } from "~/stores/terminalDockStore.ts";
 
 interface DockProps {
   sessionId: string;
@@ -38,11 +39,33 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
   const [tabs, setTabs] = useState<TerminalInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Session id this dock has finished loading existing terminals for. Gates the
-  // auto-spawn below so it can't fire against the initial empty `tabs` before
-  // `refresh` returns surviving shells (which would spawn a fresh terminal on
-  // every reopen, since this component unmounts when the dock is hidden).
-  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+
+  // Set once we've made the first-load auto-spawn decision for a session.
+  // Crucially armed inside `refresh` (not only when *this* panel auto-spawns)
+  // so that if tabs already exist — surviving shells, or ones spawned out of
+  // band by an action — closing every tab later does NOT trigger a respawn.
+  const autoSpawnedRef = useRef<string | null>(null);
+
+  const spawnNew = useCallback(
+    async (command?: string) => {
+      try {
+        const info = await terminalSpawn({
+          session_id: sessionId,
+          cols: 80,
+          rows: 24,
+        });
+        setTabs((prev) => [...prev, info]);
+        setActiveId(info.id);
+        setError(null);
+        if (command) {
+          await terminalWrite({ id: info.id, data: `${command}\r` });
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [sessionId],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -57,49 +80,43 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
         if (cur && rows.some((r) => r.id === cur)) return cur;
         return rows[0]?.id ?? null;
       });
-      setLoadedFor(sessionId);
+      // First load for this session decides whether to seed a starter shell.
+      // Made exactly once (the ref then stays armed), so closing every tab
+      // afterwards won't respawn. Skipped when a command request is already
+      // queued — that request will create the tab, so an empty one would be a
+      // spurious extra.
+      if (autoSpawnedRef.current !== sessionId) {
+        autoSpawnedRef.current = sessionId;
+        const hasPending = useTerminalDockStore
+          .getState()
+          .requests.some((r) => r.sessionId === sessionId);
+        if (rows.length === 0 && !hasPending) {
+          void spawnNew();
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [sessionId]);
+  }, [sessionId, spawnNew]);
 
   // Whenever the session changes, refresh from the backend's source of truth.
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  const spawnNew = useCallback(async () => {
-    try {
-      const info = await terminalSpawn({
-        session_id: sessionId,
-        cols: 80,
-        rows: 24,
-      });
-      setTabs((prev) => [...prev, info]);
-      setActiveId(info.id);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [sessionId]);
-
-  // Auto-spawn a terminal only the *first* time a session's dock opens with no
-  // existing shells. Gated on `loadedFor === sessionId` so it waits for
-  // `refresh` to confirm there are genuinely none (vs. the pre-load empty
-  // state) — otherwise reopening the dock spawns a duplicate every time. Once
-  // spawned (or once the user has terminals), `autoSpawnedRef` keeps it from
-  // respawning even if they close every tab — they use the `+` button after.
-  const autoSpawnedRef = useRef<string | null>(null);
+  // Drain queued command requests (PTY actions / auto-run) into real tabs that
+  // this dock owns, so they show up immediately instead of only after an
+  // unrelated refresh. Arming `autoSpawnedRef` here too keeps the starter-shell
+  // logic from also adding an empty tab.
+  const dockRequests = useTerminalDockStore((s) => s.requests);
+  const takeRequests = useTerminalDockStore((s) => s.take);
   useEffect(() => {
-    if (
-      loadedFor === sessionId &&
-      tabs.length === 0 &&
-      autoSpawnedRef.current !== sessionId
-    ) {
-      autoSpawnedRef.current = sessionId;
-      void spawnNew();
+    if (!dockRequests.some((r) => r.sessionId === sessionId)) return;
+    autoSpawnedRef.current = sessionId;
+    for (const req of takeRequests(sessionId)) {
+      void spawnNew(req.command);
     }
-  }, [loadedFor, tabs.length, sessionId, spawnNew]);
+  }, [dockRequests, sessionId, takeRequests, spawnNew]);
 
   const closeTab = (id: string) => {
     setTabs((prev) => {
