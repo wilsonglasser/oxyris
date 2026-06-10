@@ -12,6 +12,7 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   projectAutodetectLogo,
+  projectDelete,
   projectRename,
   projectSetLogo,
   projectSetWorkspace,
@@ -37,7 +38,7 @@ interface Props {
  * of the sidebar. Future home for project rename, default model, runtime
  * mode, etc.
  */
-export function ProjectSettingsModal({ projectId, onClose: _onClose }: Props) {
+export function ProjectSettingsModal({ projectId, onClose }: Props) {
   const { t } = useTranslation("common");
   const project = useProjectStore((s) =>
     s.projects.find((p) => p.id === projectId),
@@ -200,8 +201,73 @@ export function ProjectSettingsModal({ projectId, onClose: _onClose }: Props) {
             </p>
           )}
         </section>
+
+        <DangerSection projectId={projectId} onDeleted={onClose} />
       </div>
     </div>
+  );
+}
+
+function DangerSection({
+  projectId,
+  onDeleted,
+}: {
+  projectId: string;
+  onDeleted?: (() => void) | undefined;
+}) {
+  const { t } = useTranslation("common");
+  const project = useProjectStore((s) =>
+    s.projects.find((p) => p.id === projectId),
+  );
+  const refreshProjects = useProjectStore((s) => s.refresh);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!project) return null;
+
+  const onDelete = async () => {
+    if (busy) return;
+    if (
+      !window.confirm(
+        t("project_settings_modal.delete_confirm", { name: project.name }),
+      )
+    )
+      return;
+    setBusy(true);
+    setError(null);
+    try {
+      await projectDelete({ id: projectId });
+      await refreshProjects();
+      onDeleted?.();
+    } catch (e) {
+      setError(formatErr(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="mt-6 border-t border-neutral-800 pt-5">
+      <h3 className="mb-1.5 text-[12px] font-medium uppercase tracking-wider text-red-400">
+        {t("project_settings_modal.danger_heading")}
+      </h3>
+      <p className="mb-3 text-[11px] text-neutral-500">
+        {t("project_settings_modal.delete_help")}
+      </p>
+      <button
+        type="button"
+        onClick={() => void onDelete()}
+        disabled={busy}
+        className="inline-flex items-center gap-1.5 rounded-md border border-red-900/50 bg-red-950/20 px-3 py-1.5 text-sm font-medium text-red-300 transition enabled:hover:bg-red-900/30 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <Trash2 className="size-3.5" strokeWidth={2} />
+        {t("project_settings_modal.delete_label")}
+      </button>
+      {error && (
+        <p className="mt-2 rounded border border-red-900/40 bg-red-950/20 px-2.5 py-1.5 text-[11px] text-red-200">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 

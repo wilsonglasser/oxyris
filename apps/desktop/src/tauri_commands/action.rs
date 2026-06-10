@@ -294,7 +294,15 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
                     cwd.as_str(),
                     "--",
                     "bash",
-                    "-lc",
+                    // `-i` (interactive) so ~/.bashrc runs in full — version
+                    // managers (nvm/fnm/asdf) place their PATH init *after* the
+                    // `case $- in *i*) ;; *) return;; esac` non-interactive guard,
+                    // so a plain `-lc` login shell returns early and misses them,
+                    // falling back to system node. `-l` keeps login-profile PATH.
+                    // The `bash: cannot set terminal process group` / `no job
+                    // control` warnings this emits on a tty-less pipe are filtered
+                    // out in the stderr reader below.
+                    "-lic",
                     &command,
                 ])
                 .stdout(std::process::Stdio::piped())
@@ -340,6 +348,14 @@ fn spawn_streaming(app: AppHandle, env: Environment, cwd: String, command: Strin
             tokio::spawn(async move {
                 let mut lines = BufReader::new(s).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    // `bash -i` with no controlling tty emits these two job-control
+                    // warnings to stderr on startup. They are noise, not command
+                    // output — drop them so action logs stay clean.
+                    if line.contains("cannot set terminal process group")
+                        || line.contains("no job control in this shell")
+                    {
+                        continue;
+                    }
                     let _ = tx.send(ActionStreamChunk {
                         stream: ActionStream::Stderr,
                         text: line,

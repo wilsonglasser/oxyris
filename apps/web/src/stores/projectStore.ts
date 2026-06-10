@@ -24,9 +24,20 @@ interface ProjectStoreState {
    * matches ungrouped projects). Persisted across reloads.
    */
   workspaceFilter: string;
+  /**
+   * Which project groups are expanded in the sidebar. Lives here (not in the
+   * Sidebar component) so it survives the Sidebar unmount/remount that happens
+   * on every tab switch — expansion is a property of the workspace, not of the
+   * currently visible tab.
+   */
+  expanded: Record<string, boolean>;
   refresh: () => Promise<void>;
   setActive: (id: string | null) => void;
   setWorkspaceFilter: (workspace: string) => void;
+  /** Flip the expanded state of one project group. */
+  toggleExpanded: (id: string) => void;
+  /** Force a project group open or closed. */
+  setExpanded: (id: string, value: boolean) => void;
   /** Lookup the full row by id; `null` if not found. */
   active: () => ProjectRow | null;
 }
@@ -37,6 +48,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   loading: false,
   error: null,
   workspaceFilter: loadWorkspaceFilter(),
+  expanded: {},
 
   refresh: async () => {
     set({ loading: true, error: null });
@@ -71,6 +83,16 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     }
     set({ workspaceFilter: workspace });
   },
+
+  toggleExpanded: (id) =>
+    set((s) => ({ expanded: { ...s.expanded, [id]: !s.expanded[id] } })),
+
+  setExpanded: (id, value) =>
+    set((s) =>
+      s.expanded[id] === value
+        ? s
+        : { expanded: { ...s.expanded, [id]: value } },
+    ),
 
   active: () => {
     const { projects, activeId } = get();

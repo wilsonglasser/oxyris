@@ -397,21 +397,37 @@ fn shell_escape(s: &str) -> String {
     out
 }
 
+/// True when `s` (slashes already normalized to `/`) names a `X:/...` Windows
+/// drive path. Checked explicitly because `Path::is_absolute` returns false for
+/// such paths on non-Windows hosts (e.g. Linux CI).
+fn has_windows_drive_prefix(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && chars.next() == Some('/')
+}
+
 fn path_to_uri(path: &Path) -> Result<Uri> {
-    let absolute = if path.is_absolute() {
-        path.to_owned()
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let absolute = if normalized.starts_with('/') || has_windows_drive_prefix(&normalized) {
+        normalized
     } else {
-        std::env::current_dir()?.join(path)
+        let mut base = std::env::current_dir()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        format!("{base}{normalized}")
     };
-    let s = absolute.to_string_lossy().replace('\\', "/");
-    let prefixed = if s.starts_with('/') {
-        format!("file://{s}")
+    let prefixed = if absolute.starts_with('/') {
+        format!("file://{absolute}")
     } else {
-        format!("file:///{s}")
+        format!("file:///{absolute}")
     };
     prefixed
         .parse::<Uri>()
-        .map_err(|e| LspError::InvalidPath(format!("{}: {e}", absolute.display())))
+        .map_err(|e| LspError::InvalidPath(format!("{absolute}: {e}")))
 }
 
 fn flatten_hover(contents: HoverContents) -> Option<String> {

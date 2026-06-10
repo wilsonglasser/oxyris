@@ -69,6 +69,9 @@ export function Sidebar({
   const setActiveProject = useProjectStore((s) => s.setActive);
   const workspaceFilter = useProjectStore((s) => s.workspaceFilter);
   const setWorkspaceFilter = useProjectStore((s) => s.setWorkspaceFilter);
+  const expanded = useProjectStore((s) => s.expanded);
+  const toggleExpanded = useProjectStore((s) => s.toggleExpanded);
+  const setExpanded = useProjectStore((s) => s.setExpanded);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const setActiveSession = useSessionStore((s) => s.setActive);
   const markAttention = useSessionStore((s) => s.markAttention);
@@ -76,7 +79,6 @@ export function Sidebar({
   const setBusy = useBusyStore((s) => s.setBusy);
 
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [sessionsByProject, setSessionsByProject] = useState<SessionsByProject>(
     {},
   );
@@ -322,11 +324,9 @@ export function Sidebar({
   // stays collapsed on open; the user expands the one they want.
   useEffect(() => {
     if (activeProjectId && projects.length === 1) {
-      setExpanded((prev) =>
-        prev[activeProjectId] ? prev : { ...prev, [activeProjectId]: true },
-      );
+      setExpanded(activeProjectId, true);
     }
-  }, [activeProjectId, projects.length]);
+  }, [activeProjectId, projects.length, setExpanded]);
 
   const q = query.trim().toLowerCase();
   const searching = q.length > 0;
@@ -352,8 +352,7 @@ export function Sidebar({
     });
   }, [inWorkspace, sessionsByProject, q, searching]);
 
-  const toggle = (id: string) =>
-    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggle = (id: string) => toggleExpanded(id);
 
   // Drag-to-reorder. The dragged project's new `sort_order` is the midpoint
   // between its visible-list neighbors after the drop, so one drop = one event
@@ -482,7 +481,7 @@ export function Sidebar({
                   onSelectProject={() => {
                     setActiveProject(p.id);
                     setActiveSession(null);
-                    setExpanded((prev) => ({ ...prev, [p.id]: true }));
+                    setExpanded(p.id, true);
                   }}
                   activeSessionId={activeSessionId}
                   onSelectSession={(id) => {

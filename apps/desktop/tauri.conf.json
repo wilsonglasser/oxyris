@@ -32,7 +32,8 @@
         "transparent": false,
         "maximizable": true,
         "minimizable": true,
-        "closable": true
+        "closable": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {

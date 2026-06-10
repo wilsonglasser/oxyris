@@ -420,6 +420,17 @@ export function TerminalView({
     // burst keeps forwarding. Gaps longer than the window reset to "copy".
     const CTRL_C_BURST_MS = 500;
     let lastCtrlC = 0;
+    // Last non-empty selection. The claude TUI repaints its spinner/status line
+    // ~10×/sec; those in-place rewrites make xterm drop the active selection, so
+    // by the time the user reaches for Ctrl+C / Ctrl+Shift+C `getSelection()` is
+    // often already "" and the copy was a silent no-op. Cache the selection the
+    // instant it's made (mouse-up) and copy current-or-cached so a repaint
+    // between select and keypress can't eat it.
+    let lastSelection = "";
+    const selDisposable = term.onSelectionChange(() => {
+      const s = term.getSelection();
+      if (s) lastSelection = s;
+    });
     const routeImage = (file: File) => {
       const now = Date.now();
       if (now - lastImageRoute < 500) return;
@@ -496,7 +507,7 @@ export function TerminalView({
             return false;
           }
           // First press in a burst: copy the selection, don't interrupt.
-          const sel = term.getSelection();
+          const sel = term.getSelection() || lastSelection;
           if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
           return false;
         }
@@ -504,7 +515,7 @@ export function TerminalView({
       const combo = e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
       if (!combo) return true;
       if (e.code === "KeyC") {
-        const sel = term.getSelection();
+        const sel = term.getSelection() || lastSelection;
         if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
         return false;
       }
@@ -663,6 +674,7 @@ export function TerminalView({
       try {
         linkProvider.dispose();
         urlLinkProvider.dispose();
+        selDisposable.dispose();
       } catch {
         /* noop */
       }

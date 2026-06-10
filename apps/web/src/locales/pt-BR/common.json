@@ -87,7 +87,11 @@
     "workspace_heading": "Workspace",
     "workspace_help": "Agrupe este projeto sob um workspace/vault (ex. Pessoal, Acme Corp). Deixe vazio para mantê-lo sem grupo. O seletor da sidebar filtra por estes.",
     "workspace_placeholder": "ex. Pessoal, Acme Corp",
-    "workspace_save": "Salvar"
+    "workspace_save": "Salvar",
+    "danger_heading": "Zona de perigo",
+    "delete_help": "Remove este projeto do Oxyris. A árvore de trabalho no disco não é tocada — apenas o Oxyris esquece dele.",
+    "delete_label": "Excluir projeto",
+    "delete_confirm": "Excluir o projeto \"{{name}}\" do Oxyris? Os arquivos no disco permanecem intactos."
   },
   "language": {
     "label": "Idioma",
