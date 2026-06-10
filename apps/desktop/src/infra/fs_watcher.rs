@@ -14,9 +14,12 @@ use std::time::Duration;
 
 use notify::{EventKind, RecursiveMode, Watcher};
 use oxyris_core::{AggregateId, Environment};
+use oxyris_ipc::ops::{FsWatchEvent, op_name};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
+
+use crate::infra::agent_pool::AgentPool;
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -175,4 +178,92 @@ fn first_segment_is(rel: &Path, name: &str) -> bool {
         .next()
         .map(|c| c.as_os_str() == name)
         .unwrap_or(false)
+}
+
+/// WSL counterpart to [`FsWatchService`]. The Windows `notify` watcher can't
+/// see into a distro reliably (9p over `\\wsl.localhost`), so instead we ask
+/// the per-distro agent to run a native inotify watcher *inside* the distro and
+/// stream change batches back over stdio. We re-emit them as the very same
+/// `fs:changed` event Windows projects use, so the frontend needs no special
+/// handling for WSL.
+pub struct WslFsWatchService {
+    pool: Arc<AgentPool>,
+    /// Worktrees with a live watch. Guards against re-arming on every dir list.
+    armed: Arc<Mutex<HashSet<AggregateId>>>,
+}
+
+impl WslFsWatchService {
+    pub fn new(pool: Arc<AgentPool>) -> Self {
+        Self {
+            pool,
+            armed: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Start watching `worktree_root` inside the distro (idempotent per
+    /// worktree). No-op for non-WSL projects. If the agent later dies, the
+    /// stream ends and the worktree is disarmed so the next dir listing
+    /// re-arms it against a fresh agent.
+    pub async fn ensure(
+        &self,
+        app: AppHandle,
+        worktree_id: AggregateId,
+        env: &Environment,
+        worktree_root: String,
+    ) {
+        let Environment::Wsl { distro } = env else {
+            return;
+        };
+        {
+            // `insert` returns false when already present → already armed.
+            let mut armed = self.armed.lock().await;
+            if !armed.insert(worktree_id) {
+                return;
+            }
+        }
+
+        let distro = distro.clone();
+        let pool = self.pool.clone();
+        let armed = self.armed.clone();
+        tokio::spawn(async move {
+            let args = serde_json::json!({ "root": worktree_root });
+            let (mut rx, watch_id) = match pool
+                .call_open_stream(&distro, op_name::FS_WATCH, args)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(%worktree_id, error = %e, "wsl_fs_watcher: failed to start");
+                    armed.lock().await.remove(&worktree_id);
+                    return;
+                }
+            };
+            tracing::debug!(%worktree_id, %distro, %watch_id, "wsl_fs_watcher: armed");
+
+            while let Some(payload) = rx.recv().await {
+                match serde_json::from_value::<FsWatchEvent>(payload) {
+                    Ok(ev) => {
+                        if ev.paths.is_empty() {
+                            continue;
+                        }
+                        let event = FsChangedEvent {
+                            worktree_id,
+                            paths: ev.paths,
+                        };
+                        if let Err(e) = app.emit("fs:changed", &event) {
+                            tracing::debug!(error = %e, "wsl_fs_watcher: emit failed");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "wsl_fs_watcher: bad event payload");
+                    }
+                }
+            }
+
+            // Stream closed (agent died or was cancelled) — disarm so a later
+            // dir listing can re-arm.
+            armed.lock().await.remove(&worktree_id);
+            tracing::debug!(%worktree_id, "wsl_fs_watcher: stream ended");
+        });
+    }
 }

@@ -170,6 +170,53 @@ impl AgentPool {
         Ok((events_rx, result))
     }
 
+    /// Start a long-lived streaming op (e.g. `fs.watch`) that never sends a
+    /// final Result. Returns the event receiver plus the request id, which
+    /// doubles as the cancellation handle. Unlike [`call_streaming`], this does
+    /// NOT await a result — the request stays open until the caller cancels it
+    /// or the agent dies (EOF drops the pending entry, closing the receiver).
+    ///
+    /// [`call_streaming`]: Self::call_streaming
+    pub async fn call_open_stream(
+        &self,
+        distro: &str,
+        op: &str,
+        args: Value,
+    ) -> Result<(mpsc::UnboundedReceiver<Value>, String), AgentError> {
+        let agent = self.ensure_agent(distro).await?;
+        // The result channel is kept only so the pending entry is well-formed;
+        // a watch never resolves it. If the agent dies, the EOF drain fires it
+        // (into a dropped receiver) and drops `events_tx`, closing `events_rx`.
+        let (result_tx, _result_rx) = oneshot::channel();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let id = new_request_id();
+
+        {
+            let mut pending = agent.pending.lock().await;
+            pending.insert(
+                id.clone(),
+                PendingCall {
+                    events: Some(events_tx),
+                    result: result_tx,
+                },
+            );
+        }
+
+        let frame = Frame::Request(RequestFrame {
+            id: id.clone(),
+            op: op.to_owned(),
+            args,
+        });
+        let line = serde_json::to_string(&frame)?;
+        agent
+            .stdin_tx
+            .send(line)
+            .await
+            .map_err(|_| AgentError::Channel)?;
+
+        Ok((events_rx, id))
+    }
+
     async fn ensure_agent(&self, distro: &str) -> Result<Arc<AgentHandle>, AgentError> {
         {
             let agents = self.agents.lock().await;

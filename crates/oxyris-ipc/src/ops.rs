@@ -21,6 +21,8 @@ pub mod op_name {
     pub const FS_WRITE_BYTES: &str = "fs.write_bytes";
     pub const FS_SEARCH_PATHS: &str = "fs.search_paths";
     pub const FS_SEARCH_CONTENT: &str = "fs.search_content";
+    pub const FS_WATCH: &str = "fs.watch";
+    pub const FS_UNWATCH: &str = "fs.unwatch";
     pub const GIT_LIST_BRANCHES: &str = "git.list_branches";
     pub const GIT_LIST_WORKTREES: &str = "git.list_worktrees";
     pub const GIT_CREATE_WORKTREE: &str = "git.create_worktree";
@@ -164,6 +166,31 @@ pub struct FsWalkEvent {
 pub struct FsWalkResult {
     pub count: u32,
     pub truncated: bool,
+}
+
+// ────── fs.watch (long-lived stream) ───────────────────────────────────────
+//
+// Unlike fs.walk, a watch request stays *open*: the agent streams
+// `FsWatchEvent` frames under the request id until an `fs.unwatch` cancels it
+// (or the agent dies). The watch request therefore never produces a Result
+// frame — see `apps/agent/src/main.rs`.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsWatchArgs {
+    /// Absolute path inside the distro to watch recursively.
+    pub root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsWatchEvent {
+    /// Changed paths, relative to `root`, POSIX-separated. Debounced batch.
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsUnwatchArgs {
+    /// The watch handle (the original `fs.watch` request id) to tear down.
+    pub watch_id: String,
 }
 
 // ────── fs.list_dir ────────────────────────────────────────────────────────

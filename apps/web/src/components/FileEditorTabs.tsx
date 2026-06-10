@@ -236,7 +236,13 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           // Including `loading` in the key forces a remount when the file
           // content arrives — guarantees the empty-doc skeleton is replaced
           // by the real content even if the buffer-sync effect missed it.
-          key={`${worktreeId}::${activeTab.relPath}::${
+          // `projectId` MUST be part of the key: every project's primary
+          // checkout shares the same nil-UUID worktreeId sentinel, so two
+          // projects' same-relPath file (e.g. ".env") would otherwise collide
+          // and React would reuse this instance across a project switch —
+          // leaving the editor's keymap/updateListener closures bound to the
+          // previous project and routing saves to the wrong file.
+          key={`${projectId}::${worktreeId}::${activeTab.relPath}::${
             activeTab.loading ? "load" : "ready"
           }`}
           projectId={projectId}
@@ -258,6 +264,8 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
   const { t } = useTranslation("files");
   const setBuffer = useFileEditorStore((s) => s.setBuffer);
   const saveTab = useFileEditorStore((s) => s.saveTab);
+  const reloadFromDisk = useFileEditorStore((s) => s.reloadFromDisk);
+  const keepLocalChanges = useFileEditorStore((s) => s.keepLocalChanges);
   const reveal = useFileEditorStore(
     (s) => s.reveal[scopeKey(projectId, worktreeId)] ?? null,
   );
@@ -336,10 +344,12 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
       view.destroy();
       viewRef.current = null;
     };
-    // We deliberately re-create on relPath change only — buffer changes are
-    // handled by the updateListener.
+    // Re-create on (projectId, worktreeId, relPath) change — buffer changes
+    // are handled by the updateListener. projectId is in the deps so the
+    // keymap/updateListener closures rebind when switching between two
+    // projects' same-path file (shared nil-UUID worktreeId sentinel).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [worktreeId, tab.relPath, showEditor]);
+  }, [projectId, worktreeId, tab.relPath, showEditor]);
 
   // If the buffer was reset externally (e.g. file reload), sync into the view.
   useEffect(() => {
@@ -463,6 +473,32 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
           </div>
         </div>
       </div>
+      {tab.externalContent !== null && (
+        <div
+          role="alert"
+          className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-800/60 bg-amber-950/40 px-2 py-1 text-[11px] text-amber-200"
+        >
+          <span className="truncate">{t("disk_changed")}</span>
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() =>
+                void reloadFromDisk(projectId, worktreeId, tab.relPath)
+              }
+              className="rounded px-1.5 py-0.5 hover:bg-amber-900/60"
+            >
+              {t("disk_reload")}
+            </button>
+            <button
+              type="button"
+              onClick={() => keepLocalChanges(projectId, worktreeId, tab.relPath)}
+              className="rounded px-1.5 py-0.5 hover:bg-amber-900/60"
+            >
+              {t("disk_keep_mine")}
+            </button>
+          </div>
+        </div>
+      )}
       {tab.loading ? (
         <div className="flex flex-1 items-center justify-center text-[12px] text-neutral-500">
           {t("loading")}

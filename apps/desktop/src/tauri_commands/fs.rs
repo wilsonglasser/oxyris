@@ -59,6 +59,12 @@ pub async fn fs_list_dir(
         .fs_watcher
         .ensure(app.clone(), input.worktree_id, &env, root.clone())
         .await;
+    // WSL counterpart — native inotify inside the distro via the agent. Also
+    // idempotent; no-op'd for Windows projects.
+    state
+        .wsl_fs_watcher
+        .ensure(app.clone(), input.worktree_id, &env, root.clone())
+        .await;
     let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
     let result: FsListDirResult =
         fs_infra::list_dir(&env, &state.agent_pool, abs.clone(), input.show_hidden).await?;

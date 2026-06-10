@@ -18,7 +18,7 @@ use crate::domain::session::{Session, SessionCommand, SessionEvent};
 use crate::infra::agent_pool::AgentPool;
 use crate::infra::autopilot::AutopilotManager;
 use crate::infra::event_store::{EventStore, EventStoreError};
-use crate::infra::fs_watcher::FsWatchService;
+use crate::infra::fs_watcher::{FsWatchService, WslFsWatchService};
 use crate::infra::indexing::IndexingService;
 use crate::infra::language_packs::LanguagePacksService;
 use crate::infra::lsp::LspManager;
@@ -44,6 +44,8 @@ pub struct AppState {
     pub autopilot: Arc<AutopilotManager>,
     pub indexing: Arc<IndexingService>,
     pub fs_watcher: Arc<FsWatchService>,
+    /// WSL counterpart: drives native inotify inside each distro via the agent.
+    pub wsl_fs_watcher: Arc<WslFsWatchService>,
     pub lsp: Arc<LspManager>,
     pub language_packs: Arc<LanguagePacksService>,
     /// TCP port the LSP bridge is listening on (`127.0.0.1:<port>`).
@@ -155,6 +157,7 @@ impl AppState {
 
         let indexing = Arc::new(IndexingService::new(data_dir.clone(), agent_pool.clone()));
         let fs_watcher = Arc::new(FsWatchService::new());
+        let wsl_fs_watcher = Arc::new(WslFsWatchService::new(agent_pool.clone()));
         let app_for_packs = app_for_lsp.clone();
         let lsp = Arc::new(LspManager::new(app_for_lsp));
         let language_packs = Arc::new(LanguagePacksService::new(app_for_packs, data_dir.clone()));
@@ -213,6 +216,7 @@ impl AppState {
             autopilot,
             indexing,
             fs_watcher,
+            wsl_fs_watcher,
             lsp,
             language_packs,
             lsp_bridge_port,

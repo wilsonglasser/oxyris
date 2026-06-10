@@ -20,6 +20,8 @@ pub enum OpError {
     Git(String),
     #[error("repository has no commits yet")]
     EmptyRepo,
+    #[error("watch: {0}")]
+    Watch(String),
 }
 
 impl OpError {
@@ -31,9 +33,12 @@ impl OpError {
             OpError::NotFound(_) => "not_found",
             OpError::Git(_) => "git",
             OpError::EmptyRepo => "empty_repo",
+            OpError::Watch(_) => "watch",
         }
     }
 }
+
+pub use fs::start_watch;
 
 pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
     let args = req.args;
@@ -113,6 +118,12 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
             let args: oxyris_ipc::ops::FsSearchContentArgs = from_args(args)?;
             let result = fs::search_content(&args)?;
             Ok(serde_json::to_value(result)?)
+        }
+        // fs.watch is handled out-of-band in main.rs (it must not emit a
+        // Result frame); only fs.unwatch flows through normal dispatch.
+        op_name::FS_UNWATCH => {
+            let args: oxyris_ipc::ops::FsUnwatchArgs = from_args(args)?;
+            fs::stop_watch(args)
         }
         op_name::GIT_LIST_BRANCHES => git::list_branches(from_args(args)?),
         op_name::GIT_LIST_WORKTREES => git::list_worktrees(from_args(args)?),

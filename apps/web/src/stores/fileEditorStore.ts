@@ -53,6 +53,11 @@ export type Tab = {
   truncated: boolean;
   /** What kind of preview/editor to use. Set on open from `previewKindFor`. */
   kind: PreviewKind;
+  /** On-disk content captured by the external-change watcher when it diverged
+   *  from {@link baseContent} *and* the buffer has unsaved edits — drives the
+   *  reload/keep-mine conflict banner. `null` when there's no pending external
+   *  change (a clean buffer is reloaded silently instead). */
+  externalContent: string | null;
 };
 
 /** A file/folder marked for copy or move via the tree context menu. */
@@ -130,6 +135,28 @@ interface FileEditorState {
     worktreeId: string,
     relPath: string,
   ) => Promise<void>;
+  /** Reconcile an open tab against an external (on-disk) change reported by
+   *  the fs watcher. Clean buffers are reloaded silently; dirty buffers raise
+   *  a conflict (sets `externalContent` → reload/keep banner). No-op when the
+   *  disk still matches `baseContent` (our own save / watcher noise). */
+  reconcileExternalChange: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+  ) => Promise<void>;
+  /** Discard local edits and adopt the on-disk content (resolves a conflict). */
+  reloadFromDisk: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+  ) => Promise<void>;
+  /** Keep local edits, acknowledging the on-disk version as the new base so a
+   *  subsequent save overwrites it (resolves a conflict). */
+  keepLocalChanges: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+  ) => void;
   refreshDir: (
     projectId: string,
     worktreeId: string,
@@ -293,6 +320,7 @@ export const useFileEditorStore = create<FileEditorState>()(
               error: null,
               truncated: false,
               kind,
+              externalContent: null,
             },
           },
         },
@@ -314,6 +342,7 @@ export const useFileEditorStore = create<FileEditorState>()(
           error: null,
           truncated: result.truncated,
           kind,
+          externalContent: null,
           ...(prev?.buffer && prev.buffer !== prev.baseContent
             ? { buffer: prev.buffer }
             : {}),
@@ -333,6 +362,7 @@ export const useFileEditorStore = create<FileEditorState>()(
           error: message,
           truncated: false,
           kind,
+          externalContent: null,
         };
         return { tabs: { ...state.tabs, [key]: tabs } };
       });
@@ -458,6 +488,112 @@ export const useFileEditorStore = create<FileEditorState>()(
     }
   },
 
+  reconcileExternalChange: async (projectId, worktreeId, relPath) => {
+    const key = scopeKey(projectId, worktreeId);
+    const tab = get().tabs[key]?.[relPath];
+    if (!tab) return;
+    // Binary previews load their own bytes via fs_read_file_bytes; nothing to
+    // reconcile here. Skip while a read/write is already in flight.
+    if (tab.kind === "image" || tab.kind === "pdf") return;
+    if (tab.loading || tab.saving) return;
+
+    let disk: { content: string; truncated: boolean };
+    try {
+      const r = await fsReadFile({ projectId, worktreeId, relPath });
+      disk = { content: r.content, truncated: r.truncated };
+    } catch {
+      // File vanished or became unreadable — leave the tab untouched. A delete
+      // is handled separately by the tree refresh / closeTab paths.
+      return;
+    }
+    set((state) => {
+      const tabs = { ...(state.tabs[key] ?? {}) };
+      const cur = tabs[relPath];
+      if (!cur) return state;
+      // Disk matches what we last synced → no real external change (our own
+      // save echoing back through the watcher, or unrelated noise). Drop any
+      // stale conflict flag.
+      if (disk.content === cur.baseContent) {
+        if (cur.externalContent === null) return state;
+        tabs[relPath] = { ...cur, externalContent: null };
+        return { tabs: { ...state.tabs, [key]: tabs } };
+      }
+      const dirty = cur.buffer !== cur.baseContent;
+      if (!dirty) {
+        // Clean buffer → silently adopt the new on-disk content (the user
+        // asked for unmodified files to just refresh in place).
+        tabs[relPath] = {
+          ...cur,
+          baseContent: disk.content,
+          buffer: disk.content,
+          truncated: disk.truncated,
+          externalContent: null,
+        };
+      } else {
+        // Unsaved edits AND disk diverged → surface a reload/keep conflict.
+        tabs[relPath] = { ...cur, externalContent: disk.content };
+      }
+      return { tabs: { ...state.tabs, [key]: tabs } };
+    });
+  },
+
+  reloadFromDisk: async (projectId, worktreeId, relPath) => {
+    const key = scopeKey(projectId, worktreeId);
+    const tab = get().tabs[key]?.[relPath];
+    if (!tab) return;
+    // Prefer the content the watcher already captured; otherwise read fresh.
+    let content = tab.externalContent;
+    let truncated = tab.truncated;
+    if (content === null) {
+      try {
+        const r = await fsReadFile({ projectId, worktreeId, relPath });
+        content = r.content;
+        truncated = r.truncated;
+      } catch (e) {
+        const message = errMessage(e);
+        set((state) => {
+          const tabs = { ...(state.tabs[key] ?? {}) };
+          const cur = tabs[relPath];
+          if (!cur) return state;
+          tabs[relPath] = { ...cur, error: message };
+          return { tabs: { ...state.tabs, [key]: tabs } };
+        });
+        return;
+      }
+    }
+    const next = content;
+    set((state) => {
+      const tabs = { ...(state.tabs[key] ?? {}) };
+      const cur = tabs[relPath];
+      if (!cur) return state;
+      tabs[relPath] = {
+        ...cur,
+        baseContent: next,
+        buffer: next,
+        truncated,
+        externalContent: null,
+        error: null,
+      };
+      return { tabs: { ...state.tabs, [key]: tabs } };
+    });
+  },
+
+  keepLocalChanges: (projectId, worktreeId, relPath) =>
+    set((state) => {
+      const key = scopeKey(projectId, worktreeId);
+      const tabs = { ...(state.tabs[key] ?? {}) };
+      const cur = tabs[relPath];
+      if (!cur || cur.externalContent === null) return state;
+      // Adopt the on-disk version as the new base so the editor still shows
+      // the tab as dirty and the next save overwrites disk with the buffer.
+      tabs[relPath] = {
+        ...cur,
+        baseContent: cur.externalContent,
+        externalContent: null,
+      };
+      return { tabs: { ...state.tabs, [key]: tabs } };
+    }),
+
   refreshDir: async (projectId, worktreeId, relPath) => {
     await get().loadDir(projectId, worktreeId, relPath);
   },
@@ -576,6 +712,17 @@ export const useFileEditorStore = create<FileEditorState>()(
         const projectId = projectIdResolver();
         if (!projectId) return;
         const key = scopeKey(projectId, worktree_id);
+        // Reconcile any open editor tab whose file changed on disk — reload
+        // clean buffers silently, raise a conflict on dirty ones. Useful when
+        // an LLM (or another tool) rewrites a file while it's open.
+        const openTabs = get().tabs[key];
+        if (openTabs) {
+          for (const p of paths) {
+            if (openTabs[p]) {
+              void get().reconcileExternalChange(projectId, worktree_id, p);
+            }
+          }
+        }
         // Refresh each unique parent dir that we already have loaded —
         // skip dirs the user never expanded so we don't fetch the whole
         // tree on every save.
