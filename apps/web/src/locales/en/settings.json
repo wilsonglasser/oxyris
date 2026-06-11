@@ -47,6 +47,8 @@
   "notifications_channel_completion_desc": "Played when Claude finishes a turn on its own (orange attention bull).",
   "notifications_channel_input_title": "Waiting for input",
   "notifications_channel_input_desc": "Played when Claude is paused waiting on you (red bull / approval prompt).",
+  "notifications_channel_escalation_title": "Auto-pilot escalation",
+  "notifications_channel_escalation_desc": "Played when the auto-pilot gets stuck on a human-only step (create an account, log in, payment…) and hands control back.",
   "section_pure_mode": "Claude Code (pure)",
   "pure_mode_title": "Use pure Claude Code mode",
   "pure_mode_desc": "Replaces the structured chat with the real interactive Claude Code running in a terminal. Index, LSP and workspace stay wired in. Applies to all projects.",

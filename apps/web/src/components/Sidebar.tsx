@@ -42,9 +42,11 @@ import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 import {
   playCompletionChime,
+  playEscalationChime,
   playInputChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
+import { useAutopilotAlertStore } from "~/stores/autopilotAlertStore.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { localEnvLabel } from "~/lib/host.ts";
 import { onPureSignal } from "~/ipc/terminal.ts";
@@ -321,8 +323,16 @@ export function Sidebar({
       void onAutopilotEvent(s.id, (event) => {
         const store = useAutopilotStore.getState();
         store.setThinking(s.id, event.kind === "thinking");
-        if (event.kind === "halted" || event.kind === "error") {
+        if (
+          event.kind === "halted" ||
+          event.kind === "error" ||
+          event.kind === "escalated"
+        ) {
           store.setEnabled(s.id, false);
+        }
+        if (event.kind === "escalated") {
+          playEscalationChime();
+          useAutopilotAlertStore.getState().raise(s.id, event.why);
         }
       }).then((fn) => {
         if (cancelled) fn();

@@ -47,6 +47,8 @@
   "notifications_channel_completion_desc": "Toca quando o Claude termina um turno sozinho (bolinha laranja de atenção).",
   "notifications_channel_input_title": "Aguardando input",
   "notifications_channel_input_desc": "Toca quando o Claude está pausado esperando você (bolinha vermelha / pedido de aprovação).",
+  "notifications_channel_escalation_title": "Escalonamento do autopilot",
+  "notifications_channel_escalation_desc": "Toca quando o autopilot trava numa etapa que só você pode fazer (criar conta, login, pagamento…) e devolve o controle.",
   "section_pure_mode": "Claude Code (puro)",
   "pure_mode_title": "Usar modo Claude Code puro",
   "pure_mode_desc": "Substitui o chat estruturado pelo Claude Code interativo de verdade rodando num terminal. Índice, LSP e workspace continuam integrados. Vale para todos os projetos.",

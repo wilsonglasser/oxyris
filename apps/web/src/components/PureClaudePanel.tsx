@@ -36,6 +36,7 @@ import {
 import { attachmentSave, blobToBase64 } from "~/ipc/attachments.ts";
 import {
   playCompletionChime,
+  playEscalationChime,
   playInputChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
@@ -52,6 +53,7 @@ import { TerminalView } from "~/components/TerminalPanel.tsx";
 import { FileViewerModal } from "~/components/FileViewerModal.tsx";
 import { AutopilotPanel } from "~/components/AutopilotPanel.tsx";
 import { useAutopilotStore } from "~/stores/autopilotStore.ts";
+import { useAutopilotAlertStore } from "~/stores/autopilotAlertStore.ts";
 import { onAutopilotEvent } from "~/ipc/autopilot.ts";
 
 /**
@@ -381,8 +383,18 @@ function PureSessionView({
       }
       autopilotSetThinking(sessionId, false);
       autopilotPushLog(sessionId, event);
-      if (event.kind === "halted" || event.kind === "error") {
+      if (
+        event.kind === "halted" ||
+        event.kind === "error" ||
+        event.kind === "escalated"
+      ) {
         autopilotSetEnabled(sessionId, false);
+      }
+      // Escalation = "I can't do this, you have to" — alert hard: a distinct
+      // chime (regardless of focus) + a balloon carrying the explanation.
+      if (event.kind === "escalated") {
+        playEscalationChime();
+        useAutopilotAlertStore.getState().raise(sessionId, event.why);
       }
     }).then((fn) => {
       if (cancelled) fn();

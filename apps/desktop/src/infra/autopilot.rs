@@ -86,6 +86,11 @@ enum AutopilotEvent {
     Halted {
         reason: String,
     },
+    /// The pilot hit a human-only step and handed control back. Carries the
+    /// supervisor's explanation so the UI can show it in an alert balloon.
+    Escalated {
+        why: String,
+    },
     Error {
         message: String,
     },
@@ -276,12 +281,17 @@ impl AutopilotManager {
             }
             Action::Halt(reason) => {
                 self.disengage(session_id).await;
-                self.emit(
-                    session_id,
-                    AutopilotEvent::Halted {
+                // An escalation is the pilot saying "I can't do this — a human is
+                // needed" (create an account, log in, pay, solve a CAPTCHA…). It
+                // gets its own event so the UI can alert louder than a plain halt
+                // (distinct chime + a balloon with the explanation).
+                let event = match &reason {
+                    HaltReason::Escalated(why) => AutopilotEvent::Escalated { why: why.clone() },
+                    _ => AutopilotEvent::Halted {
                         reason: halt_reason_str(&reason),
                     },
-                );
+                };
+                self.emit(session_id, event);
             }
         }
     }
@@ -316,7 +326,7 @@ fn halt_reason_str(reason: &HaltReason) -> String {
 
 /// System instruction shared by both backends. Pins the output contract to the
 /// JSON shape `serde` parses into [`Decision`] (`#[serde(tag = "decision")]`).
-const SYSTEM_PROMPT: &str = "You are an autonomous supervisor driving a Claude Code coding session toward a stated mission, acting in place of the user.\n\nRespond with ONLY a single JSON object, no prose, no markdown fences. It must be exactly one of:\n{\"decision\":\"approve\"}\n{\"decision\":\"reject\",\"reason\":\"<why>\"}\n{\"decision\":\"reply\",\"text\":\"<message to send>\"}\n{\"decision\":\"done\",\"summary\":\"<what was accomplished>\"}\n{\"decision\":\"escalate\",\"why\":\"<why a human is needed>\"}\n\nGuidance: approve tool uses that safely advance the mission; reject unsafe or off-mission ones with a reason. When Claude asks a question, reply with the answer that best serves the mission. When Claude has finished a turn, decide whether the mission is complete (done) or send the next concrete instruction (reply). Escalate when you are unsure or the situation looks risky.";
+const SYSTEM_PROMPT: &str = "You are an autonomous supervisor driving a Claude Code coding session toward a stated mission, acting in place of the user.\n\nRespond with ONLY a single JSON object, no prose, no markdown fences. It must be exactly one of:\n{\"decision\":\"approve\"}\n{\"decision\":\"reject\",\"reason\":\"<why>\"}\n{\"decision\":\"reply\",\"text\":\"<message to send>\"}\n{\"decision\":\"done\",\"summary\":\"<what was accomplished>\"}\n{\"decision\":\"escalate\",\"why\":\"<why a human is needed>\"}\n\nGuidance: approve tool uses that safely advance the mission; reject unsafe or off-mission ones with a reason. When Claude asks a question, reply with the answer that best serves the mission. When Claude has finished a turn, decide whether the mission is complete (done) or send the next concrete instruction (reply).\n\nEscalate (do NOT guess or reply) the moment the step needs a real human and cannot be done by typing into the coding session — for example: creating or signing into an account, entering credentials / API keys / secrets / payment details, solving a CAPTCHA, completing 2FA or email/SMS verification, granting OAuth, or any irreversible real-world action outside the repo. Put a short, specific explanation of what the human must do in \"why\". Also escalate when you are genuinely unsure or the situation looks risky.";
 
 fn build_user_prompt(ctx: &AutopilotContext, ask: &PendingKind) -> String {
     let pending = match ask {

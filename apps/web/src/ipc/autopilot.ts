@@ -32,6 +32,7 @@ export type AutopilotEvent =
   | { kind: "rejected"; reason: string }
   | { kind: "replied"; text: string }
   | { kind: "halted"; reason: string }
+  | { kind: "escalated"; why: string }
   | { kind: "error"; message: string };
 
 /** Subscribe to a session's auto-pilot decision stream (for the mini-log). */

@@ -24,6 +24,7 @@ import { Sidebar } from "~/components/Sidebar.tsx";
 import { TerminalPanel } from "~/components/TerminalPanel.tsx";
 import { TitleBar } from "~/components/TitleBar.tsx";
 import { UpdateBanner } from "~/components/UpdateBanner.tsx";
+import { AutopilotAlerts } from "~/components/AutopilotAlerts.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useDragResize } from "~/lib/useDragResize.ts";
@@ -618,6 +619,7 @@ export function App() {
       )}
 
       <UpdateBanner />
+      <AutopilotAlerts />
     </div>
   );
 }

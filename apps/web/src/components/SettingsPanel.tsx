@@ -105,11 +105,15 @@ function GeneralTab() {
   const [inputSound, setInputSound] = useState<string>(() =>
     getChannelSound("input"),
   );
+  const [escalationSound, setEscalationSound] = useState<string>(() =>
+    getChannelSound("escalation"),
+  );
   const updateChannel = useCallback(
     (ch: SoundChannel, id: string) => {
       setChannelSound(ch, id);
       if (ch === "completion") setCompletionSound(id);
-      else setInputSound(id);
+      else if (ch === "input") setInputSound(id);
+      else setEscalationSound(id);
       previewSound(id);
     },
     [],
@@ -286,6 +290,14 @@ function GeneralTab() {
             description={t("notifications_channel_input_desc")}
             value={inputSound}
             onChange={(id) => updateChannel("input", id)}
+            offLabel={t("notifications_sound_off")}
+            testLabel={t("notifications_test")}
+          />
+          <ChannelPicker
+            label={t("notifications_channel_escalation_title")}
+            description={t("notifications_channel_escalation_desc")}
+            value={escalationSound}
+            onChange={(id) => updateChannel("escalation", id)}
             offLabel={t("notifications_sound_off")}
             testLabel={t("notifications_test")}
           />
