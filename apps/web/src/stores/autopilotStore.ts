@@ -18,20 +18,17 @@ const MISSION_PREFIX = "oxyris.autopilot.mission.";
 const ENABLED_PREFIX = "oxyris.autopilot.enabled.";
 const CONFIG_PREFIX = "oxyris.autopilot.config.";
 
+/**
+ * Per-session auto-pilot config. Deliberately tiny: only the supervisor-kind
+ * choice (Claude vs custom model) lives here. The endpoint, credentials and
+ * turn budget are app-wide settings (see `appSettingsStore`).
+ */
 export interface AutopilotConfig {
   supervisor: SupervisorKind;
-  model: string;
-  baseUrl: string;
-  apiKey: string;
-  maxTurns: number | null;
 }
 
 const DEFAULT_CONFIG: AutopilotConfig = {
   supervisor: "multi_model",
-  model: "",
-  baseUrl: "",
-  apiKey: "",
-  maxTurns: 30,
 };
 
 function readLS(key: string): string | null {
@@ -57,12 +54,15 @@ interface AutopilotState {
   config: Record<string, AutopilotConfig>;
   /** Ephemeral per-session decision log (most recent last). */
   log: Record<string, AutopilotEvent[]>;
+  /** Ephemeral: a step is in flight (Supervisor being consulted). */
+  thinking: Record<string, boolean>;
   hydrate: (sessionId: string) => void;
   setEnabled: (sessionId: string, on: boolean) => void;
   setMission: (sessionId: string, text: string) => void;
   setConfig: (sessionId: string, patch: Partial<AutopilotConfig>) => void;
   pushLog: (sessionId: string, event: AutopilotEvent) => void;
   clearLog: (sessionId: string) => void;
+  setThinking: (sessionId: string, on: boolean) => void;
 }
 
 export const useAutopilotStore = create<AutopilotState>((set, get) => ({
@@ -70,6 +70,7 @@ export const useAutopilotStore = create<AutopilotState>((set, get) => ({
   mission: {},
   config: {},
   log: {},
+  thinking: {},
   hydrate: (sessionId) => {
     const s = get();
     if (sessionId in s.config) return;
@@ -115,4 +116,6 @@ export const useAutopilotStore = create<AutopilotState>((set, get) => ({
   },
   clearLog: (sessionId) =>
     set((prev) => ({ log: { ...prev.log, [sessionId]: [] } })),
+  setThinking: (sessionId, on) =>
+    set((prev) => ({ thinking: { ...prev.thinking, [sessionId]: on } })),
 }));

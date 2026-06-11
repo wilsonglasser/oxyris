@@ -72,11 +72,23 @@ struct EngagedSession {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum AutopilotEvent {
+    /// A step started — the Supervisor is being consulted. Emitted before the
+    /// (possibly slow) LLM call so the UI can show the pilot is reacting; cleared
+    /// by whichever terminal event below follows.
+    Thinking,
     Approved,
-    Rejected { reason: String },
-    Replied { text: String },
-    Halted { reason: String },
-    Error { message: String },
+    Rejected {
+        reason: String,
+    },
+    Replied {
+        text: String,
+    },
+    Halted {
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 pub struct AutopilotManager {
@@ -97,7 +109,7 @@ impl AutopilotManager {
     /// Engage the pilot for a session. Resolves the session's claude PTY (must
     /// already be spawned) and stores the mission + a fresh [`Autopilot`].
     pub async fn engage(
-        &self,
+        self: &Arc<Self>,
         session_id: AggregateId,
         mission: String,
         config: SupervisorConfig,
@@ -121,7 +133,28 @@ impl AutopilotManager {
             mission,
             pilot: Mutex::new(pilot),
         });
-        self.engaged.lock().await.insert(session_id, engaged);
+        self.engaged
+            .lock()
+            .await
+            .insert(session_id, engaged.clone());
+
+        // Kick the first decision. The pilot is otherwise reactive — it acts only
+        // when a NEW pure-signal arrives. Engaging while claude sits idle (the
+        // common case: you set a mission on a quiet session) never produces one,
+        // so the run would never start. Treat the current idle state as a
+        // `TurnEnded` and let the supervisor send the opening instruction. A short
+        // delay lets any in-flight signal settle; the per-session `pilot` mutex
+        // serializes this against a real signal racing in.
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let last_output = this
+                .pty
+                .scrollback_tail(&engaged.term_id, CONTEXT_CHARS)
+                .unwrap_or_default();
+            this.drive(session_id, &engaged, PendingKind::TurnEnded { last_output })
+                .await;
+        });
         Ok(())
     }
 
@@ -158,6 +191,16 @@ impl AutopilotManager {
         let Some(ask) = self.build_pending(&notice, &session) else {
             return;
         };
+        self.drive(notice.session_id, &session, ask).await;
+    }
+
+    /// Run one Supervisor step for `ask` and carry out its action. Shared by the
+    /// signal-driven path ([`Self::handle`]) and the engage kickoff.
+    async fn drive(&self, session_id: AggregateId, session: &EngagedSession, ask: PendingKind) {
+        // Signal "reacting now" up front — the Supervisor call can take seconds,
+        // and without this the user sees no movement between a prompt appearing
+        // and the pilot acting.
+        self.emit(session_id, AutopilotEvent::Thinking);
         let ctx = AutopilotContext {
             mission: session.mission.clone(),
             transcript: TranscriptView {
@@ -176,17 +219,17 @@ impl AutopilotManager {
         };
 
         match action {
-            Ok(action) => self.act(notice.session_id, &session, action).await,
+            Ok(action) => self.act(session_id, session, action).await,
             Err(e) => {
                 self.emit(
-                    notice.session_id,
+                    session_id,
                     AutopilotEvent::Error {
                         message: e.to_string(),
                     },
                 );
                 // A backend failure isn't a reason to keep retrying blindly —
                 // hand control back so the user notices.
-                self.disengage(notice.session_id).await;
+                self.disengage(session_id).await;
             }
         }
     }
@@ -419,7 +462,8 @@ impl Supervisor for ClaudeCliSupervisor {
 /// (npm shim is usually `claude.cmd`, launched via `cmd.exe /C`).
 fn run_claude_judge(prompt: &str, model: Option<&str>) -> Result<String, SupervisorError> {
     use oxyris_procutil::HideConsole;
-    use std::process::Command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     let full = which::which("claude")
         .or_else(|_| which::which("claude.cmd"))
@@ -438,14 +482,35 @@ fn run_claude_judge(prompt: &str, model: Option<&str>) -> Result<String, Supervi
     } else {
         Command::new(full.as_os_str())
     };
-    cmd.arg("-p").arg(prompt);
+    // Feed the user prompt over stdin, NOT as an argv arg. With the scrollback
+    // context the prompt easily exceeds the Windows command-line limit (cmd.exe
+    // caps at ~8 KB) → "Linha de comando muito longa" / exit 1. `claude -p` with
+    // no positional reads the prompt from stdin. The system prompt stays an arg
+    // (it's small and fixed).
+    cmd.arg("-p");
     cmd.arg("--append-system-prompt").arg(SYSTEM_PROMPT);
     if let Some(m) = model.filter(|m| !m.trim().is_empty()) {
         cmd.arg("--model").arg(m);
     }
-    let out = cmd
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd
         .hide_console()
-        .output()
+        .spawn()
+        .map_err(|e| SupervisorError::Backend(e.to_string()))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| SupervisorError::Backend("failed to open claude stdin".into()))?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| SupervisorError::Backend(e.to_string()))?;
+        // Dropping `stdin` here closes the pipe → claude sees EOF and starts.
+    }
+    let out = child
+        .wait_with_output()
         .map_err(|e| SupervisorError::Backend(e.to_string()))?;
     if !out.status.success() {
         return Err(SupervisorError::Backend(format!(

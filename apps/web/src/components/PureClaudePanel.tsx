@@ -361,6 +361,7 @@ function PureSessionView({
   const autopilotOn = useAutopilotStore((s) => s.enabled[sessionId] ?? false);
   const autopilotPushLog = useAutopilotStore((s) => s.pushLog);
   const autopilotSetEnabled = useAutopilotStore((s) => s.setEnabled);
+  const autopilotSetThinking = useAutopilotStore((s) => s.setThinking);
   useEffect(() => {
     autopilotHydrate(sessionId);
   }, [sessionId, autopilotHydrate]);
@@ -372,6 +373,13 @@ function PureSessionView({
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     void onAutopilotEvent(sessionId, (event) => {
+      // "thinking" is transient feedback, not a decision — flip the flag, don't
+      // clutter the log. Any other event means the step resolved → clear it.
+      if (event.kind === "thinking") {
+        autopilotSetThinking(sessionId, true);
+        return;
+      }
+      autopilotSetThinking(sessionId, false);
       autopilotPushLog(sessionId, event);
       if (event.kind === "halted" || event.kind === "error") {
         autopilotSetEnabled(sessionId, false);
@@ -384,7 +392,7 @@ function PureSessionView({
       cancelled = true;
       unlisten?.();
     };
-  }, [sessionId, autopilotPushLog, autopilotSetEnabled]);
+  }, [sessionId, autopilotPushLog, autopilotSetEnabled, autopilotSetThinking]);
 
   // Auto-recover a dead claude PTY. The interactive `claude` TUI exits on a
   // double Ctrl+C (and on any crash); without this the pane just freezes on

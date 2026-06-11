@@ -57,6 +57,26 @@ export async function claudePureRefreshTitle(input: {
   return invoke("claude_pure_refresh_title", { input });
 }
 
+export type PureState = {
+  /** A prompt/menu is on screen — the red "wants input" dot. */
+  needs_input: boolean;
+  /** A turn is in flight with no prompt waiting — the blue "busy" dot. */
+  busy: boolean;
+};
+
+/**
+ * Ground-truth pure-turn dot state for a session, read off the backend's live
+ * sniffer + idle watchdog. The `pure-signal` events that normally drive the dot
+ * are fire-and-forget and latch once per turn — a signal that fires while no
+ * listener is attached (session switch, panel remount) is lost, leaving the dot
+ * stale. Call this on attach/focus to re-sync.
+ */
+export async function claudePureState(input: {
+  session_id: string;
+}): Promise<PureState> {
+  return invoke("claude_pure_state", { input });
+}
+
 export async function terminalResize(input: {
   id: string;
   cols: number;

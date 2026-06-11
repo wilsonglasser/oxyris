@@ -14,6 +14,7 @@ const PURE_MODE_KEY = "oxyris.pureMode";
 const OPEN_EXTERNAL_KEY = "oxyris.openFilesExternally";
 const TERM_FONT_KEY = "oxyris.terminalFontSize";
 const CLAUDE_LANG_KEY = "oxyris.claudeLanguage";
+const AUTOPILOT_KEY = "oxyris.autopilot.settings";
 
 /** Default xterm font size (px). Base 100% for the zoom indicator. */
 export const TERM_FONT_DEFAULT = 12;
@@ -41,6 +42,43 @@ function loadTerminalFontSize(): number {
 function loadClaudeLanguage(): ClaudeLanguage {
   const raw = window.localStorage.getItem(CLAUDE_LANG_KEY);
   return isClaudeLanguage(raw) ? raw : "auto";
+}
+
+/**
+ * App-wide auto-pilot supervisor config. The endpoint/credentials/budget are
+ * machine-level setup, not a per-thread choice — only the mission and which
+ * supervisor (Claude vs custom model) to use are decided per engagement (see
+ * {@link import("./autopilotStore").useAutopilotStore}).
+ */
+export interface AutopilotSettings {
+  /** Model id for the custom (OpenAI-compatible) supervisor, e.g. `gpt-4o`. */
+  model: string;
+  /** OpenAI-compatible base URL for the custom supervisor. */
+  baseUrl: string;
+  /** Bearer key for the custom supervisor (stored locally). */
+  apiKey: string;
+  /** Model id for the Claude-CLI supervisor (blank = account default). */
+  claudeModel: string;
+  /** Turn budget shared by both supervisors; null = unlimited. */
+  maxTurns: number | null;
+}
+
+const DEFAULT_AUTOPILOT: AutopilotSettings = {
+  model: "",
+  baseUrl: "",
+  apiKey: "",
+  claudeModel: "",
+  maxTurns: 30,
+};
+
+function loadAutopilot(): AutopilotSettings {
+  const raw = window.localStorage.getItem(AUTOPILOT_KEY);
+  if (!raw) return DEFAULT_AUTOPILOT;
+  try {
+    return { ...DEFAULT_AUTOPILOT, ...JSON.parse(raw) };
+  } catch {
+    return DEFAULT_AUTOPILOT;
+  }
 }
 
 interface AppSettingsState {
@@ -76,6 +114,13 @@ interface AppSettingsState {
    */
   claudeLanguage: ClaudeLanguage;
   setClaudeLanguage: (lang: ClaudeLanguage) => void;
+  /**
+   * Global auto-pilot supervisor config (endpoint, credentials, turn budget).
+   * Shared across every session — the per-session store holds only the mission
+   * and supervisor-kind choice.
+   */
+  autopilot: AutopilotSettings;
+  setAutopilot: (patch: Partial<AutopilotSettings>) => void;
 }
 
 export const useAppSettingsStore = create<AppSettingsState>((set) => ({
@@ -110,4 +155,11 @@ export const useAppSettingsStore = create<AppSettingsState>((set) => ({
     window.localStorage.setItem(CLAUDE_LANG_KEY, lang);
     set({ claudeLanguage: lang });
   },
+  autopilot: loadAutopilot(),
+  setAutopilot: (patch) =>
+    set((s) => {
+      const next = { ...s.autopilot, ...patch };
+      window.localStorage.setItem(AUTOPILOT_KEY, JSON.stringify(next));
+      return { autopilot: next };
+    }),
 }));

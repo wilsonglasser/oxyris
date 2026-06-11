@@ -189,6 +189,8 @@
   "autopilot_api_key_label": "Chave da API",
   "autopilot_api_key_placeholder": "sk-…  (salva localmente)",
   "autopilot_max_turns_label": "Orçamento de turnos (vazio = ilimitado)",
+  "autopilot_global_settings": "Configuração geral",
+  "autopilot_thinking": "reagindo…",
   "autopilot_engaging": "Ligando…",
   "autopilot_log_empty": "Nenhuma decisão ainda.",
   "autopilot_log_approved": "🤖 aprovou",

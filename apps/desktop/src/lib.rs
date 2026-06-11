@@ -128,6 +128,7 @@ pub fn run() {
             tauri_commands::terminal::terminal_rename,
             tauri_commands::terminal::terminal_attach,
             tauri_commands::terminal::claude_pure_refresh_title,
+            tauri_commands::terminal::claude_pure_state,
             tauri_commands::attachments::attachment_save,
             tauri_commands::badge::set_taskbar_badge,
             tauri_commands::autopilot::autopilot_engage,

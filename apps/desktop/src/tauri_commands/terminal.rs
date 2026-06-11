@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::app_state::AppState;
-use crate::infra::pty::{PtyError, TerminalAttachSnapshot, TerminalInfo};
+use crate::infra::pty::{PtyError, PureState, TerminalAttachSnapshot, TerminalInfo};
 
 #[derive(Debug, Serialize, thiserror::Error)]
 #[serde(tag = "code", content = "message", rename_all = "snake_case")]
@@ -313,6 +313,24 @@ pub fn terminal_attach(
     state: State<'_, AppState>,
 ) -> Result<TerminalAttachSnapshot, TauriTerminalError> {
     Ok(state.pty.attach_snapshot(&input.id)?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PureStateInput {
+    pub session_id: AggregateId,
+}
+
+/// Ground-truth pure-turn dot state for a session. The frontend calls this on
+/// attach/focus to reconcile the sidebar dot, since the `pure-signal` events
+/// that normally drive it are fire-and-forget — a signal that fires while no
+/// listener is attached (session switch, panel remount) is lost, leaving the
+/// dot stuck (e.g. blue when a prompt is actually waiting → should be red).
+#[tauri::command]
+pub fn claude_pure_state(
+    input: PureStateInput,
+    state: State<'_, AppState>,
+) -> Result<PureState, TauriTerminalError> {
+    Ok(state.pty.pure_state(input.session_id))
 }
 
 #[derive(Debug, Deserialize)]

@@ -164,6 +164,20 @@ pub struct TerminalAttachSnapshot {
     pub last_seq: u64,
 }
 
+/// Current pure-turn dot state for a session, reconstructed from the live
+/// `PureSniffer` + idle watchdog. Pure signals (`needs_input` / `working` /
+/// `turn_ended`) are fire-and-forget Tauri events latched once per turn — if no
+/// frontend listener is attached when one fires (a session switch, a panel
+/// remount), it's lost and the sidebar dot is left stale. The frontend calls
+/// `claude_pure_state` on attach/focus to re-sync the dot to ground truth.
+#[derive(Debug, Default, Serialize)]
+pub struct PureState {
+    /// A prompt/menu is on screen — the red "wants input" dot.
+    pub needs_input: bool,
+    /// A turn is in flight with no prompt waiting — the blue "busy" dot.
+    pub busy: bool,
+}
+
 /// What to launch inside a freshly-opened PTY.
 enum PtyProgram {
     /// The user's login shell (pwsh/cmd on Windows, login shell in WSL).
@@ -805,6 +819,34 @@ impl PtySupervisor {
             data,
             last_seq: rb.last_seq,
         })
+    }
+
+    /// Ground-truth pure-turn dot state for `session_id`, read straight off the
+    /// live sniffer + idle watchdog. Lets the frontend reconcile a dot that a
+    /// dropped (un-listened) pure-signal event left stale. No claude PTY for the
+    /// session → the default (idle) state.
+    pub fn pure_state(&self, session_id: AggregateId) -> PureState {
+        let terminals = self.terminals.lock().expect("pty mutex poisoned");
+        for t in terminals.values() {
+            if t.session_id != session_id || t.kind != TerminalKind::Claude {
+                continue;
+            }
+            let (needs_input, settled) = t
+                .pure
+                .as_ref()
+                .and_then(|p| p.lock().ok().map(|s| (s.prompt_open(), s.turn_settled())))
+                .unwrap_or((false, false));
+            let armed = t
+                .idle
+                .as_ref()
+                .and_then(|i| i.lock().ok().map(|st| st.armed))
+                .unwrap_or(false);
+            // A turn is "in flight" while the idle watchdog is armed and nothing
+            // has settled or paused it. `needs_input` outranks `busy` at the dot.
+            let busy = armed && !needs_input && !settled;
+            return PureState { needs_input, busy };
+        }
+        PureState::default()
     }
 
     /// Snapshot of every live terminal that belongs to a given session.

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Bot, Power, X } from "lucide-react";
 import { useAutopilotStore } from "~/stores/autopilotStore.ts";
+import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import {
   type AutopilotEvent,
   autopilotDisengage,
@@ -29,18 +30,24 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
   const hydrate = useAutopilotStore((s) => s.hydrate);
   const mission = useAutopilotStore((s) => s.mission[sessionId] ?? "");
   const enabled = useAutopilotStore((s) => s.enabled[sessionId] ?? false);
+  const thinking = useAutopilotStore((s) => s.thinking[sessionId] ?? false);
   const config = useAutopilotStore((s) => s.config[sessionId]);
   const log = useAutopilotStore((s) => s.log[sessionId] ?? EMPTY_LOG);
   const setMission = useAutopilotStore((s) => s.setMission);
   const setEnabled = useAutopilotStore((s) => s.setEnabled);
   const setConfig = useAutopilotStore((s) => s.setConfig);
   const clearLog = useAutopilotStore((s) => s.clearLog);
+  // Endpoint / credentials / turn budget are app-wide, not per-thread.
+  const settings = useAppSettingsStore((s) => s.autopilot);
+  const setSettings = useAppSettingsStore((s) => s.setAutopilot);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const logLine = (e: AutopilotEvent): string => {
     switch (e.kind) {
+      case "thinking":
+        return t("autopilot_thinking");
       case "approved":
         return t("autopilot_log_approved");
       case "rejected":
@@ -66,28 +73,25 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const cfg = config ?? {
-    supervisor: "multi_model" as const,
-    model: "",
-    baseUrl: "",
-    apiKey: "",
-    maxTurns: 30,
-  };
+  const cfg = config ?? { supervisor: "multi_model" as const };
   const isMultiModel = cfg.supervisor === "multi_model";
   const canEnable = mission.trim().length > 0 && !busy;
+  // The active supervisor's model field maps onto the matching global setting.
+  const modelValue = isMultiModel ? settings.model : settings.claudeModel;
 
   const engage = async () => {
     setBusy(true);
     setError(null);
     try {
+      const model = (isMultiModel ? settings.model : settings.claudeModel).trim();
       await autopilotEngage({
         session_id: sessionId,
         mission,
         supervisor: cfg.supervisor,
-        ...(cfg.model.trim() ? { model: cfg.model.trim() } : {}),
-        ...(cfg.baseUrl.trim() ? { base_url: cfg.baseUrl.trim() } : {}),
-        ...(cfg.apiKey.trim() ? { api_key: cfg.apiKey.trim() } : {}),
-        ...(cfg.maxTurns != null ? { max_turns: cfg.maxTurns } : {}),
+        ...(model ? { model } : {}),
+        ...(settings.baseUrl.trim() ? { base_url: settings.baseUrl.trim() } : {}),
+        ...(settings.apiKey.trim() ? { api_key: settings.apiKey.trim() } : {}),
+        ...(settings.maxTurns != null ? { max_turns: settings.maxTurns } : {}),
       });
       clearLog(sessionId);
       setEnabled(sessionId, true);
@@ -122,12 +126,23 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
       >
         <div className="mb-2 flex items-center gap-2">
           <Bot
-            className={enabled ? "size-4 text-emerald-400" : "size-4 text-neutral-400"}
+            className={`size-4 ${
+              thinking
+                ? "animate-spin text-emerald-400"
+                : enabled
+                  ? "text-emerald-400"
+                  : "text-neutral-400"
+            }`}
             strokeWidth={1.75}
           />
           <span className="text-[12px] font-medium text-neutral-100">
             {t("autopilot_heading")}
           </span>
+          {thinking && (
+            <span className="text-[10px] text-emerald-400/80">
+              {t("autopilot_thinking")}
+            </span>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -180,13 +195,27 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
             </select>
           </label>
 
+          <div className="mb-3 mt-1 flex items-center gap-2">
+            <div className="h-px flex-1 bg-neutral-800" />
+            <span className="text-[9px] font-medium uppercase tracking-wider text-neutral-600">
+              {t("autopilot_global_settings")}
+            </span>
+            <div className="h-px flex-1 bg-neutral-800" />
+          </div>
+
           <label className="mb-3 block">
             <span className="mb-1 block text-[11px] text-neutral-400">
               {t("autopilot_model_label")}
             </span>
             <input
-              value={cfg.model}
-              onChange={(e) => setConfig(sessionId, { model: e.target.value })}
+              value={modelValue}
+              onChange={(e) =>
+                setSettings(
+                  isMultiModel
+                    ? { model: e.target.value }
+                    : { claudeModel: e.target.value },
+                )
+              }
               placeholder={
                 isMultiModel
                   ? t("autopilot_model_placeholder_openai")
@@ -204,10 +233,8 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
                   {t("autopilot_base_url_label")}
                 </span>
                 <input
-                  value={cfg.baseUrl}
-                  onChange={(e) =>
-                    setConfig(sessionId, { baseUrl: e.target.value })
-                  }
+                  value={settings.baseUrl}
+                  onChange={(e) => setSettings({ baseUrl: e.target.value })}
                   placeholder={t("autopilot_base_url_placeholder")}
                   disabled={enabled}
                   className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700 disabled:opacity-60"
@@ -219,10 +246,8 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
                 </span>
                 <input
                   type="password"
-                  value={cfg.apiKey}
-                  onChange={(e) =>
-                    setConfig(sessionId, { apiKey: e.target.value })
-                  }
+                  value={settings.apiKey}
+                  onChange={(e) => setSettings({ apiKey: e.target.value })}
                   placeholder={t("autopilot_api_key_placeholder")}
                   disabled={enabled}
                   className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700 disabled:opacity-60"
@@ -238,9 +263,9 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
             <input
               type="number"
               min={1}
-              value={cfg.maxTurns ?? ""}
+              value={settings.maxTurns ?? ""}
               onChange={(e) =>
-                setConfig(sessionId, {
+                setSettings({
                   maxTurns: e.target.value ? Number(e.target.value) : null,
                 })
               }

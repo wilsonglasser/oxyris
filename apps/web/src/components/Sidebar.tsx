@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getVersion } from "@tauri-apps/api/app";
 import {
+  Bot,
   ChevronDown,
   ChevronRight,
   GitBranch,
@@ -36,6 +37,7 @@ import {
 import { projectReorder, type ProjectRow } from "~/ipc/commands.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
+import { useAutopilotStore } from "~/stores/autopilotStore.ts";
 import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
 import {
@@ -46,6 +48,7 @@ import {
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { localEnvLabel } from "~/lib/host.ts";
 import { onPureSignal } from "~/ipc/terminal.ts";
+import { onAutopilotEvent } from "~/ipc/autopilot.ts";
 
 interface Props {
   onNewProject: () => void;
@@ -307,6 +310,19 @@ export function Sidebar({
             setBusy(s.id, true);
             setNeedsInput(s.id, false);
             break;
+        }
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlistens.push(fn);
+      });
+      // Keep the sidebar's robot glyph honest for backgrounded pilots: when the
+      // backend halts/errors a thread we're not viewing, clear its engaged flag
+      // here (PureSessionView only listens for the active session).
+      void onAutopilotEvent(s.id, (event) => {
+        const store = useAutopilotStore.getState();
+        store.setThinking(s.id, event.kind === "thinking");
+        if (event.kind === "halted" || event.kind === "error") {
+          store.setEnabled(s.id, false);
         }
       }).then((fn) => {
         if (cancelled) fn();
@@ -868,6 +884,10 @@ function SessionEntry({
   // last_activity_at). Feeds StatusDot's green "recent" window.
   const liveActivityAt = useSessionStore((s) => s.liveActivity[session.id]);
   const busy = useBusyStore((s) => !!s.busy[session.id]);
+  // Auto-pilot engaged → the status dot becomes a robot (same color meaning),
+  // so a thread being driven hands-free is recognizable from any tab.
+  const autopilot = useAutopilotStore((s) => !!s.enabled[session.id]);
+  const autopilotThinking = useAutopilotStore((s) => !!s.thinking[session.id]);
 
   const onRename = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -933,6 +953,8 @@ function SessionEntry({
           attention={needsAttention}
           needsInput={needsInput}
           busy={busy}
+          autopilot={autopilot}
+          autopilotThinking={autopilotThinking}
           lastActivityAt={session.last_activity_at}
           liveActivityAt={liveActivityAt}
         />
@@ -1020,6 +1042,8 @@ function StatusDot({
   attention,
   needsInput,
   busy,
+  autopilot,
+  autopilotThinking,
   lastActivityAt,
   liveActivityAt,
 }: {
@@ -1027,14 +1051,50 @@ function StatusDot({
   attention?: boolean;
   needsInput?: boolean;
   busy?: boolean;
+  /** Auto-pilot engaged → render a robot glyph in the dot's color, not a dot. */
+  autopilot?: boolean;
+  /** Pilot is mid-step (consulting the Supervisor) → spin the robot. */
+  autopilotThinking?: boolean;
   lastActivityAt: string;
   /** Wall-clock ms of last live PTY output (pure threads); overrides recency. */
   liveActivityAt?: number | undefined;
 }) {
-  // Needs you → red. Outranks everything: a paused turn can still be "busy".
-  if (needsInput || status === "errored") {
+  // Resolve the single color the dot would have, highest priority first. The
+  // robot variant reuses these exact colors so the meaning is unchanged.
+  const recent =
+    isRecent(lastActivityAt) ||
+    (liveActivityAt !== undefined && Date.now() - liveActivityAt < RECENT_MS);
+  // Literal class strings (not built via concat) so Tailwind's JIT emits them.
+  const red = needsInput || status === "errored";
+  const dotBg = red
+    ? "bg-red-500"
+    : busy
+      ? "bg-sky-400"
+      : attention
+        ? "bg-orange-400"
+        : recent
+          ? "bg-emerald-400"
+          : "bg-neutral-600";
+
+  if (autopilot) {
+    // Same color, robot shape. Pulses while a turn is in flight (mirrors the
+    // dot's blue ping) so an actively-driven thread still reads as "working".
+    const text = red
+      ? "text-red-500"
+      : busy
+        ? "text-sky-400"
+        : attention
+          ? "text-orange-400"
+          : recent
+            ? "text-emerald-400"
+            : "text-neutral-600";
     return (
-      <span className="inline-block size-1.5 shrink-0 rounded-full bg-red-500" />
+      <Bot
+        className={`size-3 shrink-0 ${text} ${
+          autopilotThinking ? "animate-spin" : busy ? "animate-pulse" : ""
+        }`}
+        strokeWidth={2}
+      />
     );
   }
   // A turn in flight → blue, pulsing, so "working" reads at a glance.
@@ -1046,18 +1106,8 @@ function StatusDot({
       </span>
     );
   }
-  // Finished while you were away → orange until you open it.
-  if (attention) {
-    return (
-      <span className="inline-block size-1.5 shrink-0 rounded-full bg-orange-400" />
-    );
-  }
-  const recent =
-    isRecent(lastActivityAt) ||
-    (liveActivityAt !== undefined && Date.now() - liveActivityAt < RECENT_MS);
-  const color = recent ? "bg-emerald-400" : "bg-neutral-600";
   return (
-    <span className={`inline-block size-1.5 shrink-0 rounded-full ${color}`} />
+    <span className={`inline-block size-1.5 shrink-0 rounded-full ${dotBg}`} />
   );
 }
 

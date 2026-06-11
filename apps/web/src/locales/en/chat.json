@@ -189,6 +189,8 @@
   "autopilot_api_key_label": "API key",
   "autopilot_api_key_placeholder": "sk-…  (stored locally)",
   "autopilot_max_turns_label": "Turn budget (blank = unlimited)",
+  "autopilot_global_settings": "Global settings",
+  "autopilot_thinking": "reacting…",
   "autopilot_engaging": "Engaging…",
   "autopilot_log_empty": "No decisions yet.",
   "autopilot_log_approved": "🤖 approved",

@@ -27,6 +27,7 @@ export async function autopilotDisengage(sessionId: string): Promise<void> {
 
 /** Decision/outcome the backend pilot emits, mirroring `AutopilotEvent`. */
 export type AutopilotEvent =
+  | { kind: "thinking" }
   | { kind: "approved" }
   | { kind: "rejected"; reason: string }
   | { kind: "replied"; text: string }

@@ -30,7 +30,7 @@ import { useDragResize } from "~/lib/useDragResize.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
 import { sessionStart } from "~/ipc/session.ts";
-import { onPureSignal } from "~/ipc/terminal.ts";
+import { claudePureState, onPureSignal } from "~/ipc/terminal.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import { useIndexingStore } from "~/stores/indexingStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
@@ -133,6 +133,20 @@ export function App() {
     if (!sid || !activeIsPure) return;
     let cancelled = false;
     let unlisten: (() => void) | null = null;
+    // Re-sync the dot to backend ground truth. Pure signals are fire-and-forget
+    // and latch once per turn — one that fires before this listener attaches (a
+    // session switch, a panel remount) is lost, leaving the dot stale (e.g.
+    // stuck blue while a prompt is actually waiting → should be red). Reconcile
+    // on attach + focus so the dot can't drift from the live sniffer.
+    const reconcile = () => {
+      void claudePureState({ session_id: sid })
+        .then((st) => {
+          if (cancelled) return;
+          useSessionStore.getState().setNeedsInput(sid, st.needs_input);
+          useBusyStore.getState().setBusy(sid, st.busy && !st.needs_input);
+        })
+        .catch(() => {});
+    };
     void onPureSignal(sid, (signal) => {
       useSessionStore.getState().touchActivity(sid);
       switch (signal) {
@@ -148,12 +162,19 @@ export function App() {
           break;
       }
     }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+      // Listener is live; now pick up any signal that already latched.
+      reconcile();
     });
+    window.addEventListener("focus", reconcile);
     return () => {
       cancelled = true;
       unlisten?.();
+      window.removeEventListener("focus", reconcile);
       // Switching to another session: don't strand a stuck dot on this one.
       useBusyStore.getState().setBusy(sid, false);
     };
