@@ -1,0 +1,21 @@
+[package]
+name = "oxyris-watch"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Ignore-aware, per-directory filesystem watcher shared by the desktop backend and the WSL agent."
+
+[dependencies]
+ignore.workspace = true
+notify.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+tracing.workspace = true
+oxyris-ipc.workspace = true
+
+[dev-dependencies]
+tempfile = "3.16"
+tokio = { workspace = true, features = ["full"] }

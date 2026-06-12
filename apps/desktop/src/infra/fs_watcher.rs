@@ -1,25 +1,27 @@
 //! Worktree-scoped filesystem watcher that emits `fs:changed` events to the
-//! frontend so the file tree can refresh affected directories without the
-//! user manually clicking refresh.
+//! frontend (so the file tree refreshes without a manual click) **and** drives
+//! the symbol index incrementally — one watch feeding both consumers.
 //!
-//! Windows projects only — `notify` over the WSL 9p bridge is unreliable
-//! enough that we skip it and let WSL projects rely on the manual refresh
-//! button (same tradeoff `IndexingService` makes; see its doc comment).
+//! Windows projects use a native [`oxyris_watch::DirWatcher`] (ignore-aware,
+//! per-directory, so `node_modules`/`target` are never watched). WSL projects
+//! delegate to the per-distro agent (see [`WslFsWatchService`]), which runs the
+//! same watcher inside the distro on native inotify — `notify` over the 9p
+//! `\\wsl.localhost` bridge is unreliable, so we never watch it from Windows.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use notify::{EventKind, RecursiveMode, Watcher};
 use oxyris_core::{AggregateId, Environment};
 use oxyris_ipc::ops::{FsWatchEvent, op_name};
+use oxyris_watch::DirWatcher;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 use crate::infra::agent_pool::AgentPool;
+use crate::infra::indexing::IndexingService;
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -31,13 +33,8 @@ pub struct FsChangedEvent {
     pub paths: Vec<String>,
 }
 
-struct WatchHandle {
-    _watcher: notify::RecommendedWatcher,
-    _drain: tokio::task::JoinHandle<()>,
-}
-
 pub struct FsWatchService {
-    inner: Mutex<HashMap<AggregateId, Arc<WatchHandle>>>,
+    inner: Mutex<HashMap<AggregateId, Arc<DirWatcher>>>,
 }
 
 impl FsWatchService {
@@ -47,15 +44,21 @@ impl FsWatchService {
         }
     }
 
-    /// Start a recursive watcher for `worktree_id` rooted at `worktree_root`.
-    /// Idempotent — calling twice for the same worktree is a no-op. WSL
-    /// projects are silently skipped.
+    /// Start the watcher for `worktree_id` rooted at `worktree_root`. Idempotent
+    /// — calling twice for the same worktree is a no-op. WSL projects are
+    /// silently skipped (the agent-side [`WslFsWatchService`] covers them).
+    ///
+    /// The watcher's sink does two things per debounced batch: emit `fs:changed`
+    /// to the frontend, and hand the changed paths to [`IndexingService`] for an
+    /// incremental re-index. That replaces the old standalone index watcher, so
+    /// each worktree now has exactly one OS watch instead of two.
     pub async fn ensure(
         &self,
         app: AppHandle,
         worktree_id: AggregateId,
         env: &Environment,
         worktree_root: String,
+        indexing: Arc<IndexingService>,
     ) {
         if !matches!(env, Environment::Local) {
             return;
@@ -66,7 +69,43 @@ impl FsWatchService {
                 return;
             }
         }
-        match start_watcher(app, worktree_id, worktree_root) {
+
+        let root = PathBuf::from(&worktree_root);
+        let root_for_rel = root.clone();
+        let root_str = worktree_root.clone();
+        let wid = worktree_id;
+        let sink = move |batch: Vec<PathBuf>| {
+            // 1. Tree refresh — worktree-relative, forward slashes. Ignored
+            //    paths (`node_modules`, `.oxyris`, …) never reach here; the
+            //    DirWatcher filters them before the sink.
+            let rels: Vec<String> = batch
+                .iter()
+                .filter_map(|p| {
+                    p.strip_prefix(&root_for_rel)
+                        .ok()
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                })
+                .collect();
+            if !rels.is_empty() {
+                let event = FsChangedEvent {
+                    worktree_id: wid,
+                    paths: rels,
+                };
+                if let Err(e) = app.emit("fs:changed", &event) {
+                    tracing::debug!(error = %e, "fs_watcher: emit failed");
+                }
+            }
+            // 2. Incremental index update — offloaded so the sink stays cheap.
+            let indexing = indexing.clone();
+            let root_str = root_str.clone();
+            tokio::spawn(async move {
+                indexing
+                    .apply_local_changes(wid, &Environment::Local, &root_str, batch)
+                    .await;
+            });
+        };
+
+        match DirWatcher::start(root, DEBOUNCE, sink) {
             Ok(handle) => {
                 let mut map = self.inner.lock().await;
                 map.insert(worktree_id, Arc::new(handle));
@@ -82,102 +121,6 @@ impl Default for FsWatchService {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn start_watcher(
-    app: AppHandle,
-    worktree_id: AggregateId,
-    worktree_root: String,
-) -> Result<WatchHandle, notify::Error> {
-    let root = PathBuf::from(&worktree_root);
-    let pending: Arc<StdMutex<HashSet<PathBuf>>> = Arc::new(StdMutex::new(HashSet::new()));
-    let pending_for_cb = pending.clone();
-
-    let mut watcher =
-        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-            Ok(event) => {
-                if !matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                ) {
-                    return;
-                }
-                let mut p = match pending_for_cb.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                for path in event.paths {
-                    p.insert(path);
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "fs_watcher: notify error");
-            }
-        })?;
-    watcher.watch(&root, RecursiveMode::Recursive)?;
-
-    let drain = tokio::spawn(drain_loop(pending, app, worktree_id, root));
-
-    Ok(WatchHandle {
-        _watcher: watcher,
-        _drain: drain,
-    })
-}
-
-async fn drain_loop(
-    pending: Arc<StdMutex<HashSet<PathBuf>>>,
-    app: AppHandle,
-    worktree_id: AggregateId,
-    root: PathBuf,
-) {
-    let mut tick = tokio::time::interval(DEBOUNCE);
-    tick.tick().await; // skip the immediate first tick
-
-    loop {
-        tick.tick().await;
-        let batch: Vec<PathBuf> = {
-            let mut p = match pending.lock() {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-            if p.is_empty() {
-                continue;
-            }
-            p.drain().collect()
-        };
-
-        let mut rels: Vec<String> = Vec::with_capacity(batch.len());
-        for path in batch {
-            let rel = match path.strip_prefix(&root) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            // Skip our own scratch dir + git internals so we don't
-            // re-render the tree on every WAL write.
-            if first_segment_is(rel, ".oxyris") || first_segment_is(rel, ".git") {
-                continue;
-            }
-            rels.push(rel.to_string_lossy().replace('\\', "/"));
-        }
-        if rels.is_empty() {
-            continue;
-        }
-
-        let event = FsChangedEvent {
-            worktree_id,
-            paths: rels,
-        };
-        if let Err(e) = app.emit("fs:changed", &event) {
-            tracing::debug!(error = %e, "fs_watcher: emit failed");
-        }
-    }
-}
-
-fn first_segment_is(rel: &Path, name: &str) -> bool {
-    rel.components()
-        .next()
-        .map(|c| c.as_os_str() == name)
-        .unwrap_or(false)
 }
 
 /// WSL counterpart to [`FsWatchService`]. The Windows `notify` watcher can't
@@ -204,6 +147,11 @@ impl WslFsWatchService {
     /// worktree). No-op for non-WSL projects. If the agent later dies, the
     /// stream ends and the worktree is disarmed so the next dir listing
     /// re-arms it against a fresh agent.
+    ///
+    /// Emits a `fs:changed` event per change batch for the file tree. The
+    /// symbol index is kept fresh by the agent itself — the same in-distro
+    /// watcher updates the in-distro index directly, so nothing index-related
+    /// crosses stdio here.
     pub async fn ensure(
         &self,
         app: AppHandle,

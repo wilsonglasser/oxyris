@@ -14,6 +14,7 @@ members = [
     "crates/oxyris-provider",
     "crates/oxyris-claude",
     "crates/oxyris-supervisor",
+    "crates/oxyris-watch",
 ]
 
 [workspace.package]
@@ -84,6 +85,7 @@ oxyris-procutil = { path = "crates/oxyris-procutil" }
 oxyris-provider = { path = "crates/oxyris-provider" }
 oxyris-claude = { path = "crates/oxyris-claude" }
 oxyris-supervisor = { path = "crates/oxyris-supervisor" }
+oxyris-watch = { path = "crates/oxyris-watch" }
 
 [profile.dev]
 opt-level = 0

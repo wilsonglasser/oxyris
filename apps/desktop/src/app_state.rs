@@ -162,7 +162,7 @@ impl AppState {
         // on thread delete; this catches the ones delete can't reach.
         spawn_pending_attachment_sweep(data_dir.clone());
 
-        let indexing = Arc::new(IndexingService::new(data_dir.clone(), agent_pool.clone()));
+        let indexing = Arc::new(IndexingService::new(agent_pool.clone()));
         let fs_watcher = Arc::new(FsWatchService::new());
         let wsl_fs_watcher = Arc::new(WslFsWatchService::new(agent_pool.clone()));
         let app_for_packs = app_for_lsp.clone();

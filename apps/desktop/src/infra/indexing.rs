@@ -1,41 +1,41 @@
 //! Per-worktree symbol index orchestration.
 //!
 //! Holds an [`oxyris_index::Index`] per worktree, opened lazily on first
-//! query or rebuild.
+//! query or rebuild. Incremental updates are driven by the filesystem
+//! watcher, not by this module — it just exposes `apply_*_changes` sinks the
+//! watcher calls (see [`crate::infra::fs_watcher`]).
 //!
-//! - **Windows worktrees**: index lives at `<worktree>/.oxyris/index.db`
-//!   so it travels with the worktree (and is dropped when the worktree is
-//!   removed). A [`notify`] file watcher debounces changes and re-indexes
-//!   modified files automatically.
-//! - **WSL worktrees**: SQLite needs random-access local FS, so we keep
-//!   the DB at `<data_dir>/wsl-index/<short>.db` on the Windows side and
-//!   walk files via the agent's `fs.walk` + `fs.read` ops. No watcher
-//!   (`notify` over 9p is unreliable); manual `ensure_ready` rebuilds.
+//! - **Windows worktrees**: index lives at `<worktree>/.oxyris/index.db` so
+//!   it travels with the worktree (and is dropped when the worktree is
+//!   removed). `FsWatchService`'s [`oxyris_watch::DirWatcher`] feeds
+//!   [`IndexingService::apply_local_changes`].
+//! - **WSL worktrees**: SQLite needs random-access local FS, so we keep the
+//!   DB at `<data_dir>/wsl-index/<short>.db` on the Windows side and walk
+//!   files via the agent's `fs.walk` + `fs.read` ops. The agent runs the
+//!   same ignore-aware watcher *inside* the distro (native inotify, reliable
+//!   unlike `notify` over 9p) and streams changes back to
+//!   [`IndexingService::apply_wsl_changes`]. A full rebuild still backs the
+//!   cold-start / manual `ensure_ready` path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
-use notify::{EventKind, RecursiveMode, Watcher};
 use oxyris_core::{AggregateId, Environment};
-use oxyris_index::{Index, Lang};
-use oxyris_ipc::ops::{FsReadArgs, FsReadResult, FsWalkArgs, FsWalkEvent, op_name};
+use oxyris_index::{Index, IndexStats, Lang, ProjectMap, Symbol, SymbolHit, SymbolKind};
+use oxyris_ipc::ops::{
+    IndexListInFileArgs, IndexQuerySymbolArgs, IndexRebuildProgress, IndexRebuildReport,
+    IndexRootArgs, op_name,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::infra::agent_pool::AgentPool;
-use crate::infra::env_template::short_id;
 
 const MAX_FILE_BYTES: u64 = 1_000_000;
-const WATCHER_DEBOUNCE: Duration = Duration::from_millis(250);
-/// How often the WSL poll loop re-walks the worktree. `notify` over the
-/// 9p mount is unreliable (missed events, dup fires), so we poll instead.
-/// 60 s is a compromise between staleness and the cost of a full
-/// `fs.walk` over the agent — typical projects rebuild in <1 s.
-const WSL_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum IndexingError {
@@ -88,154 +88,234 @@ pub type ProgressSender = mpsc::UnboundedSender<IndexingProgress>;
 
 struct IndexEntry {
     index: Arc<Index>,
-    /// `None` when the OS refused to install a watcher — we keep the index
-    /// usable rather than fail-loud, since manual rebuild still works.
-    _watch: Option<WorktreeWatch>,
-}
-
-/// RAII handle for the file watcher and its drain loop. Both are torn down
-/// when this is dropped.
-struct WorktreeWatch {
-    /// Held to keep the watcher alive; `notify` stops watching on drop.
-    _watcher: notify::RecommendedWatcher,
-    drain_handle: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for WorktreeWatch {
-    fn drop(&mut self) {
-        self.drain_handle.abort();
-    }
 }
 
 pub struct IndexingService {
     entries: Mutex<HashMap<AggregateId, IndexEntry>>,
-    /// Where to put SQLite caches for WSL worktrees (Windows-side, since
-    /// SQLite over 9p is slow and crash-prone).
-    data_dir: PathBuf,
     agent_pool: Arc<AgentPool>,
-    /// Worktrees that already have a poll loop running. Prevents
-    /// `start_wsl_poll` from stacking multiple loops when a session
-    /// activates the same worktree several times.
-    wsl_polls: Mutex<HashSet<AggregateId>>,
 }
 
 impl IndexingService {
-    pub fn new(data_dir: PathBuf, agent_pool: Arc<AgentPool>) -> Self {
+    pub fn new(agent_pool: Arc<AgentPool>) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
-            data_dir,
             agent_pool,
-            wsl_polls: Mutex::new(HashSet::new()),
         }
     }
 
-    /// Spin up a periodic re-index loop for a WSL worktree. Idempotent —
-    /// re-calling for the same worktree is a no-op. The loop exits silently
-    /// when individual rebuild attempts fail; transient agent issues
-    /// recover on the next tick. There's no clean shutdown handle today;
-    /// loops live for the desktop process lifetime (acceptable: each is
-    /// cheap when nothing has changed).
-    pub fn start_wsl_poll(
-        self: &Arc<Self>,
-        worktree_id: AggregateId,
-        env: Environment,
-        worktree_root: String,
-    ) {
-        let me = self.clone();
-        tauri::async_runtime::spawn(async move {
-            {
-                let mut started = me.wsl_polls.lock().await;
-                if !started.insert(worktree_id) {
-                    return;
-                }
-            }
-            tracing::info!(worktree_id = %worktree_id, "wsl indexing poll started");
-            let mut tick = tokio::time::interval(WSL_POLL_INTERVAL);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            tick.tick().await; // skip initial immediate tick
-            loop {
-                tick.tick().await;
-                // No progress channel — these reindexes are background hygiene,
-                // not user-initiated. Errors get debug-logged so a flaky agent
-                // doesn't fill the trace.
-                match me.rebuild(worktree_id, &env, &worktree_root, None).await {
-                    Ok(report) if report.files_indexed > 0 => {
-                        tracing::debug!(
-                            worktree_id = %worktree_id,
-                            files = report.files_indexed,
-                            "wsl poll reindex"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::debug!(worktree_id = %worktree_id, error = %e, "wsl poll skipped");
-                    }
-                }
-            }
-        });
-    }
-
-    /// Open (or reuse) the on-disk index for a worktree. For Windows
-    /// worktrees the DB lives in-tree at `<worktree>/.oxyris/index.db`
-    /// and gets a `notify` watcher. For WSL worktrees the DB is cached
-    /// in `<data_dir>/wsl-index/<short>.db` on the Windows side and has
-    /// no watcher (manual rebuild only).
+    /// Open (or reuse) the in-process on-disk index for a **Windows** worktree
+    /// (`<worktree>/.oxyris/index.db`). WSL worktrees keep their index inside
+    /// the distro (the agent owns it) and must never reach here — callers
+    /// branch on `env` and delegate WSL ops to the agent instead.
+    ///
+    /// Incremental updates are driven externally by
+    /// [`FsWatchService`](crate::infra::fs_watcher::FsWatchService) via
+    /// [`apply_local_changes`](Self::apply_local_changes), so opening installs
+    /// no watcher of its own.
     pub async fn open_for(
         &self,
         worktree_id: AggregateId,
         env: &Environment,
         worktree_root: &str,
     ) -> Result<Arc<Index>, IndexingError> {
+        if !matches!(env, Environment::Local) {
+            return Err(IndexingError::Agent(
+                "open_for is Windows-only; WSL indexes live in the distro".to_owned(),
+            ));
+        }
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.get(&worktree_id) {
             return Ok(entry.index.clone());
         }
-        let db_path = self.index_db_path(worktree_id, env, worktree_root);
+        let db_path = self.index_db_path(worktree_root);
         let idx = tokio::task::spawn_blocking(move || Index::open(&db_path))
             .await
             .map_err(|e| IndexingError::Io(std::io::Error::other(e.to_string())))??;
         let index = Arc::new(idx);
-
-        // Watcher only for Windows — `notify` over 9p (\\wsl.localhost)
-        // either misses events or fires duplicates depending on the
-        // backend. Skip cleanly for WSL; rebuild covers updates.
-        let watch = if matches!(env, Environment::Local) {
-            match start_watcher(index.clone(), worktree_root) {
-                Ok(w) => Some(w),
-                Err(e) => {
-                    tracing::warn!(error = %e, worktree = %worktree_root, "file watcher disabled for worktree");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         entries.insert(
             worktree_id,
             IndexEntry {
                 index: index.clone(),
-                _watch: watch,
             },
         );
         Ok(index)
     }
 
-    fn index_db_path(
+    /// Apply a batch of changed absolute paths to a Windows worktree's index
+    /// incrementally — the sink the [`FsWatchService`] watcher calls. Each path
+    /// is re-indexed if its mtime moved, removed if it's gone, and skipped if
+    /// it's ignored / unparseable. No-op for non-Local environments (WSL is
+    /// handled inside the agent).
+    ///
+    /// [`FsWatchService`]: crate::infra::fs_watcher::FsWatchService
+    pub async fn apply_local_changes(
         &self,
         worktree_id: AggregateId,
         env: &Environment,
         worktree_root: &str,
-    ) -> PathBuf {
-        match env {
-            Environment::Local => PathBuf::from(worktree_root)
-                .join(".oxyris")
-                .join("index.db"),
-            Environment::Wsl { .. } => self
-                .data_dir
-                .join("wsl-index")
-                .join(format!("{}.db", short_id(worktree_id))),
+        paths: Vec<PathBuf>,
+    ) {
+        if !matches!(env, Environment::Local) {
+            return;
         }
+        let index = match self.open_for(worktree_id, env, worktree_root).await {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::debug!(%worktree_id, error = %e, "apply_local_changes: open failed");
+                return;
+            }
+        };
+        let root = PathBuf::from(worktree_root);
+        let _ = tokio::task::spawn_blocking(move || {
+            for path in paths {
+                process_change(&path, &root, &index);
+            }
+        })
+        .await;
+    }
+
+    // ── symbol queries ──────────────────────────────────────────────────
+    //
+    // Local worktrees query the in-process `Index` directly; WSL worktrees
+    // delegate to the agent (the index lives inside the distro), deserializing
+    // the same `oxyris_index` result types off the wire.
+
+    /// Find symbols by name (optionally filtered by kind), capped at `limit`.
+    pub async fn query_symbol(
+        &self,
+        worktree_id: AggregateId,
+        env: &Environment,
+        worktree_root: &str,
+        name: String,
+        kind: Option<SymbolKind>,
+        limit: u32,
+    ) -> Result<Vec<SymbolHit>, IndexingError> {
+        match env {
+            Environment::Local => {
+                let index = self.open_for(worktree_id, env, worktree_root).await?;
+                tokio::task::spawn_blocking(move || index.find_symbol(&name, kind, limit))
+                    .await
+                    .map_err(|e| IndexingError::Io(std::io::Error::other(e.to_string())))?
+                    .map_err(IndexingError::Index)
+            }
+            Environment::Wsl { distro } => {
+                let args = serde_json::to_value(IndexQuerySymbolArgs {
+                    root: worktree_root.to_owned(),
+                    name,
+                    kind: kind.map(|k| k.as_str().to_owned()),
+                    limit,
+                })?;
+                let v = self
+                    .agent_pool
+                    .call(distro, op_name::INDEX_QUERY_SYMBOL, args)
+                    .await
+                    .map_err(|e| IndexingError::Agent(e.to_string()))?;
+                Ok(serde_json::from_value(v)?)
+            }
+        }
+    }
+
+    /// List the symbols declared in one file (worktree-relative path).
+    pub async fn list_symbols_in_file(
+        &self,
+        worktree_id: AggregateId,
+        env: &Environment,
+        worktree_root: &str,
+        file: String,
+    ) -> Result<Vec<Symbol>, IndexingError> {
+        match env {
+            Environment::Local => {
+                let index = self.open_for(worktree_id, env, worktree_root).await?;
+                tokio::task::spawn_blocking(move || index.list_symbols_in_file(&file))
+                    .await
+                    .map_err(|e| IndexingError::Io(std::io::Error::other(e.to_string())))?
+                    .map_err(IndexingError::Index)
+            }
+            Environment::Wsl { distro } => {
+                let args = serde_json::to_value(IndexListInFileArgs {
+                    root: worktree_root.to_owned(),
+                    file,
+                })?;
+                let v = self
+                    .agent_pool
+                    .call(distro, op_name::INDEX_LIST_IN_FILE, args)
+                    .await
+                    .map_err(|e| IndexingError::Agent(e.to_string()))?;
+                Ok(serde_json::from_value(v)?)
+            }
+        }
+    }
+
+    /// Directory-rollup view of the index for the project map UI.
+    pub async fn project_map(
+        &self,
+        worktree_id: AggregateId,
+        env: &Environment,
+        worktree_root: &str,
+    ) -> Result<ProjectMap, IndexingError> {
+        match env {
+            Environment::Local => {
+                let index = self.open_for(worktree_id, env, worktree_root).await?;
+                tokio::task::spawn_blocking(move || index.project_map())
+                    .await
+                    .map_err(|e| IndexingError::Io(std::io::Error::other(e.to_string())))?
+                    .map_err(IndexingError::Index)
+            }
+            Environment::Wsl { distro } => {
+                let v = self
+                    .agent_wsl(distro, op_name::INDEX_PROJECT_MAP, worktree_root)
+                    .await?;
+                Ok(serde_json::from_value(v)?)
+            }
+        }
+    }
+
+    /// `(files, symbols)` counts.
+    pub async fn stats(
+        &self,
+        worktree_id: AggregateId,
+        env: &Environment,
+        worktree_root: &str,
+    ) -> Result<IndexStats, IndexingError> {
+        match env {
+            Environment::Local => {
+                let index = self.open_for(worktree_id, env, worktree_root).await?;
+                tokio::task::spawn_blocking(move || index.stats())
+                    .await
+                    .map_err(|e| IndexingError::Io(std::io::Error::other(e.to_string())))?
+                    .map_err(IndexingError::Index)
+            }
+            Environment::Wsl { distro } => {
+                let v = self
+                    .agent_wsl(distro, op_name::INDEX_STATS, worktree_root)
+                    .await?;
+                Ok(serde_json::from_value(v)?)
+            }
+        }
+    }
+
+    /// Call a root-scoped agent index op (`stats`, `project_map`, …).
+    async fn agent_wsl(
+        &self,
+        distro: &str,
+        op: &str,
+        worktree_root: &str,
+    ) -> Result<serde_json::Value, IndexingError> {
+        let args = serde_json::to_value(IndexRootArgs {
+            root: worktree_root.to_owned(),
+        })?;
+        self.agent_pool
+            .call(distro, op, args)
+            .await
+            .map_err(|e| IndexingError::Agent(e.to_string()))
+    }
+
+    /// On-disk index location for a Windows worktree (in-tree, travels with
+    /// it). WSL indexes live inside the distro and are never opened here.
+    fn index_db_path(&self, worktree_root: &str) -> PathBuf {
+        PathBuf::from(worktree_root)
+            .join(".oxyris")
+            .join("index.db")
     }
 
     /// Drop the cached entry: closes the SQLite connection on last reference
@@ -257,23 +337,14 @@ impl IndexingService {
         worktree_root: &str,
         progress: Option<ProgressSender>,
     ) -> Result<RebuildReport, IndexingError> {
-        let index = self.open_for(worktree_id, env, worktree_root).await?;
-        let stats = {
-            let idx = index.clone();
-            tokio::task::spawn_blocking(move || idx.stats())
-                .await
-                .map_err(|e| IndexingError::Io(std::io::Error::other(e.to_string())))??
-        };
-        if stats.files > 0 {
-            // Already populated — incremental updates are handled by the
-            // file watcher started in `open_for`. Nothing to do.
-            return Ok(RebuildReport {
-                files_indexed: 0,
-                symbols_extracted: 0,
-                files_skipped: 0,
-                bytes_read: 0,
-                duration_ms: 0,
-            });
+        let populated = self
+            .stats(worktree_id, env, worktree_root)
+            .await
+            .map(|s| s.files > 0)
+            .unwrap_or(false);
+        if populated {
+            // Already populated — the watcher keeps it incremental from here.
+            return Ok(empty_report());
         }
         self.rebuild(worktree_id, env, worktree_root, progress)
             .await
@@ -281,7 +352,9 @@ impl IndexingService {
 
     /// Walk the worktree, re-indexing every file we have a parser for.
     /// Drops files that have disappeared. Respects `.gitignore` and the
-    /// standard ignore conventions of the `ignore` crate.
+    /// standard ignore conventions of the `ignore` crate. For WSL the walk +
+    /// parse run inside the distro (agent `index.rebuild`); only progress and
+    /// the final report cross stdio.
     pub async fn rebuild(
         &self,
         worktree_id: AggregateId,
@@ -289,9 +362,9 @@ impl IndexingService {
         worktree_root: &str,
         progress: Option<ProgressSender>,
     ) -> Result<RebuildReport, IndexingError> {
-        let index = self.open_for(worktree_id, env, worktree_root).await?;
         match env {
             Environment::Local => {
+                let index = self.open_for(worktree_id, env, worktree_root).await?;
                 let root = PathBuf::from(worktree_root);
                 if !root.is_dir() {
                     return Err(IndexingError::InvalidWorktreePath(worktree_root.to_owned()));
@@ -308,7 +381,6 @@ impl IndexingService {
                     distro.clone(),
                     worktree_id,
                     worktree_root,
-                    index,
                     progress,
                 )
                 .await
@@ -317,144 +389,57 @@ impl IndexingService {
     }
 }
 
-/// WSL-side rebuild: enumerate files via agent `fs.walk`, fetch contents
-/// via agent `fs.read`, parse with tree-sitter on the Windows side, write
-/// SQLite locally. Skips files larger than `MAX_FILE_BYTES` (signalled by
-/// `fs.walk` event size when present) and any unreadable entries.
+/// WSL-side rebuild: the walk + tree-sitter parse + SQLite write all run inside
+/// the distro (agent `index.rebuild`). The backend just forwards the streamed
+/// progress to the UI and maps the final report — no file contents cross stdio.
 async fn rebuild_wsl(
     agent: Arc<AgentPool>,
     distro: String,
     worktree_id: AggregateId,
     worktree_root: &str,
-    index: Arc<Index>,
     progress: Option<ProgressSender>,
 ) -> Result<RebuildReport, IndexingError> {
-    let started = Instant::now();
-    // Stream all paths first so we can hand off to a blocking parse loop
-    // without holding the agent's mpsc channel hostage. Agent walker
-    // already filters via .gitignore (it uses the `ignore` crate).
-    let walk_args = serde_json::to_value(FsWalkArgs {
+    let args = serde_json::to_value(IndexRootArgs {
         root: worktree_root.to_owned(),
-        ignore: vec![".oxyris".to_owned()],
-        max_entries: None,
     })?;
-    let (mut events_rx, _final) = agent
-        .call_streaming(&distro, op_name::FS_WALK, walk_args)
+    let (mut events_rx, final_result) = agent
+        .call_streaming(&distro, op_name::INDEX_REBUILD, args)
         .await
         .map_err(|e| IndexingError::Agent(e.to_string()))?;
 
-    let mut indexable_files: Vec<(String, u64)> = Vec::new();
+    // `call_streaming` resolves once the op is done, so every progress event is
+    // already buffered. Forward them: the first carries the file total
+    // (→ Started), the rest are running counts (→ Progress).
+    let mut started_sent = false;
     while let Some(event) = events_rx.recv().await {
-        let entry: FsWalkEvent = match serde_json::from_value(event) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(error = %e, "indexing: bad fs.walk event");
-                continue;
-            }
-        };
-        if entry.is_dir {
-            continue;
-        }
-        let path = Path::new(&entry.path);
-        if Lang::from_path(path).is_none() {
-            continue;
-        }
-        if is_generated(path, Path::new(worktree_root)) {
-            continue;
-        }
-        let size = entry.size.unwrap_or(0);
-        if size > MAX_FILE_BYTES {
-            continue;
-        }
-        indexable_files.push((entry.path, size));
-    }
-
-    let total_files = indexable_files.len() as u64;
-    if let Some(tx) = progress.as_ref() {
-        let _ = tx.send(IndexingProgress::Started {
-            worktree_id,
-            total_files,
-        });
-    }
-
-    // Pull each file via agent fs.read, parse + write SQLite locally.
-    let mut files_indexed: u64 = 0;
-    let mut symbols_extracted: u64 = 0;
-    let mut files_skipped: u64 = 0;
-    let mut bytes_read: u64 = 0;
-
-    for (file_path, _size) in indexable_files {
-        let read_args = serde_json::to_value(FsReadArgs {
-            path: file_path.clone(),
-            max_bytes: Some(MAX_FILE_BYTES),
-        })?;
-        let result = match agent.call(&distro, op_name::FS_READ, read_args).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!(file = %file_path, error = %e, "indexing wsl: fs.read failed");
-                files_skipped += 1;
-                continue;
-            }
-        };
-        let read: FsReadResult = match serde_json::from_value(result) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(file = %file_path, error = %e, "indexing wsl: bad fs.read result");
-                files_skipped += 1;
-                continue;
-            }
-        };
-        let path = Path::new(&file_path);
-        let Some(lang) = Lang::from_path(path) else {
-            files_skipped += 1;
+        let Ok(p) = serde_json::from_value::<IndexRebuildProgress>(event) else {
             continue;
         };
-        let relative = match path.strip_prefix(worktree_root) {
-            Ok(p) => p.to_string_lossy().replace('\\', "/"),
-            Err(_) => file_path.replace('\\', "/"),
-        };
-        // No mtime from fs.read — use 0 so subsequent runs always
-        // re-index. WSL rebuild is rare enough that this is fine.
-        let idx = index.clone();
-        let content = read.content;
-        let mtime = 0i64;
-        let n = match tokio::task::spawn_blocking(move || {
-            idx.index_file(&relative, lang, mtime, &content)
-        })
-        .await
-        {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => {
-                tracing::debug!(file = %file_path, error = %e, "indexing wsl: index_file failed");
-                files_skipped += 1;
-                continue;
+        if let Some(tx) = progress.as_ref() {
+            if !started_sent {
+                let _ = tx.send(IndexingProgress::Started {
+                    worktree_id,
+                    total_files: p.total_files,
+                });
+                started_sent = true;
+            } else {
+                let _ = tx.send(IndexingProgress::Progress {
+                    worktree_id,
+                    files_indexed: p.files_indexed,
+                    files_skipped: p.files_skipped,
+                });
             }
-            Err(e) => {
-                tracing::warn!(file = %file_path, error = %e, "indexing wsl: blocking task failed");
-                files_skipped += 1;
-                continue;
-            }
-        };
-        files_indexed += 1;
-        symbols_extracted += n as u64;
-        bytes_read += read.bytes_read;
-        if let Some(tx) = progress.as_ref()
-            && (files_indexed + files_skipped).is_multiple_of(25)
-        {
-            let _ = tx.send(IndexingProgress::Progress {
-                worktree_id,
-                files_indexed,
-                files_skipped,
-            });
         }
     }
 
+    let value = final_result.map_err(|e| IndexingError::Agent(e.to_string()))?;
+    let wire: IndexRebuildReport = serde_json::from_value(value)?;
     let report = RebuildReport {
-        files_indexed,
-        symbols_extracted,
-        files_skipped,
-        bytes_read,
-        duration_ms: started.elapsed().as_millis(),
+        files_indexed: wire.files_indexed,
+        symbols_extracted: wire.symbols_extracted,
+        files_skipped: wire.files_skipped,
+        bytes_read: wire.bytes_read,
+        duration_ms: wire.duration_ms,
     };
     if let Some(tx) = progress.as_ref() {
         let _ = tx.send(IndexingProgress::Done {
@@ -620,6 +605,16 @@ fn is_generated(path: &Path, root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn empty_report() -> RebuildReport {
+    RebuildReport {
+        files_indexed: 0,
+        symbols_extracted: 0,
+        files_skipped: 0,
+        bytes_read: 0,
+        duration_ms: 0,
+    }
+}
+
 fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
@@ -633,73 +628,12 @@ fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
         })
 }
 
-// ────── file watcher ───────────────────────────────────────────────────────
+// ────── incremental re-index ────────────────────────────────────────────────
 
-fn start_watcher(index: Arc<Index>, worktree_root: &str) -> Result<WorktreeWatch, notify::Error> {
-    let root = PathBuf::from(worktree_root);
-    let pending: Arc<StdMutex<HashSet<PathBuf>>> = Arc::new(StdMutex::new(HashSet::new()));
-    let pending_for_cb = pending.clone();
-
-    let mut watcher =
-        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-            Ok(event) => {
-                let interesting = matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                );
-                if !interesting {
-                    return;
-                }
-                let mut p = match pending_for_cb.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                for path in event.paths {
-                    p.insert(path);
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "notify watcher error");
-            }
-        })?;
-    watcher.watch(&root, RecursiveMode::Recursive)?;
-
-    let drain_handle = tokio::spawn(drain_loop(pending, index, root));
-
-    Ok(WorktreeWatch {
-        _watcher: watcher,
-        drain_handle,
-    })
-}
-
-async fn drain_loop(pending: Arc<StdMutex<HashSet<PathBuf>>>, index: Arc<Index>, root: PathBuf) {
-    let mut tick = tokio::time::interval(WATCHER_DEBOUNCE);
-    // First tick fires immediately; skip it so we don't process before any
-    // events arrive.
-    tick.tick().await;
-    loop {
-        tick.tick().await;
-        let batch: Vec<PathBuf> = {
-            let mut p = match pending.lock() {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-            if p.is_empty() {
-                continue;
-            }
-            p.drain().collect()
-        };
-        let index_clone = index.clone();
-        let root_clone = root.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            for path in batch {
-                process_change(&path, &root_clone, &index_clone);
-            }
-        })
-        .await;
-    }
-}
-
+/// Re-index (or drop) a single changed path. Called for each path in a watcher
+/// batch via [`IndexingService::apply_local_changes`]. Skips `.oxyris/` and
+/// generated/vendored paths, removes vanished files, and re-indexes the rest
+/// only when the mtime actually moved.
 fn process_change(path: &Path, root: &Path, index: &Index) {
     let rel = match path.strip_prefix(root) {
         Ok(r) => r,
@@ -740,7 +674,9 @@ fn process_change(path: &Path, root: &Path, index: &Index) {
         Err(_) => return,
     };
     let mtime = mtime_secs(&metadata);
-    if let Err(e) = index.index_file(&relative, lang, mtime, &content) {
-        tracing::debug!(file = %relative, error = %e, "watcher: index_file failed");
+    // `if_changed`: a watcher can fire on a touch/metadata-only event; skip the
+    // tree-sitter reparse when the mtime hasn't moved.
+    if let Err(e) = index.index_file_if_changed(&relative, lang, mtime, &content) {
+        tracing::debug!(file = %relative, error = %e, "reindex: index_file failed");
     }
 }

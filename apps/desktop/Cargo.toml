@@ -45,6 +45,7 @@ oxyris-procutil.workspace = true
 oxyris-provider.workspace = true
 oxyris-claude.workspace = true
 oxyris-supervisor.workspace = true
+oxyris-watch.workspace = true
 async-trait.workspace = true
 ignore.workspace = true
 regex.workspace = true

@@ -57,7 +57,13 @@ pub async fn fs_list_dir(
     // and silently no-op'd for WSL projects.
     state
         .fs_watcher
-        .ensure(app.clone(), input.worktree_id, &env, root.clone())
+        .ensure(
+            app.clone(),
+            input.worktree_id,
+            &env,
+            root.clone(),
+            state.indexing.clone(),
+        )
         .await;
     // WSL counterpart — native inotify inside the distro via the agent. Also
     // idempotent; no-op'd for Windows projects.

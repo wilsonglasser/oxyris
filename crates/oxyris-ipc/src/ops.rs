@@ -56,6 +56,15 @@ pub mod op_name {
     pub const GIT_CHERRY_PICK: &str = "git.cherry_pick";
     pub const GIT_REVERT: &str = "git.revert";
     pub const GIT_DIFF_REVS: &str = "git.diff_revs";
+    // Symbol index — runs entirely inside the distro (tree-sitter parse +
+    // SQLite on native ext4). The backend only sends queries and receives
+    // results; file contents never cross stdio.
+    pub const INDEX_ENSURE: &str = "index.ensure";
+    pub const INDEX_REBUILD: &str = "index.rebuild";
+    pub const INDEX_QUERY_SYMBOL: &str = "index.query_symbol";
+    pub const INDEX_LIST_IN_FILE: &str = "index.list_in_file";
+    pub const INDEX_PROJECT_MAP: &str = "index.project_map";
+    pub const INDEX_STATS: &str = "index.stats";
 }
 
 // ────── system.info ────────────────────────────────────────────────────────
@@ -185,6 +194,59 @@ pub struct FsWatchArgs {
 pub struct FsWatchEvent {
     /// Changed paths, relative to `root`, POSIX-separated. Debounced batch.
     pub paths: Vec<String>,
+}
+
+// ────── symbol index (in-distro) ───────────────────────────────────────────
+//
+// Query results (`SymbolHit`, `Symbol`, `ProjectMap`, `IndexStats`) flow back
+// as raw JSON `Value`s — those types live in `oxyris-index`, which this
+// protocol crate must not depend on. The desktop backend (which does depend on
+// `oxyris-index`) deserializes them; the agent serializes its own.
+
+/// Args for the root-scoped index ops: `ensure`, `rebuild`, `project_map`,
+/// `stats`. `root` is an absolute POSIX path inside the distro.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexRootArgs {
+    pub root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexQuerySymbolArgs {
+    pub root: String,
+    pub name: String,
+    /// Optional kind filter as its lowercase label (`function`, `struct`, …).
+    /// A label that doesn't match a known kind is treated as no filter.
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexListInFileArgs {
+    pub root: String,
+    /// Path relative to the worktree root, forward slashes.
+    pub file: String,
+}
+
+/// Progress event streamed during `index.rebuild` (under the request id),
+/// mirroring the desktop `IndexingProgress` so the backend can forward it to
+/// the UI. The first event of a run carries the file total.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexRebuildProgress {
+    pub total_files: u64,
+    pub files_indexed: u64,
+    pub files_skipped: u64,
+}
+
+/// Final result of `index.ensure` / `index.rebuild`. Mirror of the desktop
+/// `RebuildReport`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexRebuildReport {
+    pub files_indexed: u64,
+    pub symbols_extracted: u64,
+    pub files_skipped: u64,
+    pub bytes_read: u64,
+    pub duration_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

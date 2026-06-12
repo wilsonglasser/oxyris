@@ -1,19 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
-use notify::{EventKind, RecursiveMode, Watcher};
 use oxyris_ipc::ops::{
     FsContentFileHits, FsContentMatch, FsListDirEntry, FsListDirResult, FsReadBytesResult,
     FsReadResult, FsSearchContentArgs, FsSearchContentResult, FsSearchHit, FsSearchPathsResult,
     FsStatResult, FsUnwatchArgs, FsWalkArgs, FsWalkEvent, FsWalkResult, FsWatchArgs, FsWatchEvent,
     FsWriteResult,
 };
+use oxyris_watch::DirWatcher;
 
 use crate::ops::OpError;
 use crate::protocol;
@@ -523,23 +523,24 @@ pub async fn walk(request_id: &str, args: FsWalkArgs) -> Result<FsWalkResult, Op
 // `fs:changed` behavior — except the watcher runs *inside* the distro on the
 // real ext4 filesystem (native inotify), which is reliable, unlike `notify`
 // over the 9p `\\wsl.localhost` bridge that the Windows backend can't use.
+//
+// Both sides share `oxyris_watch::DirWatcher`: an ignore-aware, per-directory
+// watcher. On inotify (Linux) that's the difference between watching only the
+// non-ignored dirs (hundreds of descriptors) and the old recursive watch that
+// armed every dir under the root — `node_modules`, `target`, … — which blew up
+// kernel memory and flooded CPU on every build write.
 
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
-struct WatchEntry {
-    /// Kept alive so the OS watcher keeps firing; dropped on unwatch.
-    _watcher: notify::RecommendedWatcher,
-    drain: tokio::task::JoinHandle<()>,
-}
-
 /// watch_id (the originating request id) → live watcher. Process-global because
 /// `fs.unwatch` arrives as a separate request with no shared state otherwise.
-fn watchers() -> &'static StdMutex<HashMap<String, WatchEntry>> {
-    static W: OnceLock<StdMutex<HashMap<String, WatchEntry>>> = OnceLock::new();
+/// Dropping a [`DirWatcher`] tears down its OS watches.
+fn watchers() -> &'static StdMutex<HashMap<String, DirWatcher>> {
+    static W: OnceLock<StdMutex<HashMap<String, DirWatcher>>> = OnceLock::new();
     W.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-/// Start a recursive watcher on `args.root`, streaming debounced batches of
+/// Start an ignore-aware watcher on `args.root`, streaming debounced batches of
 /// changed (root-relative) paths as `FsWatchEvent` frames under `request_id`.
 /// The request stays open — no Result frame — until [`stop_watch`] cancels it.
 pub async fn start_watch(request_id: &str, args: FsWatchArgs) -> Result<(), OpError> {
@@ -548,96 +549,50 @@ pub async fn start_watch(request_id: &str, args: FsWatchArgs) -> Result<(), OpEr
         return Err(OpError::NotFound(args.root.clone()));
     }
 
-    let pending: Arc<StdMutex<HashSet<PathBuf>>> = Arc::new(StdMutex::new(HashSet::new()));
-    let pending_cb = pending.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        let Ok(event) = res else { return };
-        if !matches!(
-            event.kind,
-            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-        ) {
+    let emit_id = request_id.to_owned();
+    let sink_root = root.clone();
+    let index_root = args.root.clone();
+    let watcher = DirWatcher::start(root, WATCH_DEBOUNCE, move |batch| {
+        // DirWatcher already drops ignored paths (`.oxyris`, `.git`,
+        // node_modules, gitignored). Feed the in-distro index incrementally
+        // (no-op unless one is open for this root), then stream the
+        // root-relative paths to the backend for the file tree.
+        let rels: Vec<String> = batch
+            .iter()
+            .filter_map(|p| {
+                p.strip_prefix(&sink_root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        crate::ops::index::apply_changes(index_root.clone(), batch);
+        if rels.is_empty() {
             return;
         }
-        if let Ok(mut p) = pending_cb.lock() {
-            for path in event.paths {
-                p.insert(path);
-            }
-        }
-    })
-    .map_err(|e| OpError::Watch(e.to_string()))?;
-    watcher
-        .watch(&root, RecursiveMode::Recursive)
-        .map_err(|e| OpError::Watch(e.to_string()))?;
-
-    let emit_id = request_id.to_owned();
-    let drain_root = root.clone();
-    let drain = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(WATCH_DEBOUNCE);
-        tick.tick().await; // skip the immediate first tick
-        loop {
-            tick.tick().await;
-            let batch: Vec<PathBuf> = {
-                let mut p = match pending.lock() {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                if p.is_empty() {
-                    continue;
-                }
-                p.drain().collect()
-            };
-            let mut rels: Vec<String> = Vec::with_capacity(batch.len());
-            for path in batch {
-                let Ok(rel) = path.strip_prefix(&drain_root) else {
-                    continue;
-                };
-                // Skip our own scratch dir + git internals — same filter as the
-                // Windows watcher so we don't churn on every WAL write.
-                if first_segment_is(rel, ".oxyris") || first_segment_is(rel, ".git") {
-                    continue;
-                }
-                rels.push(rel.to_string_lossy().replace('\\', "/"));
-            }
-            if rels.is_empty() {
-                continue;
-            }
+        let emit_id = emit_id.clone();
+        tokio::spawn(async move {
             protocol::emit_event(
                 &emit_id,
                 serde_json::to_value(FsWatchEvent { paths: rels })
                     .unwrap_or(serde_json::Value::Null),
             )
             .await;
-        }
-    });
+        });
+    })
+    .map_err(|e| OpError::Watch(e.to_string()))?;
 
-    // Register; replacing a stale watch on the same id tears the old one down.
-    if let Ok(mut reg) = watchers().lock()
-        && let Some(old) = reg.insert(
-            request_id.to_owned(),
-            WatchEntry {
-                _watcher: watcher,
-                drain,
-            },
-        )
-    {
-        old.drain.abort();
+    // Register; replacing a stale watch on the same id drops (tears down) the
+    // old one.
+    if let Ok(mut reg) = watchers().lock() {
+        reg.insert(request_id.to_owned(), watcher);
     }
     Ok(())
 }
 
 /// Tear down a watcher started by [`start_watch`]. Idempotent.
 pub fn stop_watch(args: FsUnwatchArgs) -> Result<serde_json::Value, OpError> {
-    if let Ok(mut reg) = watchers().lock()
-        && let Some(entry) = reg.remove(&args.watch_id)
-    {
-        entry.drain.abort();
+    if let Ok(mut reg) = watchers().lock() {
+        reg.remove(&args.watch_id);
     }
     Ok(serde_json::Value::Null)
-}
-
-fn first_segment_is(rel: &Path, name: &str) -> bool {
-    rel.components()
-        .next()
-        .map(|c| c.as_os_str() == name)
-        .unwrap_or(false)
 }

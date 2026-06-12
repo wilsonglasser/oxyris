@@ -96,16 +96,18 @@ pub async fn index_query_symbol(
     state: State<'_, AppState>,
 ) -> Result<Vec<SymbolHit>, TauriIndexingError> {
     let ctx = resolve_ctx(&state, input.worktree_id, input.project_id)?;
-    let index = state
-        .indexing
-        .open_for(input.worktree_id, &ctx.environment, &ctx.path)
-        .await?;
     let limit = input.limit.unwrap_or(20).min(50);
-    let hits =
-        tokio::task::spawn_blocking(move || index.find_symbol(&input.name, input.kind, limit))
-            .await
-            .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?
-            .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?;
+    let hits = state
+        .indexing
+        .query_symbol(
+            input.worktree_id,
+            &ctx.environment,
+            &ctx.path,
+            input.name,
+            input.kind,
+            limit,
+        )
+        .await?;
     Ok(hits)
 }
 
@@ -115,14 +117,10 @@ pub async fn index_list_symbols_in_file(
     state: State<'_, AppState>,
 ) -> Result<Vec<Symbol>, TauriIndexingError> {
     let ctx = lookup_worktree(&state, input.worktree_id)?;
-    let index = state
+    let symbols = state
         .indexing
-        .open_for(input.worktree_id, &ctx.environment, &ctx.path)
+        .list_symbols_in_file(input.worktree_id, &ctx.environment, &ctx.path, input.file)
         .await?;
-    let symbols = tokio::task::spawn_blocking(move || index.list_symbols_in_file(&input.file))
-        .await
-        .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?
-        .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?;
     Ok(symbols)
 }
 
@@ -132,14 +130,10 @@ pub async fn index_project_map(
     state: State<'_, AppState>,
 ) -> Result<ProjectMap, TauriIndexingError> {
     let ctx = lookup_worktree(&state, input.worktree_id)?;
-    let index = state
+    let map = state
         .indexing
-        .open_for(input.worktree_id, &ctx.environment, &ctx.path)
+        .project_map(input.worktree_id, &ctx.environment, &ctx.path)
         .await?;
-    let map = tokio::task::spawn_blocking(move || index.project_map())
-        .await
-        .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?
-        .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?;
     Ok(map)
 }
 
@@ -221,14 +215,15 @@ pub async fn worktree_ensure_ready(
         .lsp
         .warm_primary(worktree_id, ctx.environment.clone(), ctx.path.clone());
 
-    // WSL only: kick off a background poll so symbol changes inside the
-    // distro show up without manual rebuild. Idempotent — re-calls collapse
-    // to the existing loop. Skipped for Windows worktrees because
-    // `notify` already covers them.
+    // WSL only: arm the in-distro agent watcher (idempotent). Its native
+    // inotify stream keeps both the file tree and the symbol index fresh
+    // without the old 60 s re-walk poll. Windows worktrees are covered by
+    // `FsWatchService`, armed on the first directory listing.
     if matches!(ctx.environment, Environment::Wsl { .. }) {
         state
-            .indexing
-            .start_wsl_poll(worktree_id, ctx.environment, ctx.path);
+            .wsl_fs_watcher
+            .ensure(app.clone(), worktree_id, &ctx.environment, ctx.path.clone())
+            .await;
     }
 
     Ok(())
@@ -240,14 +235,10 @@ pub async fn index_stats(
     state: State<'_, AppState>,
 ) -> Result<IndexStatsRow, TauriIndexingError> {
     let ctx = lookup_worktree(&state, input.worktree_id)?;
-    let index = state
+    let stats = state
         .indexing
-        .open_for(input.worktree_id, &ctx.environment, &ctx.path)
+        .stats(input.worktree_id, &ctx.environment, &ctx.path)
         .await?;
-    let stats = tokio::task::spawn_blocking(move || index.stats())
-        .await
-        .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?
-        .map_err(|e| TauriIndexingError::Indexing(e.to_string()))?;
     Ok(IndexStatsRow {
         files: stats.files,
         symbols: stats.symbols,

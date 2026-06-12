@@ -1,5 +1,6 @@
 mod fs;
 mod git;
+pub mod index;
 mod system;
 
 use oxyris_ipc::RequestFrame;
@@ -22,6 +23,8 @@ pub enum OpError {
     EmptyRepo,
     #[error("watch: {0}")]
     Watch(String),
+    #[error("index: {0}")]
+    Index(String),
 }
 
 impl OpError {
@@ -34,6 +37,7 @@ impl OpError {
             OpError::Git(_) => "git",
             OpError::EmptyRepo => "empty_repo",
             OpError::Watch(_) => "watch",
+            OpError::Index(_) => "index",
         }
     }
 }
@@ -158,6 +162,30 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         op_name::GIT_CHERRY_PICK => git::cherry_pick(from_args(args)?),
         op_name::GIT_REVERT => git::revert(from_args(args)?),
         op_name::GIT_DIFF_REVS => git::diff_revs(from_args(args)?),
+        op_name::INDEX_ENSURE => {
+            let a: oxyris_ipc::ops::IndexRootArgs = from_args(args)?;
+            index::ensure(a.root).await
+        }
+        op_name::INDEX_REBUILD => {
+            let a: oxyris_ipc::ops::IndexRootArgs = from_args(args)?;
+            index::rebuild(&id, a.root).await
+        }
+        op_name::INDEX_QUERY_SYMBOL => {
+            let a: oxyris_ipc::ops::IndexQuerySymbolArgs = from_args(args)?;
+            index::query_symbol(a.root, a.name, a.kind, a.limit).await
+        }
+        op_name::INDEX_LIST_IN_FILE => {
+            let a: oxyris_ipc::ops::IndexListInFileArgs = from_args(args)?;
+            index::list_in_file(a.root, a.file).await
+        }
+        op_name::INDEX_PROJECT_MAP => {
+            let a: oxyris_ipc::ops::IndexRootArgs = from_args(args)?;
+            index::project_map(a.root).await
+        }
+        op_name::INDEX_STATS => {
+            let a: oxyris_ipc::ops::IndexRootArgs = from_args(args)?;
+            index::stats(a.root).await
+        }
         other => Err(OpError::UnknownOp(other.to_owned())),
     }
 }
