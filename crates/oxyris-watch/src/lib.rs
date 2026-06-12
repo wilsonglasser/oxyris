@@ -270,6 +270,11 @@ mod tests {
     }
 
     async fn collect_changes(root: PathBuf, action: impl FnOnce(&Path)) -> Vec<PathBuf> {
+        // Canonicalize so the watch root matches the paths the OS reports. On
+        // macOS the temp dir (`/var/folders/…`) is a symlink and FSEvents
+        // reports the resolved `/private/var/…` form, which would otherwise
+        // fail `strip_prefix` and drop every event. No-op on Linux/Windows.
+        let root = root.canonicalize().expect("canonicalize temp root");
         let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_cb = seen.clone();
         let _w = DirWatcher::start(root.clone(), Duration::from_millis(80), move |batch| {
