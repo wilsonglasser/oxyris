@@ -599,26 +599,27 @@ export function TerminalView({
     // renderer sometimes leaves stale glyphs on cells it failed to mark dirty,
     // so old text bleeds through until a resize forces a full repaint. The core
     // buffer is correct — only the renderer is stale — so once an output burst
-    // settles we force-repaint every row from the buffer. Debounced so it never
-    // fires during the spinner's continuous ~10×/sec repaints (those rows stay
-    // fresh on their own); it only kicks in on the quiet after a turn settles,
-    // which is exactly when the ghosts are visible.
+    // settles we force-repaint every row from the buffer ONCE.
+    //
+    // The debounce window must be LONGER than the TUI's spinner cadence
+    // (~10×/sec → ~100ms between frames); otherwise the timer fires in the gaps
+    // between frames and we repaint ~10×/sec for nothing. 250ms means continuous
+    // output keeps resetting the timer, so the repaint only fires on the genuine
+    // quiet after a turn settles — exactly when ghosts are visible.
+    const REPAINT_QUIET_MS = 250;
     let refreshTimer: number | undefined;
     const scheduleRepaint = () => {
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
-        // Never repaint while a selection is active. The claude TUI streams the
-        // spinner ~10×/sec, so the debounce fires between frames — and a forced
-        // refresh mid-drag clears the selection, making copy impossible during
-        // live output. Skip the ghost-fix repaint until the selection is gone;
-        // the rows under a selection are static anyway, so no ghosts there.
+        // Never repaint while a selection is active: a forced refresh clears it,
+        // breaking copy. Rows under a selection are static, so no ghosts there.
         if (term.hasSelection()) return;
         try {
           term.refresh(0, term.rows - 1);
         } catch {
           /* noop */
         }
-      }, 80);
+      }, REPAINT_QUIET_MS);
     };
 
     const safeWrite = (chunk: string) => {
