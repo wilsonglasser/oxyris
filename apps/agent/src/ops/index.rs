@@ -395,9 +395,14 @@ mod tests {
         assert!(hits.iter().any(|h| h.name == "greet"), "hits {hits:?}");
 
         let kind_filtered: Vec<SymbolHit> = serde_json::from_value(
-            query_symbol(root_s.clone(), "Widget".to_owned(), Some("struct".to_owned()), 10)
-                .await
-                .unwrap(),
+            query_symbol(
+                root_s.clone(),
+                "Widget".to_owned(),
+                Some("struct".to_owned()),
+                10,
+            )
+            .await
+            .unwrap(),
         )
         .unwrap();
         assert!(kind_filtered.iter().any(|h| h.name == "Widget"));
