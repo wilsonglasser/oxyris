@@ -19,4 +19,9 @@ pub enum GitError {
     /// commit first.
     #[error("repository has no commits yet")]
     EmptyRepo,
+    /// A user-supplied positional argument (url / remote / branch) began with
+    /// `-`, so git would parse it as an option. Rejected to block option
+    /// injection (`--upload-pack=...`, `--exec=...`).
+    #[error("rejected argument (looks like an option): {0}")]
+    RejectedArg(String),
 }

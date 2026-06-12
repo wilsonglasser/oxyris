@@ -122,7 +122,7 @@ pub async fn lsp_find_references(lsp: &Arc<LspBackend>, args: &Value) -> Result<
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let path = lsp.resolve_path(&file);
+    let path = lsp.resolve_path(&file)?;
     let locations = lsp
         .find_references(&path, line0, col0, include_declaration)
         .await?;
@@ -154,7 +154,7 @@ pub async fn lsp_find_references(lsp: &Arc<LspBackend>, args: &Value) -> Result<
 
 pub async fn lsp_hover(lsp: &Arc<LspBackend>, args: &Value) -> Result<String, String> {
     let (_, line0, col0, file) = parse_position_args(args)?;
-    let path = lsp.resolve_path(&file);
+    let path = lsp.resolve_path(&file)?;
     let hover = lsp.hover(&path, line0, col0).await?;
     match hover {
         Some(text) => Ok(format!(
@@ -175,7 +175,7 @@ pub async fn lsp_diagnostics(lsp: &Arc<LspBackend>, args: &Value) -> Result<Stri
         .get("file")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing 'file'".to_string())?;
-    let path = lsp.resolve_path(file);
+    let path = lsp.resolve_path(file)?;
 
     // The LSP server publishes diagnostics asynchronously after `didOpen`.
     // Poll for up to ~2 seconds before reporting "no issues" — covers the

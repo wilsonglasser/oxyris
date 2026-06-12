@@ -28,19 +28,13 @@ import { fsOpenExternal } from "~/ipc/fs.ts";
 import {
   claudePtySpawn,
   claudePureRefreshTitle,
-  onPureSignal,
+  onPureState,
   terminalKill,
   terminalList,
   terminalWrite,
 } from "~/ipc/terminal.ts";
 import { attachmentSave, blobToBase64 } from "~/ipc/attachments.ts";
-import {
-  playCompletionChime,
-  playEscalationChime,
-  playInputChime,
-  shouldNotify,
-} from "~/lib/notificationSound.ts";
-import { bumpBadge } from "~/lib/taskbarBadge.ts";
+import { playEscalationChime } from "~/lib/notificationSound.ts";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import {
@@ -445,14 +439,6 @@ function PureSessionView({
   }, [t]);
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
-  // True while a permission/question prompt is on screen, so a turn-end signal
-  // racing in behind it doesn't also ring the "done" chime. Set on needs_input,
-  // cleared when the user submits an answer.
-  const promptOpenRef = useRef(false);
-  // One completion chime + badge per turn — a turn-end can be signalled by more
-  // than one marker (poll / "✶ Worked for" / recap / idle), so without this
-  // latch the user hears the sound twice. Reset on submit (see onPtyInput).
-  const completionNotifiedRef = useRef(false);
 
   // Pure sessions get no auto-title from a turn-event stream. Instead we read
   // claude's own transcript (it's written under our `--session-id`) once a turn
@@ -468,49 +454,18 @@ function PureSessionView({
       .catch(() => {});
   }, [sessionId]);
 
-  // Ring the "done" chime + bump the badge at most once per turn.
-  const notifyCompletion = useCallback(() => {
-    if (completionNotifiedRef.current) return;
-    completionNotifiedRef.current = true;
-    if (shouldNotify()) {
-      playCompletionChime();
-      bumpBadge();
-    }
-  }, []);
-
-  // Backend-driven turn state. The claude TUI is opaque bytes, so the backend
-  // sniffs its raw PTY stream (`infra::pure_signals`) and emits discrete
-  // signals. Consuming those here — instead of a frontend regex + `setTimeout`
-  // idle-clear — is what makes detection survive the window losing focus: the
-  // WebView throttles background timers and pauses xterm rendering, which is the
-  // "fails when the window hasn't had focus" bug. The backend has no such
-  // throttle.
+  // Dot state (busy / needs-input) and the chimes are owned by the single
+  // pure-state bridge in `Sidebar` — this panel only watches the same backend
+  // snapshot to auto-title on a turn settling (busy → done). Tracking the
+  // transition avoids titling on a freshly-resumed idle session.
+  const prevBusyRef = useRef(false);
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
-    void onPureSignal(sessionId, (signal) => {
-      switch (signal) {
-        case "needs_input":
-          // Red bull: this thread wants input. Outranks the blue busy pulse.
-          promptOpenRef.current = true;
-          setNeedsInput(sessionId, true);
-          setBusy(sessionId, false);
-          if (shouldNotify()) {
-            playInputChime();
-            bumpBadge();
-          }
-          break;
-        case "turn_ended":
-          setBusy(sessionId, false);
-          // Don't double-ring when a prompt is already waiting (input chime
-          // rang for it).
-          if (!promptOpenRef.current) notifyCompletion();
-          refreshTitle();
-          break;
-        case "working":
-          setBusy(sessionId, true);
-          break;
-      }
+    void onPureState(sessionId, (snap) => {
+      const wasBusy = prevBusyRef.current;
+      prevBusyRef.current = snap.busy;
+      if (wasBusy && !snap.busy) refreshTitle();
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -519,7 +474,7 @@ function PureSessionView({
       cancelled = true;
       unlisten?.();
     };
-  }, [sessionId, setNeedsInput, setBusy, notifyCompletion, refreshTitle]);
+  }, [sessionId, refreshTitle]);
 
   // One attempt shortly after mount catches resumed sessions whose transcript
   // already exists from a previous run.
@@ -530,13 +485,12 @@ function PureSessionView({
 
   const onPtyInput = useCallback((data: string) => {
     // A submit (Enter, unless Shift held for a newline) starts a turn. The
-    // backend arms its own idle watchdog + resets its latches on the `\r`; here
-    // we just reflect it in the UI immediately. Other keystrokes don't.
+    // backend resets its latches + stamps its output clock on the `\r` and will
+    // emit a fresh busy snapshot once claude paints its spinner; reflect the
+    // turn start here immediately so the dot doesn't lag. Other keystrokes don't.
     if (data.includes("\r")) {
       setBusy(sessionId, true);
       setNeedsInput(sessionId, false);
-      promptOpenRef.current = false;
-      completionNotifiedRef.current = false;
     }
   }, [sessionId, setBusy, setNeedsInput]);
 
@@ -553,6 +507,13 @@ function PureSessionView({
   useEffect(() => {
     if (ensuredRef.current === sessionId) return;
     ensuredRef.current = sessionId;
+    // Capture the session this run targets. If `sessionId` changes while the
+    // async work is in flight, `ensuredRef.current` moves to the new id and the
+    // checks below abort, so a stale spawn can't mount the previous session's
+    // PTY id into the new view. (Distinct from a cancel flag, which would also
+    // abort the StrictMode re-run that actually spawns — guarding on the ref
+    // keeps same-session re-runs alive.)
+    const target = sessionId;
     void (async () => {
       try {
         // Only ever reuse THIS session's claude PTY — never a shell. The dock
@@ -561,6 +522,7 @@ function PureSessionView({
         // grabbing `existing[0]` blindly could mount a plain terminal here
         // instead of the claude TUI.
         const existing = await terminalList({ session_id: sessionId });
+        if (ensuredRef.current !== target) return;
         const claudePty = existing.find((tinfo) => tinfo.kind === "claude");
         if (claudePty) {
           spawnAtRef.current = Date.now();
@@ -576,10 +538,12 @@ function PureSessionView({
             useAppSettingsStore.getState().claudeLanguage,
           ),
         });
+        if (ensuredRef.current !== target) return;
         spawnAtRef.current = Date.now();
         setTermId(info.id);
         setCwd(info.cwd);
       } catch (e) {
+        if (ensuredRef.current !== target) return;
         setError(e instanceof Error ? e.message : String(e));
         // Allow a retry on the next mount/session change.
         ensuredRef.current = null;
@@ -663,7 +627,7 @@ function PureSessionView({
   const removeAttachment = (id: string) =>
     setAttachments((prev) => prev.filter((a) => a.id !== id));
 
-  const submit = () => {
+  const submit = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     // Assemble the real claude input: each `@path` followed by a space, which
@@ -671,15 +635,17 @@ function PureSessionView({
     // THEN a single Enter to submit. Sending `@path\r` alone only picks the
     // autocomplete entry without submitting — the bug the chips UX fixes.
     const refs = attachments.map((a) => `@${a.path} `).join("");
-    // The trailing `\r` sendToPty emits drives the backend's arm + latch reset;
+    // The trailing `\r` sendToPty emits drives the backend's latch reset;
     // reflect the turn start in the UI immediately. The backend owns detection.
     setBusy(sessionId, true); // sidebar pulse on
-    promptOpenRef.current = false;
-    completionNotifiedRef.current = false;
     sendToPty(`${refs}${trimmed}`);
     setText("");
     setAttachments([]);
-  };
+  }, [text, attachments, sessionId, sendToPty, setBusy]);
+  // Latest `submit` reachable from effects without making them a dep (which
+  // would re-run / re-subscribe on every keystroke as text/attachments change).
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
 
   // Auto-grow the composer with its content, capped (max-h-32 = 128px), and
   // collapse back to one row when cleared (submit / empty). Measures the
@@ -693,15 +659,17 @@ function PureSessionView({
   }, [composerValue]);
 
   // Auto-submit when a Ctrl+click-armed dictation ends (listening true→false).
+  // Deps are just `speech.listening` — `submit` is read via its ref so this
+  // doesn't re-run on every keystroke.
   useEffect(() => {
     const wasListening = prevListeningRef.current;
     prevListeningRef.current = speech.listening;
     if (wasListening && !speech.listening && autoSubmitOnEndRef.current) {
       autoSubmitOnEndRef.current = false;
       setAutoSubmitArmed(false);
-      submit();
+      submitRef.current();
     }
-  }, [speech.listening, submit]);
+  }, [speech.listening]);
 
   // For WSL projects a picked file comes back as a `\\wsl.localhost\<distro>\…`
   // UNC path — claude runs inside the distro and needs the POSIX form.

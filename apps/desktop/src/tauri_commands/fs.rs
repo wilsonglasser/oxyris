@@ -71,7 +71,7 @@ pub async fn fs_list_dir(
         .wsl_fs_watcher
         .ensure(app.clone(), input.worktree_id, &env, root.clone())
         .await;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let result: FsListDirResult =
         fs_infra::list_dir(&env, &state.agent_pool, abs.clone(), input.show_hidden).await?;
     Ok(FsListDirOutput {
@@ -105,7 +105,7 @@ pub async fn fs_read_file(
     state: State<'_, AppState>,
 ) -> Result<FsReadFileOutput, TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let result: FsReadResult =
         fs_infra::read_file(&env, &state.agent_pool, abs, input.max_bytes).await?;
     Ok(FsReadFileOutput {
@@ -136,7 +136,7 @@ pub async fn fs_write_file(
     state: State<'_, AppState>,
 ) -> Result<FsWriteFileOutput, TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let result: FsWriteResult =
         fs_infra::write_file(&env, &state.agent_pool, abs, input.content).await?;
     Ok(FsWriteFileOutput {
@@ -162,7 +162,7 @@ pub async fn fs_create_file(
     state: State<'_, AppState>,
 ) -> Result<(), TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     fs_infra::create_file(&env, &state.agent_pool, abs, input.contents).await?;
     Ok(())
 }
@@ -180,7 +180,7 @@ pub async fn fs_create_dir(
     state: State<'_, AppState>,
 ) -> Result<(), TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     fs_infra::create_dir(&env, &state.agent_pool, abs).await?;
     Ok(())
 }
@@ -199,8 +199,8 @@ pub async fn fs_rename(
     state: State<'_, AppState>,
 ) -> Result<(), TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let from = fs_infra::join_inside_worktree(&env, &root, &input.from_rel)?;
-    let to = fs_infra::join_inside_worktree(&env, &root, &input.to_rel)?;
+    let from = fs_infra::safe_join(&env, &root, &input.from_rel)?;
+    let to = fs_infra::safe_join(&env, &root, &input.to_rel)?;
     fs_infra::rename(&env, &state.agent_pool, from, to).await?;
     Ok(())
 }
@@ -220,7 +220,7 @@ pub async fn fs_delete(
     state: State<'_, AppState>,
 ) -> Result<(), TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     fs_infra::delete(&env, &state.agent_pool, abs, input.recursive).await?;
     Ok(())
 }
@@ -238,8 +238,8 @@ pub struct FsCopyInput {
 #[tauri::command]
 pub async fn fs_copy(input: FsCopyInput, state: State<'_, AppState>) -> Result<(), TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let from = fs_infra::join_inside_worktree(&env, &root, &input.from_rel)?;
-    let to = fs_infra::join_inside_worktree(&env, &root, &input.to_rel)?;
+    let from = fs_infra::safe_join(&env, &root, &input.from_rel)?;
+    let to = fs_infra::safe_join(&env, &root, &input.to_rel)?;
     fs_infra::copy(&env, &state.agent_pool, from, to).await?;
     Ok(())
 }
@@ -294,7 +294,7 @@ pub async fn fs_reveal(
     use std::process::Command;
 
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let windows_path = match &env {
         Environment::Local => abs,
         Environment::Wsl { distro } => crate::infra::path_translator::to_windows(distro, &abs)
@@ -423,7 +423,7 @@ pub async fn fs_read_file_bytes(
     state: State<'_, AppState>,
 ) -> Result<FsReadFileBytesOutput, TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     // Both branches go through the shared facade now (`fs_infra::read_bytes`):
     // Windows reads via std::fs in spawn_blocking, WSL routes through the
     // per-distro agent's binary-safe `fs.read_bytes` op.
@@ -485,7 +485,7 @@ pub async fn fs_open_external(
     state: State<'_, AppState>,
 ) -> Result<FsOpenExternalOutput, TauriFsError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
-    let abs = fs_infra::join_inside_worktree(&env, &root, &input.rel_path)?;
+    let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let target = open_external::resolve(&env, &abs, input.editor.as_deref())
         .ok_or_else(|| TauriFsError::Backend("no external editor found".into()))?;
     open_external::launch(&target).map_err(|e| TauriFsError::Backend(e.to_string()))?;

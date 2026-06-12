@@ -49,7 +49,11 @@ import {
 import { useAutopilotAlertStore } from "~/stores/autopilotAlertStore.ts";
 import { bumpBadge } from "~/lib/taskbarBadge.ts";
 import { localEnvLabel } from "~/lib/host.ts";
-import { onPureSignal } from "~/ipc/terminal.ts";
+import {
+  claudePureState,
+  onPureState,
+  type PureState,
+} from "~/ipc/terminal.ts";
 import { onAutopilotEvent } from "~/ipc/autopilot.ts";
 
 interface Props {
@@ -276,47 +280,9 @@ export function Sidebar({
         if (cancelled) fn();
         else unlistens.push(fn);
       });
-      // Pure threads emit none of the structured events above — drive their
-      // bull off the backend's pure-signal stream (sniffed from the claude PTY
-      // in `infra::pure_signals`). Driving this from the backend, instead of a
-      // frontend sniffer + idle timers, keeps background pure threads correct
-      // even when the window has no focus (the WebView throttled the old timers).
-      // working = live turn (blue); needs_input = the TUI's permission/question
-      // menu (red); turn_ended = a quiet finish (orange "attention", since it
-      // finished while you were on another thread).
-      void onPureSignal(s.id, (signal) => {
-        useSessionStore.getState().touchActivity(s.id);
-        switch (signal) {
-          case "needs_input":
-            setNeedsInput(s.id, true);
-            setBusy(s.id, false);
-            if (shouldNotify()) {
-              playInputChime();
-              bumpBadge();
-            }
-            break;
-          case "turn_ended": {
-            // Chime only when this thread was actually working (a marker on a
-            // freshly-resumed idle session shouldn't ring out of nowhere).
-            const wasBusy = useBusyStore.getState().busy[s.id];
-            setBusy(s.id, false);
-            markAttention(s.id);
-            void refreshProjectSessions(s.project_id);
-            if (wasBusy && shouldNotify()) {
-              playCompletionChime();
-              bumpBadge();
-            }
-            break;
-          }
-          case "working":
-            setBusy(s.id, true);
-            setNeedsInput(s.id, false);
-            break;
-        }
-      }).then((fn) => {
-        if (cancelled) fn();
-        else unlistens.push(fn);
-      });
+      // Pure threads emit none of the structured events above — their dot is
+      // driven separately by the pure-state bridge effect below (the sole owner
+      // of pure dot state).
       // Keep the sidebar's robot glyph honest for backgrounded pilots: when the
       // backend halts/errors a thread we're not viewing, clear its engaged flag
       // here (PureSessionView only listens for the active session).
@@ -344,6 +310,99 @@ export function Sidebar({
       for (const fn of unlistens) fn();
     };
   }, [watchKey, markAttention, setNeedsInput, setBusy, refreshProjectSessions]);
+
+  // ── Pure-mode dot bridge ────────────────────────────────────────────────
+  // The SINGLE owner of pure (claude TUI) dot state. The backend emits a LEVEL
+  // snapshot per session (`session:<id>:pure-state`) on every change and on a
+  // heartbeat; we diff it against the previous snapshot to derive the chime /
+  // attention transitions. One effect covers BOTH the active pure thread and
+  // background ones — the structured-event loop above deliberately skips the
+  // active and non-running sessions, so without this they'd have no driver.
+  // Replaces the three racing `onPureSignal` listeners (App, PureClaudePanel,
+  // and the loop above) that each wrote these stores and disagreed on the end
+  // colour. Watches every session id (the backend only emits for claude PTYs,
+  // so a structured thread simply never fires).
+  const pureWatchKey = useMemo(
+    () =>
+      allSessions
+        .map((s) => s.id)
+        .sort()
+        .join(","),
+    [allSessions],
+  );
+  const purePrevRef = useRef<Map<string, PureState>>(new Map());
+  useEffect(() => {
+    if (!pureWatchKey) return;
+    const ids = new Set(pureWatchKey.split(","));
+    // Drop prev-snapshot state for sessions no longer watched (deleted / not in
+    // the set), so a re-subscribe (set change, StrictMode remount) can't derive
+    // a transition against a stale prev and drop/phantom a chime.
+    for (const id of purePrevRef.current.keys()) {
+      if (!ids.has(id)) purePrevRef.current.delete(id);
+    }
+    const targets = sessionsRef.current.filter((s) => ids.has(s.id));
+    const unlistens: Array<() => void> = [];
+    let cancelled = false;
+    // Apply a snapshot: set the dot stores, then ring/flag on transitions.
+    // `seed` snapshots (the `claudePureState` reconcile) only prime the dot —
+    // they never chime and never stamp activity, so opening the app can't
+    // green-dot or ring an idle thread.
+    const apply = (s: SessionSummary, snap: PureState, seed: boolean) => {
+      const prev = purePrevRef.current.get(s.id);
+      purePrevRef.current.set(s.id, snap);
+      // `needs_input` (red) outranks `busy` (blue) at the dot.
+      setNeedsInput(s.id, snap.needs_input);
+      setBusy(s.id, snap.busy && !snap.needs_input);
+      if (seed) return;
+      // Stamp recency only while something is actually happening (busy / waiting
+      // on input). A settle snapshot (both false) isn't fresh activity, so it
+      // mustn't keep an idle thread reading green-recent.
+      if (snap.busy || snap.needs_input) {
+        useSessionStore.getState().touchActivity(s.id);
+      }
+      if (!prev) return;
+      // idle/blue → red: a prompt just appeared. Ring so a backgrounded user
+      // knows to come decide.
+      if (!prev.needs_input && snap.needs_input && shouldNotify()) {
+        playInputChime();
+        bumpBadge();
+      }
+      // blue → done: a turn finished without a waiting prompt. Flag for
+      // attention (no-op on the active thread) and chime when backgrounded.
+      if (prev.busy && !snap.busy && !snap.needs_input) {
+        markAttention(s.id);
+        void refreshProjectSessions(s.project_id);
+        if (shouldNotify()) {
+          playCompletionChime();
+          bumpBadge();
+        }
+      }
+    };
+    for (const s of targets) {
+      void onPureState(s.id, (snap) => apply(s, snap, false)).then((fn) => {
+        if (cancelled) fn();
+        else unlistens.push(fn);
+      });
+      // Seed from backend ground truth so a snapshot the listener missed (it
+      // registered after the backend emitted the current state) is corrected
+      // immediately, rather than waiting for the next heartbeat.
+      void claudePureState({ session_id: s.id })
+        .then((snap) => {
+          if (!cancelled) apply(s, snap, true);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+      for (const fn of unlistens) fn();
+    };
+  }, [
+    pureWatchKey,
+    markAttention,
+    setNeedsInput,
+    setBusy,
+    refreshProjectSessions,
+  ]);
 
   // Auto-expand the active project so the user always sees its threads —
   // but only when it is the sole project. With multiple projects every group
@@ -932,6 +991,10 @@ function SessionEntry({
       return;
     try {
       await sessionDelete({ session_id: session.id });
+      // Forget all per-session UI state so a deleted thread can't leave a
+      // stranded dot (busy/needsInput/attention/liveActivity) behind.
+      useSessionStore.getState().drop(session.id);
+      useBusyStore.getState().drop(session.id);
       onDeleted();
     } catch {
       /* noop */

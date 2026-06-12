@@ -19,12 +19,15 @@ use thiserror::Error;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-use crate::infra::pure_signals::{PureSignal, PureSniffer, has_content, strip_ansi};
+use crate::infra::pure_signals::{
+    PureSignal, PureSniffer, has_content_stripped, strip_ansi, strip_for_detection,
+};
 
-/// In-process notification of a pure-signal, pushed from the PTY reader to the
-/// auto-pilot controller (in addition to the `session:<id>:pure-signal` Tauri
-/// event the frontend consumes). Lets the backend react with the window
-/// unfocused — the whole point of moving detection off the WebView.
+/// In-process notification of a pure-signal marker edge, pushed from the PTY
+/// reader to the auto-pilot controller. (The frontend dot rides the separate
+/// `session:<id>:pure-state` level snapshot, not these edges.) Lets the backend
+/// react with the window unfocused — the whole point of moving detection off the
+/// WebView.
 #[derive(Debug, Clone)]
 pub struct PureSignalNotice {
     pub session_id: AggregateId,
@@ -104,37 +107,37 @@ struct LiveTerminal {
     kind: TerminalKind,
     replay: Arc<Mutex<ReplayBuffer>>,
     /// Pure-mode signal sniffer — present only for `Claude` PTYs. The reader
-    /// thread feeds it raw output and emits `session:<id>:pure-signal` events;
-    /// `write` resets its latches when the user submits a turn. `None` for
-    /// shells. See `infra::pure_signals`.
+    /// thread feeds it raw output; it drives the `session:<id>:pure-state` dot
+    /// snapshot and pushes marker edges to the auto-pilot sink. `write` resets
+    /// its latches when the user submits a turn. `None` for shells. See
+    /// `infra::pure_signals`.
     pure: Option<Arc<Mutex<PureSniffer>>>,
-    /// Idle watchdog state for claude PTYs — armed on submit, refreshed on each
-    /// output chunk, fires a fallback `TurnEnded` when output goes quiet with no
-    /// marker. `None` for shells.
+    /// Output-silence clock for claude PTYs — stamped on each content-bearing
+    /// chunk so `compute_pure_state` can drop a quiet turn out of "busy" even
+    /// when a stale spinner frame lingers in the sniffer tail. `None` for shells.
     idle: Option<Arc<Mutex<IdleState>>>,
 }
 
-/// Tracks output silence so the backend can declare a pure turn "done" even when
-/// claude prints no explicit "✶ Worked for…" marker (the idle fallback the
-/// frontend used to do with a throttled `setTimeout`). Armed when the user
-/// submits a turn; disarmed by a marker signal or by the watchdog firing.
+/// Output-silence clock for a claude PTY. The reader stamps `last_output` on
+/// every *content-bearing* chunk (chrome redraws — the animated "Tip:" hint, a
+/// cursor blink — don't count, see [`has_content`]). The dot snapshot
+/// ([`compute_pure_state`]) treats a turn whose output has gone quiet past
+/// `IDLE_DONE_MS` as no longer busy, so a finished turn that left a spinner-shaped
+/// frame in the sniffer's append-only tail still drops out of "busy".
 struct IdleState {
-    armed: bool,
     last_output: Instant,
 }
 
-/// Output silence (ms) after which an armed turn with no marker is declared
-/// done. Matches the frontend's `IDLE_DONE_MS`.
+/// Output silence (ms) after which a turn with no live spinner/interrupt footer
+/// is treated as done. A live spinner repaints as content, so a genuinely
+/// thinking turn keeps refreshing the clock and stays "busy".
 const IDLE_DONE_MS: u64 = 2500;
 
-/// Payload for the `session:<session_id>:pure-signal` Tauri event. Driven from
-/// the backend PTY reader so detection survives the window losing focus (the
-/// frontend sniffer was throttled when backgrounded).
-#[derive(Debug, Clone, Serialize)]
-struct PureSignalEvent {
-    terminal_id: String,
-    signal: PureSignal,
-}
+/// Heartbeat (ms) at which the pure-state snapshot is re-evaluated and re-emitted
+/// if it changed. Self-heals a snapshot the frontend missed (session switch,
+/// panel remount) and is what makes a silence-based turn-end land without a fresh
+/// PTY chunk to drive the reader. Comfortably under the frontend recency window.
+const HEARTBEAT_MS: u64 = 750;
 
 /// Bytes that the reader thread has emitted so far, kept around so a late
 /// frontend listener can catch up on early output (shell banner / first
@@ -165,17 +168,29 @@ pub struct TerminalAttachSnapshot {
 }
 
 /// Current pure-turn dot state for a session, reconstructed from the live
-/// `PureSniffer` + idle watchdog. Pure signals (`needs_input` / `working` /
-/// `turn_ended`) are fire-and-forget Tauri events latched once per turn — if no
-/// frontend listener is attached when one fires (a session switch, a panel
-/// remount), it's lost and the sidebar dot is left stale. The frontend calls
-/// `claude_pure_state` on attach/focus to re-sync the dot to ground truth.
-#[derive(Debug, Default, Serialize)]
+/// `PureSniffer` + output clock. Doubles as the payload of the
+/// `session:<id>:pure-state` Tauri event: the backend emits this LEVEL snapshot
+/// (not an edge) whenever it changes, plus on a heartbeat, so a snapshot the
+/// frontend missed self-heals on the next tick. The frontend also calls
+/// `claude_pure_state` on attach to seed the dot before the first event.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PureState {
     /// A prompt/menu is on screen — the red "wants input" dot.
     pub needs_input: bool,
     /// A turn is in flight with no prompt waiting — the blue "busy" dot.
     pub busy: bool,
+}
+
+/// Compute the pure-turn dot snapshot from the live sniffer + output clock.
+/// `needs_input` (red) outranks `busy` (blue). A turn is "busy" only while the
+/// current TUI frame shows it running ([`PureSniffer::is_busy_now`]) AND output
+/// hasn't gone silent past `IDLE_DONE_MS` — the silence guard unsticks a finished
+/// turn whose last painted frame still looks like a spinner.
+fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
+    let needs_input = sniffer.prompt_open();
+    let fresh = idle.last_output.elapsed() < Duration::from_millis(IDLE_DONE_MS);
+    let busy = !needs_input && sniffer.is_busy_now() && fresh;
+    PureState { needs_input, busy }
 }
 
 /// What to launch inside a freshly-opened PTY.
@@ -574,11 +589,15 @@ impl PtySupervisor {
             is_claude.then(|| Arc::new(Mutex::new(PureSniffer::new())));
         let idle: Option<Arc<Mutex<IdleState>>> = is_claude.then(|| {
             Arc::new(Mutex::new(IdleState {
-                armed: false,
                 last_output: Instant::now(),
             }))
         });
-        // Lets the idle watchdog stop itself when the PTY hits EOF.
+        // Last pure-state snapshot emitted on `session:<id>:pure-state`, shared
+        // between the reader (immediate, on output) and the heartbeat (self-heal
+        // / silence-based turn-end). `None` until the first emit.
+        let last_state: Option<Arc<Mutex<Option<PureState>>>> =
+            is_claude.then(|| Arc::new(Mutex::new(None)));
+        // Lets the reader/heartbeat threads stop themselves when the PTY hits EOF.
         let alive = Arc::new(AtomicBool::new(true));
 
         // Reader task — pulls bytes off the PTY, appends them to the replay
@@ -589,6 +608,7 @@ impl PtySupervisor {
         let reader_replay = replay.clone();
         let reader_pure = pure.clone();
         let reader_idle = idle.clone();
+        let reader_last_state = last_state.clone();
         let reader_alive = alive.clone();
         let reader_session = session_id;
         // Snapshot the auto-pilot sink (if any) so signal notices reach the
@@ -635,55 +655,60 @@ impl PtySupervisor {
                             }
                             rb.last_seq
                         };
+                        // Reduce the chunk for the detectors ONCE (claude PTYs
+                        // only), before we hand the owned chunk to the output
+                        // emit — so the strip runs a single time and the emit
+                        // doesn't need a clone.
+                        let stripped = reader_pure.as_ref().map(|_| strip_for_detection(&chunk));
                         let _ = reader_app.emit(
                             &format!("terminal:{reader_id}:output"),
-                            OutputEvent {
-                                seq,
-                                data: chunk.clone(),
-                            },
+                            OutputEvent { seq, data: chunk },
                         );
-                        // Pure-mode detection: feed the raw chunk and surface
-                        // any newly-triggered signal to the frontend (red bull /
-                        // done chime) and — later — the auto-pilot controller.
-                        if let Some(pure) = &reader_pure
+                        // Pure-mode detection: feed the stripped chunk, push
+                        // marker edges to the auto-pilot controller (in-process),
+                        // and emit the LEVEL dot snapshot when it changes. The
+                        // frontend dot rides the snapshot, not the edges — a
+                        // missed snapshot self-heals on the heartbeat below.
+                        // Computed under the sniffer/idle/last locks, emitted
+                        // after they all drop — the Tauri emit must never run
+                        // while holding those mutexes.
+                        let mut to_emit: Option<PureState> = None;
+                        if let (Some(pure), Some(stripped)) = (&reader_pure, &stripped)
                             && let Ok(mut sniffer) = pure.lock()
                         {
-                            let signals = sniffer.feed(&chunk);
-                            // Refresh idle bookkeeping: a content-bearing chunk
-                            // pushes the silence window out; an explicit marker
-                            // disarms it so the watchdog won't fire a redundant
-                            // TurnEnded. A chrome-only redraw (animated "Tip:"
-                            // hint, cursor blink) must NOT refresh the window, or
-                            // a finished-but-still-animating turn never goes idle
-                            // and stays stuck "busy" (blue dot).
-                            if let Some(idle) = &reader_idle
-                                && let Ok(mut st) = idle.lock()
-                            {
-                                if has_content(&chunk) {
-                                    st.last_output = Instant::now();
-                                }
-                                if signals.iter().any(|s| {
-                                    matches!(s, PureSignal::NeedsInput | PureSignal::TurnEnded)
-                                }) {
-                                    st.armed = false;
-                                }
-                            }
-                            for signal in signals {
-                                let _ = reader_app.emit(
-                                    &format!("session:{reader_session}:pure-signal"),
-                                    PureSignalEvent {
-                                        terminal_id: reader_id.clone(),
-                                        signal,
-                                    },
-                                );
-                                if let Some(sink) = &reader_sink {
+                            let signals = sniffer.feed_stripped(stripped);
+                            // Auto-pilot still reacts to marker edges (a prompt
+                            // to answer / a settled turn). Independent of the dot.
+                            if let Some(sink) = &reader_sink {
+                                for signal in &signals {
                                     let _ = sink.send(PureSignalNotice {
                                         session_id: reader_session,
                                         terminal_id: reader_id.clone(),
-                                        signal,
+                                        signal: *signal,
                                     });
                                 }
                             }
+                            // Output clock + dot snapshot. A content-bearing chunk
+                            // pushes the silence window out; a chrome-only redraw
+                            // (animated "Tip:" hint, cursor blink) must NOT, or a
+                            // finished-but-animating turn never goes quiet and
+                            // sticks "busy" (blue dot).
+                            if let (Some(idle), Some(last)) = (&reader_idle, &reader_last_state)
+                                && let (Ok(mut st), Ok(mut prev)) = (idle.lock(), last.lock())
+                            {
+                                if has_content_stripped(stripped) {
+                                    st.last_output = Instant::now();
+                                }
+                                let next = compute_pure_state(&sniffer, &st);
+                                if *prev != Some(next) {
+                                    *prev = Some(next);
+                                    to_emit = Some(next);
+                                }
+                            }
+                        }
+                        if let Some(next) = to_emit {
+                            let _ = reader_app
+                                .emit(&format!("session:{reader_session}:pure-state"), next);
                         }
                     }
                     Err(_) => break,
@@ -693,58 +718,39 @@ impl PtySupervisor {
             let _ = reader_app.emit(&format!("terminal:{reader_id}:exit"), "eof");
         });
 
-        // Idle watchdog (claude PTYs only) — declares a turn done when output
-        // goes quiet with no explicit marker. This is the backend home of the
-        // frontend's old throttled `setTimeout` idle-clear; running it here makes
-        // turn-end detection survive the window losing focus.
-        if let (Some(idle), Some(pure)) = (idle.clone(), pure.clone()) {
-            let wd_app = app.clone();
-            let wd_id = id.clone();
-            let wd_alive = alive.clone();
-            let wd_session = session_id;
+        // Heartbeat (claude PTYs only) — re-evaluates the pure-state snapshot on a
+        // fixed tick and re-emits it when it changed. Two jobs: (1) self-heal a
+        // snapshot the frontend missed because no listener was attached when the
+        // reader emitted it (session switch, panel remount); (2) land a
+        // silence-based turn-end — when a turn finishes by going quiet past
+        // `IDLE_DONE_MS` with no fresh PTY chunk to drive the reader, the clock in
+        // `compute_pure_state` flips `busy` false and this tick ships it. Runs off
+        // the same byte pipe as the reader, so it survives the window losing focus.
+        if let (Some(idle), Some(pure), Some(last)) =
+            (idle.clone(), pure.clone(), last_state.clone())
+        {
+            let hb_app = app.clone();
+            let hb_alive = alive.clone();
+            let hb_session = session_id;
             std::thread::spawn(move || {
-                while wd_alive.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(500));
-                    let fire = {
-                        let Ok(mut st) = idle.lock() else { break };
-                        if !st.armed
-                            || st.last_output.elapsed() < Duration::from_millis(IDLE_DONE_MS)
-                        {
-                            false
+                while hb_alive.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(HEARTBEAT_MS));
+                    let emit = {
+                        let (Ok(sniffer), Ok(st), Ok(mut prev)) =
+                            (pure.lock(), idle.lock(), last.lock())
+                        else {
+                            break;
+                        };
+                        let next = compute_pure_state(&sniffer, &st);
+                        if *prev != Some(next) {
+                            *prev = Some(next);
+                            Some(next)
                         } else {
-                            // Don't call a turn done while a prompt waits for an
-                            // answer, a marker already settled it, or the current
-                            // TUI frame still shows a live working spinner.
-                            //
-                            // `is_working_now()` (not the old `working_active`
-                            // latch) checks only the last painted line, so a
-                            // STALE spinner frame retained earlier in the
-                            // append-only tail can't freeze the watchdog. Pairing
-                            // it with the content-aware `last_output` refresh
-                            // (chrome redraws no longer reset the silence window)
-                            // closes both holes: a quiet-but-live think can't be
-                            // declared idle, and a finished-but-animating turn
-                            // does go idle instead of sticking "busy" (blue dot).
-                            let block = pure
-                                .lock()
-                                .map(|s| s.prompt_open() || s.turn_settled() || s.is_working_now())
-                                .unwrap_or(true);
-                            if block {
-                                false
-                            } else {
-                                st.armed = false;
-                                true
-                            }
+                            None
                         }
                     };
-                    if fire {
-                        let _ = wd_app.emit(
-                            &format!("session:{wd_session}:pure-signal"),
-                            PureSignalEvent {
-                                terminal_id: wd_id.clone(),
-                                signal: PureSignal::TurnEnded,
-                            },
-                        );
+                    if let Some(next) = emit {
+                        let _ = hb_app.emit(&format!("session:{hb_session}:pure-state"), next);
                     }
                 }
             });
@@ -822,8 +828,8 @@ impl PtySupervisor {
     }
 
     /// Ground-truth pure-turn dot state for `session_id`, read straight off the
-    /// live sniffer + idle watchdog. Lets the frontend reconcile a dot that a
-    /// dropped (un-listened) pure-signal event left stale. No claude PTY for the
+    /// live sniffer + output clock. Lets the frontend seed/reconcile the dot on
+    /// attach, before the first `pure-state` event lands. No claude PTY for the
     /// session → the default (idle) state.
     pub fn pure_state(&self, session_id: AggregateId) -> PureState {
         let terminals = self.terminals.lock().expect("pty mutex poisoned");
@@ -831,20 +837,11 @@ impl PtySupervisor {
             if t.session_id != session_id || t.kind != TerminalKind::Claude {
                 continue;
             }
-            let (needs_input, settled) = t
-                .pure
-                .as_ref()
-                .and_then(|p| p.lock().ok().map(|s| (s.prompt_open(), s.turn_settled())))
-                .unwrap_or((false, false));
-            let armed = t
-                .idle
-                .as_ref()
-                .and_then(|i| i.lock().ok().map(|st| st.armed))
-                .unwrap_or(false);
-            // A turn is "in flight" while the idle watchdog is armed and nothing
-            // has settled or paused it. `needs_input` outranks `busy` at the dot.
-            let busy = armed && !needs_input && !settled;
-            return PureState { needs_input, busy };
+            if let (Some(pure), Some(idle)) = (&t.pure, &t.idle)
+                && let (Ok(sniffer), Ok(st)) = (pure.lock(), idle.lock())
+            {
+                return compute_pure_state(&sniffer, &st);
+            }
         }
         PureState::default()
     }
@@ -882,7 +879,8 @@ impl PtySupervisor {
             .ok_or_else(|| PtyError::UnknownTerminal(id.to_owned()))?;
         // A carriage return submits the current turn (answers a prompt / sends a
         // message). Clear the pure-signal latches so the next prompt or turn-end
-        // fires fresh, and arm the idle watchdog. Matches the frontend's
+        // fires fresh, and stamp the output clock so the just-started turn reads
+        // "fresh" until claude paints its spinner. Matches the frontend's
         // `onPtyInput` reset on `\r`.
         if data.contains('\r') {
             if let Some(pure) = &live.pure
@@ -893,7 +891,6 @@ impl PtySupervisor {
             if let Some(idle) = &live.idle
                 && let Ok(mut st) = idle.lock()
             {
-                st.armed = true;
                 st.last_output = Instant::now();
             }
         }

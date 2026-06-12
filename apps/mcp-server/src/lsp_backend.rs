@@ -108,12 +108,34 @@ impl LspBackend {
         }
     }
 
-    pub fn resolve_path(&self, file: &str) -> PathBuf {
-        let path = PathBuf::from(file);
-        if path.is_absolute() {
-            return path;
+    /// Resolve a tool-supplied `file` argument to an absolute path **confined to
+    /// the workspace**. The MCP server is driven by a `claude` child running
+    /// under `bypassPermissions`, so an unconfined `file` would let it read any
+    /// file the process can. Rejects absolute paths and `..`, then canonicalizes
+    /// (resolving symlinks) and confirms the real path is still under the
+    /// workspace root — closing the symlink-escape hole too.
+    pub fn resolve_path(&self, file: &str) -> Result<PathBuf, String> {
+        let raw = Path::new(file);
+        if raw.is_absolute()
+            || raw
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("path must be relative to the workspace: {file}"));
         }
-        self.workspace().join(path)
+        let root = self
+            .workspace()
+            .canonicalize()
+            .map_err(|e| format!("workspace unavailable: {e}"))?;
+        let real = self
+            .workspace()
+            .join(raw)
+            .canonicalize()
+            .map_err(|_| format!("no such file in workspace: {file}"))?;
+        if !real.starts_with(&root) {
+            return Err(format!("path escapes the workspace: {file}"));
+        }
+        Ok(real)
     }
 
     pub fn uri_to_display(&self, uri: &str) -> String {

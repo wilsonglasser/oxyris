@@ -67,9 +67,7 @@ pub fn resolve_worktree(
 ) -> Result<(Environment, String), FsError> {
     let project = state
         .projections
-        .list_projects()?
-        .into_iter()
-        .find(|p| p.id == project_id)
+        .get_project(project_id)?
         .ok_or(FsError::ProjectNotFound)?;
 
     if worktree_id == PRIMARY_WORKTREE_SENTINEL {
@@ -131,6 +129,47 @@ pub fn join_inside_worktree(env: &Environment, root: &str, rel: &str) -> Result<
     let trim_root = root.trim_end_matches(['/', '\\']);
     let joined = normalized.join(&sep.to_string());
     Ok(format!("{trim_root}{sep}{joined}"))
+}
+
+/// Verify a `joined` native path (already free of `..`/absolute segments via
+/// [`join_inside_worktree`]) does not escape `root` through a **symlink inside
+/// the worktree**. Lexical containment can't catch `link -> /etc` sitting in the
+/// repo; this canonicalizes the nearest existing ancestor (the leaf may not
+/// exist yet for a create/write) and confirms the real path stays under the
+/// canonical root. Native projects only — WSL paths are confined agent-side and
+/// can't be canonicalized from the Windows host.
+fn verify_native_contained(root: &str, joined: &str) -> Result<(), FsError> {
+    let canon_root = Path::new(root)
+        .canonicalize()
+        .map_err(|e| FsError::InvalidPath(format!("worktree root unavailable: {e}")))?;
+    // Walk up to the first component that actually exists, then canonicalize it
+    // (resolving any symlinks along the way).
+    let mut probe = Path::new(joined);
+    let canon_target = loop {
+        match probe.canonicalize() {
+            Ok(c) => break c,
+            Err(_) => match probe.parent() {
+                Some(p) if !p.as_os_str().is_empty() => probe = p,
+                _ => return Err(FsError::InvalidPath(format!("cannot resolve: {joined}"))),
+            },
+        }
+    };
+    if canon_target.starts_with(&canon_root) {
+        Ok(())
+    } else {
+        Err(FsError::InvalidPath(format!("escapes worktree: {joined}")))
+    }
+}
+
+/// [`join_inside_worktree`] plus, for native projects, the symlink-escape check
+/// in [`verify_native_contained`]. The Tauri fs command layer uses this so every
+/// path it hands to a native `std::fs` op is proven to stay inside the worktree.
+pub fn safe_join(env: &Environment, root: &str, rel: &str) -> Result<String, FsError> {
+    let joined = join_inside_worktree(env, root, rel)?;
+    if matches!(env, Environment::Local) {
+        verify_native_contained(root, &joined)?;
+    }
+    Ok(joined)
 }
 
 // ────── ops ────────────────────────────────────────────────────────────────
@@ -882,5 +921,37 @@ mod tests {
     fn empty_rel_returns_root() {
         let p = join_inside_worktree(&Environment::Local, r"C:\proj", "").unwrap();
         assert_eq!(p, r"C:\proj");
+    }
+
+    #[test]
+    fn safe_join_allows_real_nested_path() {
+        // A real temp dir as the worktree root; a normal subpath passes (leaf
+        // need not exist — create/write resolves the nearest ancestor).
+        let root = std::env::temp_dir().join(format!("oxyris_sj_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        let p = safe_join(&Environment::Local, &root_s, "src/new_file.rs").unwrap();
+        assert!(p.contains("new_file.rs"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Symlink creation needs no privilege on Unix; on Windows it requires admin
+    // or developer mode, so gate the escape test to Unix.
+    #[cfg(unix)]
+    #[test]
+    fn safe_join_blocks_symlink_escape() {
+        let base = std::env::temp_dir().join(format!("oxyris_sjlink_{}", std::process::id()));
+        let root = base.join("wt");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"x").unwrap();
+        // A symlink INSIDE the worktree pointing out of it.
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        // Lexically clean (no `..`), but resolves outside → must be rejected.
+        let err = safe_join(&Environment::Local, &root_s, "link/secret").unwrap_err();
+        assert!(matches!(err, FsError::InvalidPath(_)));
+        std::fs::remove_dir_all(&base).ok();
     }
 }

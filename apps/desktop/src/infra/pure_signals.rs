@@ -25,44 +25,42 @@ const TAIL_CAP_CHARS: usize = 2000;
 /// to handle the OSC `BEL`/`ESC \` terminators cleanly).
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let bytes: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
+    // Iterate in place over a peekable char stream — no intermediate
+    // `Vec<char>` allocation of the whole chunk (this runs on the PTY reader
+    // hot path, once per output chunk).
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
         if c != '\u{1b}' {
             out.push(c);
-            i += 1;
             continue;
         }
-        match bytes.get(i + 1) {
+        match chars.next() {
             Some('[') => {
-                // CSI: skip until a final byte in @–~ (0x40–0x7e).
-                i += 2;
-                while i < bytes.len() {
-                    let f = bytes[i];
+                // CSI: skip until a final byte in @–~ (0x40–0x7e), inclusive.
+                for f in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&f) {
-                        i += 1;
                         break;
                     }
-                    i += 1;
                 }
             }
             Some(']') => {
                 // OSC: skip until BEL (7) or ESC (start of the ST terminator).
-                i += 2;
-                while i < bytes.len() && bytes[i] != '\u{7}' && bytes[i] != '\u{1b}' {
-                    i += 1;
-                }
-                // Consume a BEL terminator. An ESC terminator (ST = ESC `\`) is
-                // left for the next iteration's lone-ESC branch to drop.
-                if i < bytes.len() && bytes[i] == '\u{7}' {
-                    i += 1;
+                while let Some(&n) = chars.peek() {
+                    if n == '\u{7}' {
+                        chars.next(); // consume the BEL terminator
+                        break;
+                    }
+                    if n == '\u{1b}' {
+                        // ESC terminator (ST = ESC `\`) — leave it for the next
+                        // iteration's lone-ESC branch to drop.
+                        break;
+                    }
+                    chars.next();
                 }
             }
-            _ => {
-                // Lone ESC or a 2-byte escape — drop ESC and the following byte.
-                i += 2;
-            }
+            // Lone ESC or a 2-byte escape — ESC + the following byte already
+            // consumed by `chars.next()` above; nothing to emit.
+            _ => {}
         }
     }
     out
@@ -91,18 +89,43 @@ fn poll_re() -> &'static Regex {
 }
 
 /// Turn-end summary line ("✶ Worked for 3m 9s", "✻ Brewed for 12s", …). A hard
-/// "done" signal. Port of `PURE_TURN_END_RE`.
+/// "done" signal. Port of `PURE_TURN_END_RE`. Glyph class widened past the
+/// original `✱-✽` (see [`working_re`]).
 fn turn_end_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)[✱-✽]\s+\S+\s+for\s+\d+[ms]").expect("pure turn-end regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)[\x{2720}-\x{274F}]\s+\S+\s+for\s+\d+[ms]").expect("pure turn-end regex")
+    })
 }
 
 /// Live working spinner — same glyph family but a present-participle verb and a
 /// trailing ellipsis ("✻ Flummoxing… (8m …)"). Tells us claude is still busy.
 /// Port of `PURE_WORKING_RE`.
+///
+/// The glyph class is the whole `✠`–`❏` Dingbat asterisk/sparkle block
+/// (`U+2720`–`U+274F`), not the original narrow `✱-✽` (`U+2731`–`U+273D`):
+/// claude's spinner cycles glyphs outside that slice (`✶ U+2736`, `✳ U+2733`,
+/// `✦ U+2726`), and a glyph the regex didn't cover read as "not working" → the
+/// blue dot never lit. Widening it is the cheap half of the "stuck dot" fix; the
+/// load-bearing half is [`interrupt_re`].
 fn working_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"[✱-✽][^\n…]*(…|\.\.\.)").expect("pure working regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"[\x{2720}-\x{274F}][^\n…]*(…|\.\.\.)").expect("pure working regex")
+    })
+}
+
+/// The claude TUI prints an "esc to interrupt" (older builds: "ctrl-c to
+/// interrupt") hint in the spinner footer for the *entire* time a turn is live,
+/// and clears it the instant the turn settles. It does not depend on the
+/// rotating spinner glyph, so it survives a glyph change in the CLI — the most
+/// stable "a turn is running right now" signal there is. Drives the blue dot via
+/// [`PureSniffer::is_busy_now`].
+fn interrupt_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(esc|ctrl-c|ctrl\+c)\s+to\s+interrupt").expect("pure interrupt regex")
+    })
 }
 
 /// End-of-conversation recap line — "✻ recap: …" (current TUI) or "※ recap"
@@ -110,7 +133,7 @@ fn working_re() -> &'static Regex {
 /// "for <duration>"). Port of `PURE_RECAP_RE`.
 fn recap_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)([✱-✽]|※)\s*recap").expect("pure recap regex"))
+    RE.get_or_init(|| Regex::new(r"(?i)([\x{2720}-\x{274F}]|※)\s*recap").expect("pure recap regex"))
 }
 
 /// claude's rotating one-line TUI hint ("Tip: …"), usually under a tree glyph
@@ -128,14 +151,29 @@ fn strip_tip_lines(s: &str) -> String {
     tip_re().replace_all(s, "").into_owned()
 }
 
+/// Reduce a raw PTY chunk to the form the detectors work on: ANSI escapes
+/// stripped, animated tip-hint lines removed. The reader computes this **once**
+/// per chunk and hands it to both [`PureSniffer::feed_stripped`] and
+/// [`has_content_stripped`] so the hot path strips a chunk a single time instead
+/// of once per call.
+pub fn strip_for_detection(raw: &str) -> String {
+    strip_tip_lines(&strip_ansi(raw))
+}
+
 /// True if `data`, once chrome is stripped (ANSI escapes + the animated tip
 /// hint), still carries visible text. The idle watchdog uses this so a pure
 /// chrome redraw — the rotating "Tip:" hint, a cursor blink, a bare repaint —
 /// does NOT push the silence window out and keep a finished turn stuck "busy".
 /// A live working spinner ("✻ Drizzling…") DOES count as content, so it keeps
 /// the turn alive while it's on screen.
+#[cfg(test)]
 pub fn has_content(data: &str) -> bool {
-    let stripped = strip_tip_lines(&strip_ansi(data));
+    has_content_stripped(&strip_for_detection(data))
+}
+
+/// [`has_content`] on an already-[`strip_for_detection`]-ed chunk — lets the
+/// reader reuse the single strip it computed for the sniffer.
+pub fn has_content_stripped(stripped: &str) -> bool {
     stripped
         .chars()
         .any(|c| !c.is_whitespace() && !c.is_control())
@@ -176,10 +214,18 @@ impl PureSniffer {
     }
 
     /// Feed a raw (un-stripped) PTY output chunk. Returns the signals this chunk
-    /// newly triggered, in detection order.
+    /// newly triggered, in detection order. Convenience wrapper that strips then
+    /// delegates to [`Self::feed_stripped`]; the hot path calls `feed_stripped`
+    /// directly with a chunk it already stripped once via [`strip_for_detection`].
+    #[cfg(test)]
     pub fn feed(&mut self, data: &str) -> Vec<PureSignal> {
-        let stripped = strip_tip_lines(&strip_ansi(data));
-        self.tail.push_str(&stripped);
+        self.feed_stripped(&strip_for_detection(data))
+    }
+
+    /// Feed a chunk already reduced by [`strip_for_detection`]. Returns the
+    /// signals it newly triggered, in detection order.
+    pub fn feed_stripped(&mut self, stripped: &str) -> Vec<PureSignal> {
+        self.tail.push_str(stripped);
         // Keep only the last TAIL_CAP_CHARS chars, on a char boundary.
         let len = self.tail.chars().count();
         if len > TAIL_CAP_CHARS {
@@ -231,25 +277,23 @@ impl PureSniffer {
         self.prompt_open
     }
 
-    /// True once a marker already settled this turn (poll / "Worked for…" /
-    /// recap), so the idle watchdog can skip a redundant `TurnEnded`.
-    pub fn turn_settled(&self) -> bool {
-        self.poll_open || self.turn_end_seen || self.recap_seen
-    }
-
-    /// True if the **current** TUI frame shows a live working spinner. Unlike
-    /// the `working_active` latch (which matches the whole append-only tail and
-    /// so stays `true` forever once a spinner has ever appeared), this checks
+    /// True if the **current** TUI frame shows a turn actively running. Unlike a
+    /// whole-tail match (the append-only tail keeps every stale spinner frame, so
+    /// it would read `true` forever once a spinner ever appeared), this inspects
     /// only the last non-empty line — the most recently painted row. When claude
     /// redraws over the spinner with its turn-end output, the last line is no
-    /// longer a spinner and this goes `false`. The idle watchdog gates on it so a
-    /// genuinely-live-but-quiet spinner can't be declared idle.
-    pub fn is_working_now(&self) -> bool {
+    /// longer a spinner/interrupt hint and this goes `false`. That edge is what
+    /// drops the blue "busy" dot the moment a turn settles.
+    ///
+    /// Matches either the rotating spinner ([`working_re`]) **or** the far more
+    /// stable "esc to interrupt" footer ([`interrupt_re`]) — whichever claude
+    /// paints last — so a spinner-glyph change can't silently freeze the dot.
+    pub fn is_busy_now(&self) -> bool {
         self.tail
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
-            .map(|l| working_re().is_match(l))
+            .map(|l| working_re().is_match(l) || interrupt_re().is_match(l))
             .unwrap_or(false)
     }
 
@@ -393,21 +437,37 @@ mod tests {
     }
 
     #[test]
-    fn is_working_now_true_while_spinner_is_last_line() {
+    fn is_busy_now_true_while_spinner_is_last_line() {
         let mut s = PureSniffer::new();
         s.feed("some streamed thinking text\n✻ Drizzling… (36s)");
-        assert!(s.is_working_now());
+        assert!(s.is_busy_now());
     }
 
     #[test]
-    fn is_working_now_false_after_spinner_redrawn_to_turn_end() {
+    fn is_busy_now_true_on_esc_to_interrupt_footer() {
+        let mut s = PureSniffer::new();
+        // No spinner glyph at all — only the stable interrupt hint.
+        s.feed("streaming a long answer\n  (12s · esc to interrupt)");
+        assert!(s.is_busy_now());
+    }
+
+    #[test]
+    fn is_busy_now_true_on_widened_spinner_glyph() {
+        let mut s = PureSniffer::new();
+        // ✦ (U+2726) is outside the old ✱-✽ slice — must still count as busy.
+        s.feed("✦ Sketching… (3s)");
+        assert!(s.is_busy_now());
+    }
+
+    #[test]
+    fn is_busy_now_false_after_spinner_redrawn_to_turn_end() {
         let mut s = PureSniffer::new();
         // Stale spinner frame retained earlier in the append-only tail …
         s.feed("✻ Cogitating… (1m)\n");
         // … then claude paints the turn-end summary + recap below it.
         s.feed("✶ Cogitated for 1m 15s\n✶ recap: fixed the upload perms\n› ");
-        // Last painted line is the prompt, not a spinner → not working.
-        assert!(!s.is_working_now());
+        // Last painted line is the prompt, not a spinner → not busy.
+        assert!(!s.is_busy_now());
     }
 
     #[test]

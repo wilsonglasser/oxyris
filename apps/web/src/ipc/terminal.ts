@@ -66,10 +66,9 @@ export type PureState = {
 
 /**
  * Ground-truth pure-turn dot state for a session, read off the backend's live
- * sniffer + idle watchdog. The `pure-signal` events that normally drive the dot
- * are fire-and-forget and latch once per turn — a signal that fires while no
- * listener is attached (session switch, panel remount) is lost, leaving the dot
- * stale. Call this on attach/focus to re-sync.
+ * sniffer + output clock. Used to seed the dot on attach, before the first
+ * {@link onPureState} snapshot lands (the per-session listener may register
+ * after the backend already emitted the current state).
  */
 export async function claudePureState(input: {
   session_id: string;
@@ -137,28 +136,25 @@ export async function onTerminalExit(
   return listen<string>(`terminal:${id}:exit`, (e) => cb(e.payload));
 }
 
-/** Pure-mode turn-state signal, detected backend-side from the claude TUI's
- * raw PTY stream (see `infra::pure_signals`). Driving this from the backend —
- * instead of a frontend sniffer + `setTimeout` — is what makes detection
- * survive the window losing focus (the WebView throttles background timers). */
-export type PureSignal = "needs_input" | "turn_ended" | "working";
-
-export type PureSignalEvent = {
-  terminal_id: string;
-  signal: PureSignal;
-};
-
 /**
- * Subscribe to a pure session's backend turn-state signals, keyed by the
+ * Subscribe to a pure session's backend turn-state snapshots, keyed by the
  * session id (not the terminal id — the backend emits per session so background
  * watchers can listen without first resolving the claude PTY).
+ *
+ * Unlike the old edge `pure-signal`, this is a LEVEL snapshot: the backend emits
+ * the full {@link PureState} whenever it changes AND on a heartbeat, so a
+ * snapshot missed while no listener was attached self-heals on the next tick.
+ * The consumer derives chime/attention transitions by diffing against the
+ * previous snapshot — see the single bridge in `Sidebar`. Driving this from the
+ * backend (not a frontend sniffer + `setTimeout`) is what makes detection
+ * survive the window losing focus (the WebView throttles background timers).
  */
-export async function onPureSignal(
+export async function onPureState(
   sessionId: string,
-  cb: (signal: PureSignal, terminalId: string) => void,
+  cb: (state: PureState) => void,
 ): Promise<UnlistenFn> {
-  return listen<PureSignalEvent>(
-    `session:${sessionId}:pure-signal`,
-    (e) => cb(e.payload.signal, e.payload.terminal_id),
+  return listen<PureState>(
+    `session:${sessionId}:pure-state`,
+    (e) => cb(e.payload),
   );
 }

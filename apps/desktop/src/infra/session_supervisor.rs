@@ -395,15 +395,7 @@ impl SessionSupervisor {
         &self,
         session_id: AggregateId,
     ) -> Result<(SessionState, u32), SupervisorError> {
-        let stored = self.event_store.load(Session::KIND, session_id)?;
-        let mut typed = Vec::with_capacity(stored.len());
-        for s in &stored {
-            let event: SessionEvent = serde_json::from_value(s.payload.clone())
-                .map_err(EventStoreError::Serialization)?;
-            typed.push(event);
-        }
-        let version = stored.last().map(|s| s.version).unwrap_or(0);
-        Ok((replay::<Session>(&typed), version))
+        load_session_core(&self.event_store, session_id)
     }
 
     async fn persist_and_emit(
@@ -452,6 +444,10 @@ impl SessionSupervisor {
         }
 
         tokio::spawn(async move {
+            // Folded aggregate state, owned by this per-session task. Seeded
+            // lazily on the first event and advanced in place after each append,
+            // so the streaming hot path never reloads the whole event log.
+            let mut cache: Option<(SessionState, u32)> = None;
             while let Some(event) = session.events.recv().await {
                 if let Err(e) = handle_provider_event(
                     &store,
@@ -460,6 +456,7 @@ impl SessionSupervisor {
                     &app,
                     session_id,
                     event,
+                    &mut cache,
                 )
                 .await
                 {
@@ -519,6 +516,7 @@ async fn handle_provider_event(
     app: &AppHandle,
     session_id: AggregateId,
     event: ProviderEvent,
+    cache: &mut Option<(SessionState, u32)>,
 ) -> Result<(), SupervisorError> {
     let now = Utc::now();
 
@@ -532,8 +530,16 @@ async fn handle_provider_event(
     if let Some(turn_id) = post_turn {
         let Some((root_path, environment)) = resolve_project(projections, session_id) else {
             tracing::debug!(%session_id, "no project resolved for checkpoint; skipping");
-            return handle_provider_event_core(store, projections, app, session_id, event, now)
-                .await;
+            return handle_provider_event_core(
+                store,
+                projections,
+                app,
+                session_id,
+                event,
+                now,
+                cache,
+            )
+            .await;
         };
         let session_str = session_id.to_string();
         if let Err(e) = checkpoint::capture(
@@ -550,7 +556,25 @@ async fn handle_provider_event(
         }
     }
 
-    handle_provider_event_core(store, projections, app, session_id, event, now).await
+    handle_provider_event_core(store, projections, app, session_id, event, now, cache).await
+}
+
+/// Fold a session's full event log into `(state, version)` — used to (re)seed
+/// the pump's in-memory cache. The hot path avoids calling this per event; it
+/// runs once at pump start and again only on an optimistic-concurrency conflict.
+fn load_session_core(
+    store: &EventStore,
+    session_id: AggregateId,
+) -> Result<(SessionState, u32), SupervisorError> {
+    let stored = store.load(Session::KIND, session_id)?;
+    let mut typed = Vec::with_capacity(stored.len());
+    for s in &stored {
+        typed.push(
+            serde_json::from_value(s.payload.clone()).map_err(EventStoreError::Serialization)?,
+        );
+    }
+    let version = stored.last().map(|s| s.version).unwrap_or(0);
+    Ok((replay::<Session>(&typed), version))
 }
 
 fn resolve_project(
@@ -571,6 +595,7 @@ async fn handle_provider_event_core(
     session_id: AggregateId,
     event: ProviderEvent,
     now: chrono::DateTime<Utc>,
+    cache: &mut Option<(SessionState, u32)>,
 ) -> Result<(), SupervisorError> {
     // Tool-approval prompts are transient UI state, not session history — we
     // surface them to the frontend on a side channel rather than persisting
@@ -644,39 +669,74 @@ async fn handle_provider_event_core(
         ProviderEvent::SessionEnded => SessionCommand::Stop { now },
     };
 
-    let stored = store.load(Session::KIND, session_id)?;
-    let mut typed = Vec::with_capacity(stored.len());
-    for s in &stored {
-        let event: SessionEvent =
-            serde_json::from_value(s.payload.clone()).map_err(EventStoreError::Serialization)?;
-        typed.push(event);
-    }
-    let version = stored.last().map(|s| s.version).unwrap_or(0);
-    let state = replay::<Session>(&typed);
+    // Hot path: decide against the pump's in-memory folded state (seeded once,
+    // not reloaded per event — that reload+replay of the whole log was the
+    // O(N²)-per-turn cost), append, then fold the new events forward in place.
+    // A concurrency conflict means another writer (a user stop/interrupt that
+    // went through `persist_and_emit`) landed between our cached version and the
+    // store — drop the stale cache, reload once, and re-decide against truth.
+    for attempt in 0..2 {
+        if cache.is_none() {
+            *cache = Some(load_session_core(store, session_id)?);
+        }
+        let (state, version) = cache.as_mut().expect("cache seeded above");
 
-    let events = match Session::decide(&state, cmd) {
-        Ok(events) => events,
-        Err(SessionError::TurnNotStreaming(_)) | Err(SessionError::UnknownTurn(_)) => {
-            // Late events from a turn the user already interrupted — drop.
+        let events = match Session::decide(state, cmd.clone()) {
+            Ok(events) => events,
+            Err(SessionError::TurnNotStreaming(_)) | Err(SessionError::UnknownTurn(_)) => {
+                // Late events from a turn the user already interrupted — drop.
+                return Ok(());
+            }
+            Err(e) => return Err(SupervisorError::Domain(e)),
+        };
+        if events.is_empty() {
             return Ok(());
         }
-        Err(e) => return Err(SupervisorError::Domain(e)),
-    };
-    if events.is_empty() {
-        return Ok(());
-    }
-    let stored = store.append(Session::KIND, session_id, version, &events)?;
-    for s in &stored {
-        projections.apply(s)?;
-    }
-    for (s, ev) in stored.iter().zip(events.iter()) {
-        let payload = EmittedSessionEvent {
-            session_id,
-            version: s.version,
-            event: ev.clone(),
+
+        let stored = match store.append(Session::KIND, session_id, *version, &events) {
+            Ok(stored) => stored,
+            Err(EventStoreError::Concurrency { .. }) if attempt == 0 => {
+                // Cache fell behind a concurrent writer — reseed and retry once.
+                *cache = None;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
         };
-        let event_name = format!("session:{session_id}:event");
-        let _ = app.emit(&event_name, payload);
+
+        // Advance the cache instead of throwing it away: fold the just-appended
+        // events and take the new head version.
+        for ev in &events {
+            Session::apply(state, ev);
+        }
+        let last = stored.last();
+        if let Some(last) = last {
+            *version = last.version;
+        }
+
+        // Project the read model from the folded state we already hold, instead
+        // of the generic per-event `apply` (which re-reads + re-deserializes the
+        // snapshot from SQLite on every streamed delta). A delete must still go
+        // through the generic drop path.
+        if events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::SessionDeleted { .. }))
+        {
+            for s in &stored {
+                projections.apply(s)?;
+            }
+        } else if let Some(last) = last {
+            projections.apply_session_state(state, last.timestamp)?;
+        }
+        for (s, ev) in stored.iter().zip(events.iter()) {
+            let payload = EmittedSessionEvent {
+                session_id,
+                version: s.version,
+                event: ev.clone(),
+            };
+            let event_name = format!("session:{session_id}:event");
+            let _ = app.emit(&event_name, payload);
+        }
+        return Ok(());
     }
     Ok(())
 }

@@ -381,6 +381,28 @@ impl Projections {
         Ok(())
     }
 
+    /// Single-row project lookup by id (indexed PK). Use this on hot paths
+    /// (every fs/git command resolves a worktree) instead of `list_projects()`
+    /// + `.find()`, which scans and parses every project row each call.
+    pub fn get_project(
+        &self,
+        id: oxyris_core::AggregateId,
+    ) -> Result<Option<ProjectRow>, ProjectionError> {
+        let conn = self.conn.lock().expect("projections mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, name, environment_kind, environment_distro, root_path,
+                    session_count, created_at, last_activity_at, logo_path, workspace,
+                    sort_order
+               FROM projections_projects
+              WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id.to_string()])?;
+        if let Some(row) = rows.next()? {
+            return Ok(Some(row_to_project(row)?));
+        }
+        Ok(None)
+    }
+
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, ProjectionError> {
         let conn = self.conn.lock().expect("projections mutex poisoned");
         let mut stmt = conn.prepare(
@@ -447,53 +469,35 @@ impl Projections {
         let conn = self.conn.lock().expect("projections mutex poisoned");
 
         // Load the previous snapshot (if any) and fold this event into it.
-        let prev_snapshot: Option<(String, u32, i64)> = conn
+        let prev_snapshot: Option<String> = conn
             .query_row(
-                "SELECT state_snapshot, turn_count, (SELECT COUNT(*) FROM projections_sessions WHERE id = ?1)
-                   FROM projections_sessions WHERE id = ?1",
+                "SELECT state_snapshot FROM projections_sessions WHERE id = ?1",
                 params![stored.aggregate_id.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?)),
+                |row| row.get::<_, String>(0),
             )
             .optional()?;
 
-        let mut state = if let Some((snap, _, _)) = prev_snapshot {
-            serde_json::from_str::<SessionState>(&snap).unwrap_or_default()
-        } else {
-            SessionState::default()
-        };
+        let mut state = prev_snapshot
+            .and_then(|snap| serde_json::from_str::<SessionState>(&snap).ok())
+            .unwrap_or_default();
         Session::apply(&mut state, event);
 
-        let snapshot_json = serde_json::to_string(&state)?;
-        let data = state
-            .inner
-            .as_ref()
-            .expect("session state populated after apply");
+        write_session_row(&conn, &state, stored.timestamp)
+    }
 
-        conn.execute(
-            "INSERT OR REPLACE INTO projections_sessions
-                (id, project_id, worktree_id, provider_id, model, status,
-                 turn_count, state_snapshot, created_at, last_activity_at,
-                 title, pinned_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                data.id.to_string(),
-                data.project_id.to_string(),
-                data.worktree_id.map(|w| w.to_string()),
-                data.provider_id,
-                data.model,
-                serde_json::to_string(&data.status)
-                    .unwrap_or_default()
-                    .trim_matches('"')
-                    .to_owned(),
-                data.turns.len() as u32,
-                snapshot_json,
-                data.created_at.to_rfc3339(),
-                stored.timestamp.to_rfc3339(),
-                data.title.clone(),
-                data.pinned_at.map(|t| t.to_rfc3339()),
-            ],
-        )?;
-        Ok(())
+    /// Upsert a session's read-model row straight from an already-folded
+    /// [`SessionState`]. The supervisor's per-session event pump keeps the
+    /// aggregate folded in memory, so on the streaming hot path it hands the
+    /// post-event state here — skipping the per-event snapshot read + full
+    /// deserialize + re-fold that [`Projections::apply`] does. The written row
+    /// is identical to what folding via `apply` would produce.
+    pub fn apply_session_state(
+        &self,
+        state: &SessionState,
+        last_activity: DateTime<Utc>,
+    ) -> Result<(), ProjectionError> {
+        let conn = self.conn.lock().expect("projections mutex poisoned");
+        write_session_row(&conn, state, last_activity)
     }
 
     pub fn list_sessions(
@@ -739,6 +743,46 @@ pub struct SessionSummaryRow {
 pub struct SessionSnapshot {
     #[serde(flatten)]
     pub data: crate::domain::session::SessionData,
+}
+
+/// Serialize a folded `SessionState` into the `projections_sessions` row.
+/// Shared by the generic per-event `apply` path and the supervisor's
+/// folded-state fast path so both write byte-identical rows.
+fn write_session_row(
+    conn: &Connection,
+    state: &SessionState,
+    last_activity: DateTime<Utc>,
+) -> Result<(), ProjectionError> {
+    let snapshot_json = serde_json::to_string(state)?;
+    let data = state
+        .inner
+        .as_ref()
+        .expect("session state populated after apply");
+    conn.execute(
+        "INSERT OR REPLACE INTO projections_sessions
+            (id, project_id, worktree_id, provider_id, model, status,
+             turn_count, state_snapshot, created_at, last_activity_at,
+             title, pinned_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            data.id.to_string(),
+            data.project_id.to_string(),
+            data.worktree_id.map(|w| w.to_string()),
+            data.provider_id,
+            data.model,
+            serde_json::to_string(&data.status)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_owned(),
+            data.turns.len() as u32,
+            snapshot_json,
+            data.created_at.to_rfc3339(),
+            last_activity.to_rfc3339(),
+            data.title.clone(),
+            data.pinned_at.map(|t| t.to_rfc3339()),
+        ],
+    )?;
+    Ok(())
 }
 
 fn row_to_session_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummaryRow> {
@@ -1036,5 +1080,81 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Oxyris Code");
         assert_eq!(rows[0].id, id);
+    }
+
+    fn session_stored(id: AggregateId, version: u32, event: &SessionEvent) -> StoredEvent {
+        use oxyris_core::DomainEvent;
+        StoredEvent {
+            seq: Some(version as i64),
+            aggregate: Session::KIND.to_owned(),
+            aggregate_id: id,
+            version,
+            kind: event.kind().to_owned(),
+            payload: serde_json::to_value(event).unwrap(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// The supervisor's fast path (`apply_session_state`, fed the in-memory
+    /// folded state) must produce the same read-model row as the generic
+    /// per-event `apply`. Both share `write_session_row`; this guards the two
+    /// ways of reaching it from drifting.
+    #[test]
+    fn folded_state_path_matches_generic_apply() {
+        use crate::domain::session::SessionCommand;
+
+        let id = AggregateId::new();
+        let project_id = AggregateId::new();
+        let now = Utc::now();
+
+        // Build a small event history: start → one turn.
+        let mut state = SessionState::default();
+        let start = Session::decide(
+            &state,
+            SessionCommand::Start {
+                id,
+                project_id,
+                worktree_id: None,
+                provider_id: "claude".into(),
+                model: "opus".into(),
+                thinking: Default::default(),
+                runtime: Default::default(),
+                env_mode: Default::default(),
+                kind: Default::default(),
+                now,
+            },
+        )
+        .unwrap();
+        for e in &start {
+            Session::apply(&mut state, e);
+        }
+        let turn = Session::decide(
+            &state,
+            SessionCommand::StartTurn {
+                turn_id: "turn-1".into(),
+                user_text: "hello there friend".into(),
+                now,
+            },
+        )
+        .unwrap();
+        for e in &turn {
+            Session::apply(&mut state, e);
+        }
+        let all: Vec<SessionEvent> = start.into_iter().chain(turn).collect();
+
+        // Path A: generic per-event apply.
+        let pa = Projections::open_in_memory().unwrap();
+        for (i, e) in all.iter().enumerate() {
+            pa.apply(&session_stored(id, i as u32 + 1, e)).unwrap();
+        }
+        let snap_a = pa.get_session(id).unwrap().unwrap();
+
+        // Path B: one folded-state upsert.
+        let pb = Projections::open_in_memory().unwrap();
+        pb.apply_session_state(&state, now).unwrap();
+        let snap_b = pb.get_session(id).unwrap().unwrap();
+
+        assert_eq!(snap_a.data, snap_b.data);
+        assert_eq!(snap_b.data.turns.len(), 1);
     }
 }

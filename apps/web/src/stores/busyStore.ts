@@ -16,6 +16,10 @@ import { create } from "zustand";
 interface BusyState {
   busy: Record<string, boolean>;
   setBusy: (sessionId: string, on: boolean) => void;
+  /** Forget a session entirely (on delete). Without this a session deleted
+   * while busy leaks `busy[id]=true` forever — the sidebar dot (and the
+   * project busy-tier roll-up) stays blue indefinitely. */
+  drop: (sessionId: string) => void;
 }
 
 export const useBusyStore = create<BusyState>((set) => ({
@@ -24,6 +28,12 @@ export const useBusyStore = create<BusyState>((set) => ({
     set((s) => {
       if (!!s.busy[sessionId] === on) return s;
       if (on) return { busy: { ...s.busy, [sessionId]: true } };
+      const { [sessionId]: _drop, ...rest } = s.busy;
+      return { busy: rest };
+    }),
+  drop: (sessionId) =>
+    set((s) => {
+      if (!(sessionId in s.busy)) return s;
       const { [sessionId]: _drop, ...rest } = s.busy;
       return { busy: rest };
     }),
