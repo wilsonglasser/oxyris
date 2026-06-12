@@ -607,6 +607,12 @@ export function TerminalView({
     const scheduleRepaint = () => {
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
+        // Never repaint while a selection is active. The claude TUI streams the
+        // spinner ~10×/sec, so the debounce fires between frames — and a forced
+        // refresh mid-drag clears the selection, making copy impossible during
+        // live output. Skip the ghost-fix repaint until the selection is gone;
+        // the rows under a selection are static anyway, so no ghosts there.
+        if (term.hasSelection()) return;
         try {
           term.refresh(0, term.rows - 1);
         } catch {
