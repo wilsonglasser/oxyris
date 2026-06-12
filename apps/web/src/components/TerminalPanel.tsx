@@ -595,12 +595,33 @@ export function TerminalView({
     let cancelled = false;
     const dataHandlers: IDisposable[] = [];
 
+    // WebGL ghost-cell fix. The claude TUI rewrites lines in place; the WebGL
+    // renderer sometimes leaves stale glyphs on cells it failed to mark dirty,
+    // so old text bleeds through until a resize forces a full repaint. The core
+    // buffer is correct — only the renderer is stale — so once an output burst
+    // settles we force-repaint every row from the buffer. Debounced so it never
+    // fires during the spinner's continuous ~10×/sec repaints (those rows stay
+    // fresh on their own); it only kicks in on the quiet after a turn settles,
+    // which is exactly when the ghosts are visible.
+    let refreshTimer: number | undefined;
+    const scheduleRepaint = () => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        try {
+          term.refresh(0, term.rows - 1);
+        } catch {
+          /* noop */
+        }
+      }, 80);
+    };
+
     const safeWrite = (chunk: string) => {
       try {
         term.write(chunk);
       } catch {
         /* noop */
       }
+      scheduleRepaint();
     };
 
     // Replay-then-live: until `terminalAttach` returns the snapshot of bytes
@@ -677,6 +698,7 @@ export function TerminalView({
       cancelled = true;
       window.clearTimeout(fitTimer);
       window.clearTimeout(resizeTimer);
+      window.clearTimeout(refreshTimer);
       window.removeEventListener("resize", safeFit);
       textarea?.removeEventListener("paste", onPasteCapture, { capture: true });
       mount.removeEventListener("wheel", onWheelZoom, { capture: true });
