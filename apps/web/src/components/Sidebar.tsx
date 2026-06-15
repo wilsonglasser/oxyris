@@ -331,6 +331,14 @@ export function Sidebar({
     [allSessions],
   );
   const purePrevRef = useRef<Map<string, PureState>>(new Map());
+  // Pending busy→idle settle timers, keyed by session. The backend emits
+  // transient settle snapshots (busy=false) mid-turn between spinner frames; a
+  // raw apply would flap the dot blue→orange on a background thread and
+  // blue→green on the active one. We hold blue until the thread stays settled
+  // for SETTLE_DEBOUNCE_MS before treating the turn as done.
+  const settleTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
   useEffect(() => {
     if (!pureWatchKey) return;
     const ids = new Set(pureWatchKey.split(","));
@@ -350,33 +358,70 @@ export function Sidebar({
     const apply = (s: SessionSummary, snap: PureState, seed: boolean) => {
       const prev = purePrevRef.current.get(s.id);
       purePrevRef.current.set(s.id, snap);
-      // `needs_input` (red) outranks `busy` (blue) at the dot.
+      // `needs_input` (red) outranks `busy` (blue) at the dot — urgent, never
+      // debounced.
       setNeedsInput(s.id, snap.needs_input);
-      setBusy(s.id, snap.busy && !snap.needs_input);
-      if (seed) return;
-      // Stamp recency only while something is actually happening (busy / waiting
-      // on input). A settle snapshot (both false) isn't fresh activity, so it
-      // mustn't keep an idle thread reading green-recent.
+
+      const clearSettle = () => {
+        const pending = settleTimersRef.current.get(s.id);
+        if (pending) {
+          clearTimeout(pending);
+          settleTimersRef.current.delete(s.id);
+        }
+      };
+
+      // Anything is happening → read blue right away and cancel any pending
+      // settle (the turn is still alive — that idle frame was transient).
       if (snap.busy || snap.needs_input) {
+        clearSettle();
+        setBusy(s.id, snap.busy && !snap.needs_input);
+        if (seed) return;
+        // Stamp recency only while something is actually happening. A settle
+        // snapshot (both false) isn't fresh activity, so it mustn't keep an
+        // idle thread reading green-recent.
         useSessionStore.getState().touchActivity(s.id);
+        // idle/blue → red: a prompt just appeared. Ring so a backgrounded user
+        // knows to come decide.
+        if (prev && !prev.needs_input && snap.needs_input && shouldNotify()) {
+          playInputChime();
+          bumpBadge();
+        }
+        return;
       }
-      if (!prev) return;
-      // idle/blue → red: a prompt just appeared. Ring so a backgrounded user
-      // knows to come decide.
-      if (!prev.needs_input && snap.needs_input && shouldNotify()) {
-        playInputChime();
-        bumpBadge();
+
+      // Settle snapshot (busy=false, needs_input=false). A seed just reconciles
+      // the dot to idle (never chimes/flags). For a live snapshot we debounce:
+      // hold blue until the thread stays settled, so a transient mid-turn idle
+      // frame can't flap the dot blue→orange (background) or blue→green
+      // (active).
+      if (seed) {
+        clearSettle();
+        setBusy(s.id, false);
+        return;
       }
-      // blue → done: a turn finished without a waiting prompt. Flag for
-      // attention (no-op on the active thread) and chime when backgrounded.
-      if (prev.busy && !snap.busy && !snap.needs_input) {
+      const wasBusy = !!useBusyStore.getState().busy[s.id];
+      if (!wasBusy) {
+        // Already idle — nothing to settle, no completion to announce.
+        setBusy(s.id, false);
+        return;
+      }
+      if (settleTimersRef.current.has(s.id)) return; // settle already pending
+      const timer = setTimeout(() => {
+        settleTimersRef.current.delete(s.id);
+        // A newer snapshot may have re-armed the thread while we waited.
+        const latest = purePrevRef.current.get(s.id);
+        if (latest && (latest.busy || latest.needs_input)) return;
+        // blue → done: a turn finished without a waiting prompt. Flag for
+        // attention (no-op on the active thread) and chime when backgrounded.
+        setBusy(s.id, false);
         markAttention(s.id);
         void refreshProjectSessions(s.project_id);
         if (shouldNotify()) {
           playCompletionChime();
           bumpBadge();
         }
-      }
+      }, SETTLE_DEBOUNCE_MS);
+      settleTimersRef.current.set(s.id, timer);
     };
     for (const s of targets) {
       void onPureState(s.id, (snap) => apply(s, snap, false)).then((fn) => {
@@ -395,6 +440,8 @@ export function Sidebar({
     return () => {
       cancelled = true;
       for (const fn of unlistens) fn();
+      for (const t of settleTimersRef.current.values()) clearTimeout(t);
+      settleTimersRef.current.clear();
     };
   }, [
     pureWatchKey,
@@ -1096,6 +1143,11 @@ function SessionEntry({
 
 // "Talked recently" window for the green bull — activity within the last hour.
 const RECENT_MS = 60 * 60 * 1000;
+
+// How long a pure thread must stay settled (busy=false, needs_input=false)
+// before we treat the turn as done. Wider than the TUI spinner/settle cadence
+// so a transient idle frame mid-turn doesn't flap the dot blue→orange/green.
+const SETTLE_DEBOUNCE_MS = 1500;
 
 function isRecent(iso: string): boolean {
   const t = new Date(iso).getTime();
