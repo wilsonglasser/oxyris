@@ -12,6 +12,7 @@ import {
   GitCommit,
   History,
   Inbox,
+  Loader2,
   Minus,
   Plus,
   RefreshCw,
@@ -966,8 +967,21 @@ function CommitBar({
             count: stagedCount > 0 ? stagedCount : changedCount,
           })}
           rows={3}
-          className="w-full resize-none rounded border border-neutral-800 bg-neutral-900 px-2 py-1 pr-8 text-[12px] text-neutral-100 outline-none focus:ring-1 focus:ring-neutral-700"
+          disabled={generating}
+          className="w-full resize-none rounded border border-neutral-800 bg-neutral-900 px-2 py-1 pr-8 text-[12px] text-neutral-100 outline-none focus:ring-1 focus:ring-neutral-700 disabled:opacity-60"
         />
+        {generating && (
+          <div
+            className="absolute inset-0 flex items-center justify-center rounded bg-neutral-900/70 backdrop-blur-[1px]"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="flex items-center gap-1.5 text-[11px] text-amber-300">
+              <Loader2 size={12} className="animate-spin" />
+              {t("generating_msg")}
+            </span>
+          </div>
+        )}
         <button
           type="button"
           onClick={() => void generateMsg(projectId, worktreeId)}
@@ -976,7 +990,11 @@ function CommitBar({
           title={t("generate_msg")}
           aria-label={t("generate_msg")}
         >
-          <Sparkles size={12} className={generating ? "animate-pulse" : ""} />
+          {generating ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Sparkles size={12} />
+          )}
         </button>
       </div>
       {error && (

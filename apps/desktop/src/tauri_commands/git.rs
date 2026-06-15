@@ -392,7 +392,6 @@ pub async fn git_generate_commit_message(
     use oxyris_core::Environment;
     use oxyris_procutil::HideConsole;
     use std::process::Stdio;
-    use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
@@ -402,111 +401,154 @@ pub async fn git_generate_commit_message(
         Subject line under 72 chars. Add a body only if the why isn't obvious. \
         Output the commit message only — no preamble, no markdown fences.";
 
-    let (diff, claude_path) = match env {
-        Environment::Local => {
-            let repo_path = root.clone();
-            let diff_out = tokio::task::spawn_blocking(move || -> Result<String, String> {
-                let run = |args: &[&str]| -> Result<String, String> {
-                    let out = std::process::Command::new("git")
-                        .args(args)
-                        .hide_console()
-                        .output()
-                        .map_err(|e| e.to_string())?;
-                    if !out.status.success() {
-                        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
-                    }
-                    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-                };
-                // Prefer the staged diff. Fall back to the full working-tree diff
-                // (`git diff HEAD` = staged + unstaged tracked) so generation still
-                // works when nothing is staged yet — matching the `commit -a` flow.
-                let staged = run(&["-C", &repo_path, "diff", "--cached"])?;
-                if staged.trim().is_empty() {
-                    run(&["-C", &repo_path, "diff", "HEAD"])
-                } else {
-                    Ok(staged)
-                }
-            })
-            .await
-            .map_err(|e| TauriGitError::Backend(format!("join: {e}")))?
-            .map_err(TauriGitError::Backend)?;
+    // Compute the diff through git2 (`diff_revs`) — the SAME engine that backs
+    // `git_status`. The old path shelled out to `git diff --cached`, which could
+    // disagree with the panel: a stray `GIT_DIR`/`GIT_WORK_TREE` in the app's
+    // environment, an external diff driver, or any libgit2-vs-CLI index quirk
+    // made the CLI report an empty diff while the panel showed staged files —
+    // surfacing the spurious "nothing staged" error. Sourcing the diff from
+    // git2 guarantees the two never disagree.
+    let diff = pending_diff_text(&env, &state.agent_pool, &root).await?;
+    if diff.trim().is_empty() {
+        return Err(TauriGitError::Backend("nothing staged".into()));
+    }
 
-            let path = which::which("claude")
+    let message = match env {
+        Environment::Local => {
+            let claude_path = which::which("claude")
                 .or_else(|_| which::which("claude.cmd"))
                 .or_else(|_| which::which("claude.exe"))
                 .map_err(|e| TauriGitError::Backend(format!("claude not on PATH: {e}")))?;
-            (diff_out, path)
+
+            let is_batch = claude_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| matches!(e.to_ascii_lowercase().as_str(), "cmd" | "bat"))
+                .unwrap_or(false);
+
+            let mut cmd = if is_batch {
+                let mut c = Command::new("cmd.exe");
+                c.arg("/C");
+                c.arg(claude_path.as_os_str());
+                c
+            } else {
+                Command::new(claude_path.as_os_str())
+            };
+            cmd.arg("-p")
+                .arg(prompt)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .hide_console();
+
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| TauriGitError::Backend(format!("spawn claude: {e}")))?;
+            pipe_stdin(&mut child, diff.as_bytes()).await?;
+            let out = child
+                .wait_with_output()
+                .await
+                .map_err(|e| TauriGitError::Backend(format!("claude wait: {e}")))?;
+            if !out.status.success() {
+                return Err(TauriGitError::Backend(format!(
+                    "claude failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
         }
         Environment::Wsl { distro } => {
-            // One-shot bash invocation: cd into the repo, pipe the staged
-            // diff through claude inside the distro. Uses the user's claude
-            // install + auth state inside WSL — no shimming through Windows.
-            let posix_repo = root.clone();
+            // Run claude inside the distro (the user's WSL install + auth) and
+            // feed it the git2-computed diff over stdin. Uses the same diff the
+            // panel sees — no second `git diff` inside bash to drift from it.
             let escaped_prompt = prompt.replace('\'', "'\\''");
-            let script = format!(
-                "set -euo pipefail; cd '{posix_repo}'; \
-                 diff=\"$(git diff --cached)\"; \
-                 if [ -z \"$diff\" ]; then diff=\"$(git diff HEAD)\"; fi; \
-                 if [ -z \"$diff\" ]; then echo 'NOTHING_STAGED' >&2; exit 2; fi; \
-                 printf '%s' \"$diff\" | claude -p '{escaped_prompt}'"
-            );
-            let out = Command::new("wsl.exe")
+            let script = format!("claude -p '{escaped_prompt}'");
+            let mut child = Command::new("wsl.exe")
                 .args(["-d", distro.as_str(), "--", "bash", "-lc", &script])
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .hide_console()
-                .output()
-                .await
+                .spawn()
                 .map_err(|e| TauriGitError::Backend(format!("spawn wsl: {e}")))?;
+            pipe_stdin(&mut child, diff.as_bytes()).await?;
+            let out = child
+                .wait_with_output()
+                .await
+                .map_err(|e| TauriGitError::Backend(format!("wsl claude wait: {e}")))?;
             if !out.status.success() {
                 let stderr = crate::infra::decode_wsl_output_for_command(&out.stderr);
-                if stderr.contains("NOTHING_STAGED") {
-                    return Err(TauriGitError::Backend("nothing staged".into()));
-                }
                 return Err(TauriGitError::Backend(format!(
                     "wsl claude failed: {}",
                     stderr.trim()
                 )));
             }
-            let message = crate::infra::decode_wsl_output_for_command(&out.stdout)
+            crate::infra::decode_wsl_output_for_command(&out.stdout)
                 .trim()
-                .to_owned();
-            return Ok(GitGenerateCommitMsgOutput { message });
+                .to_owned()
         }
     };
 
-    if diff.trim().is_empty() {
-        return Err(TauriGitError::Backend("nothing staged".into()));
-    }
+    Ok(GitGenerateCommitMsgOutput { message })
+}
 
-    let is_batch = claude_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "cmd" | "bat"))
-        .unwrap_or(false);
-
-    let mut cmd = if is_batch {
-        let mut c = Command::new("cmd.exe");
-        c.arg("/C");
-        c.arg(claude_path.as_os_str());
-        c
-    } else {
-        Command::new(claude_path.as_os_str())
+/// Unified diff of every pending change (HEAD → working tree, index included)
+/// via git2, so it stays consistent with `git_status`. On a fresh repo with no
+/// commits, `diff_revs` can't diff against HEAD — fall back to a file-list
+/// summary so Claude can still draft an initial-commit message.
+async fn pending_diff_text(
+    env: &oxyris_core::Environment,
+    agent_pool: &crate::infra::agent_pool::AgentPool,
+    root: &str,
+) -> Result<String, TauriGitError> {
+    let files = match git::diff_revs(
+        env,
+        agent_pool,
+        root,
+        "HEAD".into(),
+        "WORKTREE".into(),
+        true,
+    )
+    .await
+    {
+        Ok(files) => files,
+        Err(GitError::EmptyRepo) => {
+            let report = git::status(env, agent_pool, root).await?;
+            let mut out = String::from("New repository (no commits yet). Files to be committed:\n");
+            for e in &report.entries {
+                out.push_str("  ");
+                out.push_str(&e.path);
+                out.push('\n');
+            }
+            return Ok(out);
+        }
+        Err(e) => return Err(e.into()),
     };
-    cmd.arg("-p")
-        .arg(prompt)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .hide_console();
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| TauriGitError::Backend(format!("spawn claude: {e}")))?;
+    let mut out = String::new();
+    for f in &files {
+        match &f.old_path {
+            Some(old) => {
+                out.push_str(&format!("--- {old}\n+++ {}\n", f.path));
+            }
+            None => {
+                out.push_str(&format!("=== {}\n", f.path));
+            }
+        }
+        out.push_str(&f.unified);
+        if !f.unified.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
 
+/// Write `bytes` to the child's stdin and close it.
+async fn pipe_stdin(child: &mut tokio::process::Child, bytes: &[u8]) -> Result<(), TauriGitError> {
+    use tokio::io::AsyncWriteExt;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
-            .write_all(diff.as_bytes())
+            .write_all(bytes)
             .await
             .map_err(|e| TauriGitError::Backend(format!("write diff: {e}")))?;
         stdin
@@ -514,19 +556,7 @@ pub async fn git_generate_commit_message(
             .await
             .map_err(|e| TauriGitError::Backend(format!("close stdin: {e}")))?;
     }
-
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| TauriGitError::Backend(format!("claude wait: {e}")))?;
-    if !out.status.success() {
-        return Err(TauriGitError::Backend(format!(
-            "claude failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    let message = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    Ok(GitGenerateCommitMsgOutput { message })
+    Ok(())
 }
 
 // ────── stash / tag / cherry-pick / revert ─────────────────────────────────

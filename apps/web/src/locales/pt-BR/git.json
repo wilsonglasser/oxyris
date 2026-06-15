@@ -48,6 +48,7 @@
   "mark_resolved": "Marcar resolvido",
   "resolving": "Resolvendo…",
   "generate_msg": "Gerar mensagem de commit com Claude",
+  "generating_msg": "Gerando mensagem…",
   "hunks": "{{count}} hunks",
   "stage_hunk": "Stage",
   "unstage_hunk": "Tirar do stage",
