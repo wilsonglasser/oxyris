@@ -289,6 +289,12 @@ export function Sidebar({
       // here (PureSessionView only listens for the active session).
       void onAutopilotEvent(s.id, (event) => {
         const store = useAutopilotStore.getState();
+        // A "reasoning" event carries the rationale and is followed by the action
+        // event — record it without disturbing the thinking flag.
+        if (event.kind === "reasoning") {
+          store.setReasoning(s.id, event.text);
+          return;
+        }
         store.setThinking(s.id, event.kind === "thinking");
         if (
           event.kind === "halted" ||

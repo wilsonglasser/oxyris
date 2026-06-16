@@ -20,6 +20,27 @@ use serde::Serialize;
 /// enough that a prompt split across several PTY writes still accumulates.
 const TAIL_CAP_CHARS: usize = 2000;
 
+/// How much of the tail's end the LIVE prompt check looks at. A real menu (its
+/// header, a few numbered options, the footer) fits easily; anything older has
+/// scrolled up under newer output and is no longer the active frame. Keeps
+/// assistant prose that mentions a prompt phrase from latching the red dot.
+const RECENT_PROMPT_CHARS: usize = 1000;
+
+/// The last [`RECENT_PROMPT_CHARS`] chars of `s`, on a char boundary (returns all
+/// of `s` when shorter).
+fn recent_window(s: &str) -> &str {
+    let len = s.chars().count();
+    if len <= RECENT_PROMPT_CHARS {
+        return s;
+    }
+    let start = s
+        .char_indices()
+        .nth(len - RECENT_PROMPT_CHARS)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    &s[start..]
+}
+
 /// Strip ANSI escape sequences (CSI + OSC) so prompt text matches across the
 /// TUI's redraws. Mirrors `stripAnsi` in `pureTurn.ts` (char-scan, not regex,
 /// to handle the OSC `BEL`/`ESC \` terminators cleanly).
@@ -251,10 +272,17 @@ impl PureSniffer {
             self.working_active = false;
         }
 
-        if !self.prompt_open && prompt_re().is_match(&self.tail) {
-            self.prompt_open = true;
+        // Prompt detection is LIVE on the most recent frame, not latched over the
+        // whole accumulated tail. The genuine permission/question menu is always
+        // the bottom-most interactive element; scoping to the recent window means
+        // assistant prose that merely *mentions* a prompt phrase ("do you want to
+        // proceed", "yes, and don't ask again") stops reading as a live menu once
+        // more output streams below it. Emit NeedsInput only on the rising edge.
+        let prompt_now = prompt_re().is_match(recent_window(&self.tail));
+        if prompt_now && !self.prompt_open {
             out.push(PureSignal::NeedsInput);
         }
+        self.prompt_open = prompt_now;
         if !self.poll_open && poll_re().is_match(&self.tail) {
             self.poll_open = true;
             out.push(PureSignal::TurnEnded);
@@ -468,6 +496,34 @@ mod tests {
         s.feed("✶ Cogitated for 1m 15s\n✶ recap: fixed the upload perms\n› ");
         // Last painted line is the prompt, not a spinner → not busy.
         assert!(!s.is_busy_now());
+    }
+
+    #[test]
+    fn prose_mentioning_prompt_phrase_does_not_stick_red() {
+        let mut s = PureSniffer::new();
+        // Assistant prose quoting a menu option — momentarily at the bottom.
+        s.feed("explaining the menu: \"2. Yes, and don't ask again for X\"\n");
+        assert!(
+            s.prompt_open(),
+            "phrase at the live bottom reads as a prompt"
+        );
+        // …then a lot more answer streams below it, pushing the phrase out of the
+        // recent window. The red dot must clear — it was never a real menu.
+        s.feed(&"more answer text follows here. ".repeat(60));
+        assert!(
+            !s.prompt_open(),
+            "phrase scrolled up under new output must not keep needs-input latched"
+        );
+    }
+
+    #[test]
+    fn real_menu_at_bottom_stays_open_across_redraws() {
+        let mut s = PureSniffer::new();
+        s.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude\n");
+        assert!(s.prompt_open());
+        // A cursor-blink redraw of the same frame keeps the menu live.
+        s.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude\n");
+        assert!(s.prompt_open());
     }
 
     #[test]

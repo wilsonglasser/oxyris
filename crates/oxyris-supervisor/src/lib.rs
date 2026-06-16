@@ -117,8 +117,12 @@ pub struct AutopilotContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum Decision {
-    /// Approve the tool / answer "yes, proceed".
+    /// Approve the tool / answer "yes, proceed" (one time).
     Approve,
+    /// Approve and, when the prompt offers a "don't ask again" option, pick that
+    /// so the same kind of action stops prompting — standing permission. Falls
+    /// back to a plain approve when no such option is on screen.
+    ApproveAlways,
     /// Reject the tool. `reason` is fed back to the model.
     Reject { reason: String },
     /// Reply to an open question, or send the next instruction toward the
@@ -128,6 +132,30 @@ pub enum Decision {
     Done { summary: String },
     /// Can't decide safely — hand control back to the human.
     Escalate { why: String },
+}
+
+/// A supervisor's full reply: the [`Decision`] plus an optional one-line
+/// rationale the model gave for it. The rationale is surfaced to the user as the
+/// pilot's "thinking" (a tooltip on the auto-pilot button). Parsed from a JSON
+/// object like `{"reasoning":"…","decision":"reply","text":"…"}` — `reasoning`
+/// sits alongside the flattened decision fields and is optional, so a model that
+/// omits it still parses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Verdict {
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(flatten)]
+    pub decision: Decision,
+}
+
+impl Verdict {
+    /// A verdict with no rationale — convenience for adapters/tests.
+    pub fn bare(decision: Decision) -> Self {
+        Self {
+            reasoning: None,
+            decision,
+        }
+    }
 }
 
 /// Which concrete supervisor backend to use. Mirrors the panel's selector.
@@ -149,10 +177,11 @@ pub trait Supervisor: Send + Sync {
 
     /// Decide what to do about `ask`, given the mission + context. Implementations
     /// must be conservative: when unsure, return [`Decision::Escalate`] rather
-    /// than guessing.
+    /// than guessing. The returned [`Verdict`] carries the decision plus an
+    /// optional short rationale (the pilot's surfaced "thinking").
     async fn decide(
         &self,
         ctx: &AutopilotContext,
         ask: &PendingKind,
-    ) -> Result<Decision, SupervisorError>;
+    ) -> Result<Verdict, SupervisorError>;
 }

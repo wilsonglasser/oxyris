@@ -48,6 +48,9 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
     switch (e.kind) {
       case "thinking":
         return t("autopilot_thinking");
+      case "reasoning":
+        // Not pushed to the log by the listeners, but keep the switch exhaustive.
+        return e.text;
       case "approved":
         return t("autopilot_log_approved");
       case "rejected":

@@ -4,6 +4,7 @@ import {
   Bot,
   FileText,
   Image as ImageIcon,
+  Loader2,
   Mic,
   MicOff,
   Paperclip,
@@ -356,11 +357,18 @@ function PureSessionView({
 
   // Auto-pilot: floating mission panel + engaged indicator on the header button.
   const [autopilotOpen, setAutopilotOpen] = useState(false);
+  // Auto-opening "thinking" tooltip on the auto-pilot button.
+  const [pilotTipVisible, setPilotTipVisible] = useState(false);
   const autopilotHydrate = useAutopilotStore((s) => s.hydrate);
   const autopilotOn = useAutopilotStore((s) => s.enabled[sessionId] ?? false);
+  const autopilotThinking = useAutopilotStore((s) => !!s.thinking[sessionId]);
+  const autopilotReasoning = useAutopilotStore(
+    (s) => s.reasoning[sessionId] ?? "",
+  );
   const autopilotPushLog = useAutopilotStore((s) => s.pushLog);
   const autopilotSetEnabled = useAutopilotStore((s) => s.setEnabled);
   const autopilotSetThinking = useAutopilotStore((s) => s.setThinking);
+  const autopilotSetReasoning = useAutopilotStore((s) => s.setReasoning);
   const autopilotSetDone = useAutopilotStore((s) => s.setDone);
   useEffect(() => {
     autopilotHydrate(sessionId);
@@ -377,6 +385,13 @@ function PureSessionView({
       // clutter the log. Any other event means the step resolved → clear it.
       if (event.kind === "thinking") {
         autopilotSetThinking(sessionId, true);
+        return;
+      }
+      // "reasoning" carries the Supervisor's rationale — surface it for the
+      // tooltip and keep the thinking flag on (the action event follows right
+      // after). Not a decision, so it stays out of the mini-log.
+      if (event.kind === "reasoning") {
+        autopilotSetReasoning(sessionId, event.text);
         return;
       }
       autopilotSetThinking(sessionId, false);
@@ -410,6 +425,22 @@ function PureSessionView({
       unlisten?.();
     };
   }, [sessionId, autopilotPushLog, autopilotSetEnabled, autopilotSetThinking]);
+
+  // Drive the auto-pilot "thinking" tooltip: visible while a step is in flight,
+  // and lingering a few seconds after the last rationale lands so it is readable.
+  useEffect(() => {
+    if (autopilotThinking) {
+      setPilotTipVisible(true);
+      return;
+    }
+    if (!autopilotReasoning) {
+      setPilotTipVisible(false);
+      return;
+    }
+    setPilotTipVisible(true);
+    const id = window.setTimeout(() => setPilotTipVisible(false), 8000);
+    return () => window.clearTimeout(id);
+  }, [autopilotThinking, autopilotReasoning]);
 
   // Auto-recover a dead claude PTY. The interactive `claude` TUI exits on a
   // double Ctrl+C (and on any crash); without this the pane just freezes on
@@ -770,21 +801,40 @@ function PureSessionView({
           <span className="font-medium">{t("pure_header")}</span>
           <span className="truncate text-neutral-500">· {project.name}</span>
           <div className="ml-auto flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setAutopilotOpen((v) => !v)}
-              aria-label={t("autopilot_open")}
-              title={autopilotOn ? t("autopilot_on") : t("autopilot_off")}
-              className={`flex size-6 items-center justify-center rounded transition ${
-                autopilotOpen
-                  ? "bg-neutral-800 text-neutral-100"
-                  : autopilotOn
-                    ? "text-emerald-400 hover:bg-neutral-800"
-                    : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
-              }`}
-            >
-              <Bot className="size-3.5" strokeWidth={1.75} />
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setAutopilotOpen((v) => !v)}
+                aria-label={t("autopilot_open")}
+                title={autopilotOn ? t("autopilot_on") : t("autopilot_off")}
+                className={`flex size-6 items-center justify-center rounded transition ${
+                  autopilotOpen
+                    ? "bg-neutral-800 text-neutral-100"
+                    : autopilotOn
+                      ? "text-emerald-400 hover:bg-neutral-800"
+                      : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+                }`}
+              >
+                <Bot className="size-3.5" strokeWidth={1.75} />
+              </button>
+              {/* Thinking tooltip — auto-opens while the pilot consults the
+                  Supervisor and shows its latest rationale. Hidden when the full
+                  panel is open (it has its own live status). */}
+              {pilotTipVisible && !autopilotOpen && (
+                <div className="absolute right-0 top-full z-30 mt-1.5 w-64 rounded-md border border-neutral-700 bg-neutral-900 p-2 text-left shadow-lg">
+                  <div className="mb-1 flex items-center gap-1 text-[9px] font-medium uppercase tracking-wider text-emerald-400/80">
+                    <Bot className="size-3" strokeWidth={2} />
+                    {t("autopilot_heading")}
+                    {autopilotThinking && (
+                      <Loader2 className="ml-auto size-3 animate-spin text-neutral-400" />
+                    )}
+                  </div>
+                  <p className="text-[11px] leading-snug text-neutral-300">
+                    {autopilotReasoning || t("autopilot_thinking")}
+                  </p>
+                </div>
+              )}
+            </div>
             {onToggleTerminal && (
               <button
                 type="button"

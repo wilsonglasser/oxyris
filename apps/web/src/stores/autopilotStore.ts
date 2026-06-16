@@ -56,6 +56,9 @@ interface AutopilotState {
   log: Record<string, AutopilotEvent[]>;
   /** Ephemeral: a step is in flight (Supervisor being consulted). */
   thinking: Record<string, boolean>;
+  /** Ephemeral: the Supervisor's latest one-line rationale (its "thinking"),
+   * shown in the auto-pilot button tooltip. */
+  reasoning: Record<string, string>;
   /** Ephemeral: the pilot finished the mission on this thread (purple dot).
    * Cleared when the thread is re-engaged or activity resumes. */
   done: Record<string, boolean>;
@@ -66,6 +69,7 @@ interface AutopilotState {
   pushLog: (sessionId: string, event: AutopilotEvent) => void;
   clearLog: (sessionId: string) => void;
   setThinking: (sessionId: string, on: boolean) => void;
+  setReasoning: (sessionId: string, text: string) => void;
   setDone: (sessionId: string, on: boolean) => void;
 }
 
@@ -75,6 +79,7 @@ export const useAutopilotStore = create<AutopilotState>((set, get) => ({
   config: {},
   log: {},
   thinking: {},
+  reasoning: {},
   done: {},
   hydrate: (sessionId) => {
     const s = get();
@@ -100,8 +105,9 @@ export const useAutopilotStore = create<AutopilotState>((set, get) => ({
     writeLS(ENABLED_PREFIX + sessionId, on ? "1" : null);
     set((prev) => ({
       enabled: { ...prev.enabled, [sessionId]: on },
-      // Re-engaging clears any prior "mission done" mark.
+      // Re-engaging clears any prior "mission done" mark + stale reasoning.
       done: on ? { ...prev.done, [sessionId]: false } : prev.done,
+      reasoning: on ? { ...prev.reasoning, [sessionId]: "" } : prev.reasoning,
     }));
   },
   setMission: (sessionId, text) => {
@@ -127,6 +133,8 @@ export const useAutopilotStore = create<AutopilotState>((set, get) => ({
     set((prev) => ({ log: { ...prev.log, [sessionId]: [] } })),
   setThinking: (sessionId, on) =>
     set((prev) => ({ thinking: { ...prev.thinking, [sessionId]: on } })),
+  setReasoning: (sessionId, text) =>
+    set((prev) => ({ reasoning: { ...prev.reasoning, [sessionId]: text } })),
   setDone: (sessionId, on) =>
     set((prev) => ({ done: { ...prev.done, [sessionId]: on } })),
 }));

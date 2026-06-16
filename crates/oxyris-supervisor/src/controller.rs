@@ -15,6 +15,8 @@ use crate::{AutopilotContext, Decision, PendingKind, Supervisor, SupervisorError
 pub enum Action {
     /// Approve the pending tool / answer "yes".
     Approve,
+    /// Approve and prefer a "don't ask again" menu option when present.
+    ApproveAlways,
     /// Reject the pending tool; `reason` is fed back to the model.
     Reject(String),
     /// Send a reply / next instruction.
@@ -84,7 +86,7 @@ impl Autopilot {
     /// turn). Re-checks the denylist on `Approve` as defence in depth.
     pub fn post_decision(&mut self, ask: &PendingKind, decision: Decision) -> Action {
         match decision {
-            Decision::Approve => {
+            Decision::Approve | Decision::ApproveAlways => {
                 // Defence in depth: never approve a denylisted action even if the
                 // Supervisor said yes.
                 if let Some(text) = ask.approval_text()
@@ -92,7 +94,11 @@ impl Autopilot {
                 {
                     return Action::Halt(HaltReason::Denylisted(name.to_owned()));
                 }
-                Action::Approve
+                if matches!(decision, Decision::ApproveAlways) {
+                    Action::ApproveAlways
+                } else {
+                    Action::Approve
+                }
             }
             Decision::Reject { reason } => Action::Reject(reason),
             Decision::Reply { text } => {
@@ -108,16 +114,19 @@ impl Autopilot {
     }
 
     /// Full step: pre-check → Supervisor → post-decision. The only async path.
+    /// Returns the [`Action`] to carry out plus the Supervisor's optional one-line
+    /// rationale (surfaced as the pilot's "thinking"). A pre-check halt has no
+    /// rationale.
     pub async fn step(
         &mut self,
         ctx: &AutopilotContext,
         ask: &PendingKind,
-    ) -> Result<Action, SupervisorError> {
+    ) -> Result<(Action, Option<String>), SupervisorError> {
         if let Some(halt) = self.pre_check(ask) {
-            return Ok(halt);
+            return Ok((halt, None));
         }
-        let decision = self.supervisor.decide(ctx, ask).await?;
-        Ok(self.post_decision(ask, decision))
+        let verdict = self.supervisor.decide(ctx, ask).await?;
+        Ok((self.post_decision(ask, verdict.decision), verdict.reasoning))
     }
 
     pub fn turns_used(&self) -> u32 {
@@ -132,6 +141,7 @@ impl Autopilot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Verdict;
     use async_trait::async_trait;
 
     /// A Supervisor that always returns a fixed decision — lets the pure policy
@@ -147,8 +157,8 @@ mod tests {
             &self,
             _ctx: &AutopilotContext,
             _ask: &PendingKind,
-        ) -> Result<Decision, SupervisorError> {
-            Ok(self.0.clone())
+        ) -> Result<Verdict, SupervisorError> {
+            Ok(Verdict::bare(self.0.clone()))
         }
     }
 
@@ -241,7 +251,7 @@ mod tests {
             cwd: "/proj".into(),
         };
         let ask = perm("Run cargo build?", Some("cargo build"));
-        assert_eq!(a.step(&ctx, &ask).await.unwrap(), Action::Approve);
+        assert_eq!(a.step(&ctx, &ask).await.unwrap().0, Action::Approve);
     }
 
     #[tokio::test]
@@ -255,7 +265,7 @@ mod tests {
         };
         let ask = perm("Run?", Some("sudo rm -rf /var"));
         assert_eq!(
-            a.step(&ctx, &ask).await.unwrap(),
+            a.step(&ctx, &ask).await.unwrap().0,
             Action::Halt(HaltReason::Denylisted("recursive force remove".to_owned()))
         );
     }

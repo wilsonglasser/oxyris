@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use oxyris_core::AggregateId;
 use oxyris_supervisor::{
-    Action, Autopilot, AutopilotContext, Decision, HaltReason, Mission, PendingKind, Supervisor,
-    SupervisorError, SupervisorKind, TranscriptView,
+    Action, Autopilot, AutopilotContext, HaltReason, Mission, PendingKind, Supervisor,
+    SupervisorError, SupervisorKind, TranscriptView, Verdict,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -124,6 +124,12 @@ enum AutopilotEvent {
     /// (possibly slow) LLM call so the UI can show the pilot is reacting; cleared
     /// by whichever terminal event below follows.
     Thinking,
+    /// The Supervisor's one-line rationale for the decision it just made — the
+    /// pilot's surfaced "thinking", shown in the auto-pilot button tooltip.
+    /// Emitted right after the decision, before the action event.
+    Reasoning {
+        text: String,
+    },
     Approved,
     Rejected {
         reason: String,
@@ -325,13 +331,19 @@ impl AutopilotManager {
                         stable_fp = None;
                         continue;
                     }
-                    if state.needs_input {
-                        // A genuine menu surfaced (not our doing) — decide it the
-                        // normal way rather than blind-Entering an approval.
+                    // Key on whether the SCREEN changed, not on needs_input. If the
+                    // screen we acted on is gone — claude progressed, or a *new*
+                    // prompt/menu surfaced — re-observe and decide it fresh.
+                    if Some(fp) != last_acted_fp {
                         phase = Phase::Observe;
                         stable_fp = None;
                         continue;
                     }
+                    // Same screen we just acted on, still idle → our Enter/submit
+                    // didn't take. This covers BOTH a swallowed reply Enter AND a
+                    // swallowed approve Enter on a still-open permission menu (the
+                    // latter previously fell through to Observe and got blocked by
+                    // the per-screen dedup → the pilot stalled on the menu).
                     if since.elapsed() < Duration::from_millis(START_TIMEOUT_MS) {
                         continue;
                     }
@@ -347,10 +359,9 @@ impl AutopilotManager {
                         self.disengage(session_id).await;
                         return;
                     }
-                    // Still idle with no menu after submitting → the Enter was very
-                    // likely swallowed by paste-burst detection. Re-send a bare
-                    // Enter (idempotent: an empty input box is a no-op, a filled
-                    // one submits) instead of re-asking the Supervisor.
+                    // Re-send a bare Enter (idempotent: an empty input box is a
+                    // no-op, a filled one submits, a menu confirms the highlighted
+                    // option) instead of re-asking the Supervisor.
                     let _ = self.pty.write(&session.term_id, "\r");
                     *retries += 1;
                     *since = Instant::now();
@@ -384,13 +395,20 @@ impl AutopilotManager {
             cwd: session.cwd.clone(),
         };
 
-        let action = {
+        let outcome = {
             let mut pilot = session.pilot.lock().await;
             pilot.step(&ctx, &ask).await
         };
 
-        match action {
-            Ok(action) => self.act(session_id, session, action).await,
+        match outcome {
+            Ok((action, reasoning)) => {
+                // Surface the Supervisor's rationale (the pilot's "thinking") so
+                // the UI tooltip can show *why* before the action lands.
+                if let Some(text) = reasoning.filter(|r| !r.trim().is_empty()) {
+                    self.emit(session_id, AutopilotEvent::Reasoning { text });
+                }
+                self.act(session_id, session, action).await
+            }
             Err(e) => {
                 self.emit(
                     session_id,
@@ -412,6 +430,24 @@ impl AutopilotManager {
         match action {
             Action::Approve => {
                 // Accept the highlighted default (option 1 = Yes) with Enter.
+                let _ = self.pty.write(term, "\r");
+                self.emit(session_id, AutopilotEvent::Approved);
+                true
+            }
+            Action::ApproveAlways => {
+                // Prefer a "don't ask again" option so the same kind of action
+                // stops prompting. The menu highlights option 1 by default, so
+                // step down to the matching item with arrow-downs, then Enter.
+                // No such option on screen → a plain approve (Enter).
+                let tail = self
+                    .pty
+                    .scrollback_tail(term, CONTEXT_CHARS)
+                    .unwrap_or_default();
+                let downs = dont_ask_again_steps(&tail);
+                for _ in 0..downs {
+                    let _ = self.pty.write(term, "\x1b[B");
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
                 let _ = self.pty.write(term, "\r");
                 self.emit(session_id, AutopilotEvent::Approved);
                 true
@@ -467,6 +503,32 @@ impl AutopilotManager {
     }
 }
 
+/// How many arrow-downs from the highlighted option 1 reach the menu item that
+/// says "don't ask again", for an [`Action::ApproveAlways`]. `0` when the current
+/// menu has no such option (so the caller just confirms option 1). Scoped to the
+/// text after the last "do you want to …" prompt so unrelated numbered lines in
+/// the scrollback (a document, a list) can't be mistaken for menu options.
+fn dont_ask_again_steps(tail: &str) -> usize {
+    let lower = tail.to_lowercase();
+    let start = lower.rfind("do you want to").unwrap_or(0);
+    for line in tail[start..].lines() {
+        // Strip the selection caret / indent so "❯ 2." and "  2." both parse.
+        let l = line.trim_start_matches([' ', '\t', '>', '❯', '›', '*', '-']);
+        let Some((num, rest)) = l.split_once('.') else {
+            continue;
+        };
+        let Ok(num) = num.trim().parse::<usize>() else {
+            continue;
+        };
+        // Normalize apostrophes (don't / don’t) before matching.
+        let norm = rest.to_lowercase().replace(['\'', '\u{2019}'], "");
+        if norm.contains("dont ask again") {
+            return num.saturating_sub(1);
+        }
+    }
+    0
+}
+
 /// Hash of a scrollback tail with whitespace collapsed, so cosmetic TUI redraws
 /// (cursor blinks, the animated tip hint already stripped upstream) read as the
 /// same screen. Keys the watchdog's stability tracking and per-screen dedup.
@@ -491,7 +553,7 @@ fn halt_reason_str(reason: &HaltReason) -> String {
 
 /// System instruction shared by both backends. Pins the output contract to the
 /// JSON shape `serde` parses into [`Decision`] (`#[serde(tag = "decision")]`).
-const SYSTEM_PROMPT: &str = "You are an autonomous supervisor driving a Claude Code coding session toward a stated mission, acting in place of the user.\n\nRespond with ONLY a single JSON object, no prose, no markdown fences. It must be exactly one of:\n{\"decision\":\"approve\"}\n{\"decision\":\"reject\",\"reason\":\"<why>\"}\n{\"decision\":\"reply\",\"text\":\"<message to send>\"}\n{\"decision\":\"done\",\"summary\":\"<what was accomplished>\"}\n{\"decision\":\"escalate\",\"why\":\"<why a human is needed>\"}\n\nGuidance: approve tool uses that safely advance the mission; reject unsafe or off-mission ones with a reason. When Claude asks a question, reply with the answer that best serves the mission. When Claude has finished a turn, decide whether the mission is complete (done) or send the next concrete instruction (reply).\n\nEscalate (do NOT guess or reply) the moment the step needs a real human and cannot be done by typing into the coding session — for example: creating or signing into an account, entering credentials / API keys / secrets / payment details, solving a CAPTCHA, completing 2FA or email/SMS verification, granting OAuth, or any irreversible real-world action outside the repo. Put a short, specific explanation of what the human must do in \"why\". Also escalate when you are genuinely unsure or the situation looks risky.";
+const SYSTEM_PROMPT: &str = "You are an autonomous supervisor driving a Claude Code coding session toward a stated mission, acting in place of the user.\n\nRespond with ONLY a single JSON object, no prose, no markdown fences. Always include a \"reasoning\" field: ONE short sentence (max ~20 words, plain language) explaining why you chose this — it is shown to the user as your live thinking. The object is the \"reasoning\" field plus exactly one decision shape:\n{\"reasoning\":\"<one sentence>\",\"decision\":\"approve\"}\n{\"reasoning\":\"<one sentence>\",\"decision\":\"approve_always\"}\n{\"reasoning\":\"<one sentence>\",\"decision\":\"reject\",\"reason\":\"<why>\"}\n{\"reasoning\":\"<one sentence>\",\"decision\":\"reply\",\"text\":\"<message to send>\"}\n{\"reasoning\":\"<one sentence>\",\"decision\":\"done\",\"summary\":\"<what was accomplished>\"}\n{\"reasoning\":\"<one sentence>\",\"decision\":\"escalate\",\"why\":\"<why a human is needed>\"}\n\nGuidance: approve tool uses that safely advance the mission; reject unsafe or off-mission ones with a reason. When Claude asks a question, reply with the answer that best serves the mission. When Claude has finished a turn, decide whether the mission is complete (done) or send the next concrete instruction (reply).\n\nApprovals: use \"approve\" for a one-time yes. Use \"approve_always\" when the permission prompt offers a \"don't ask again\" option AND the mission wants this kind of action allowed standing (e.g. the user said to free up / allow whatever permissions are requested) — it picks the \"don't ask again\" option so the same action stops prompting. If no such option is shown, approve_always behaves like a plain approve, so it is safe to prefer it whenever the mission calls for granting permissions freely.\n\nEscalate (do NOT guess or reply) the moment the step needs a real human and cannot be done by typing into the coding session — for example: creating or signing into an account, entering credentials / API keys / secrets / payment details, solving a CAPTCHA, completing 2FA or email/SMS verification, granting OAuth, or any irreversible real-world action outside the repo. Put a short, specific explanation of what the human must do in \"why\". Also escalate when you are genuinely unsure or the situation looks risky.";
 
 fn build_user_prompt(ctx: &AutopilotContext, ask: &PendingKind) -> String {
     let pending = match ask {
@@ -517,7 +579,7 @@ fn build_user_prompt(ctx: &AutopilotContext, ask: &PendingKind) -> String {
 
 /// Extract a `Decision` from a model reply that may be wrapped in prose or code
 /// fences. Finds the outermost `{ … }` and parses it.
-fn parse_decision(content: &str) -> Result<Decision, SupervisorError> {
+fn parse_verdict(content: &str) -> Result<Verdict, SupervisorError> {
     let start = content.find('{');
     let end = content.rfind('}');
     let json = match (start, end) {
@@ -528,7 +590,7 @@ fn parse_decision(content: &str) -> Result<Decision, SupervisorError> {
             )));
         }
     };
-    serde_json::from_str::<Decision>(json)
+    serde_json::from_str::<Verdict>(json)
         .map_err(|e| SupervisorError::InvalidDecision(format!("{e}: {json}")))
 }
 
@@ -561,7 +623,7 @@ impl Supervisor for OpenAiCompatSupervisor {
         &self,
         ctx: &AutopilotContext,
         ask: &PendingKind,
-    ) -> Result<Decision, SupervisorError> {
+    ) -> Result<Verdict, SupervisorError> {
         let body = serde_json::json!({
             "model": self.model,
             "temperature": 0,
@@ -597,7 +659,7 @@ impl Supervisor for OpenAiCompatSupervisor {
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
             .ok_or_else(|| SupervisorError::Backend("no choices[0].message.content".into()))?;
-        parse_decision(content)
+        parse_verdict(content)
     }
 }
 
@@ -622,14 +684,14 @@ impl Supervisor for ClaudeCliSupervisor {
         &self,
         ctx: &AutopilotContext,
         ask: &PendingKind,
-    ) -> Result<Decision, SupervisorError> {
+    ) -> Result<Verdict, SupervisorError> {
         let prompt = build_user_prompt(ctx, ask);
         let model = self.model.clone();
         let output =
             tokio::task::spawn_blocking(move || run_claude_judge(&prompt, model.as_deref()))
                 .await
                 .map_err(|e| SupervisorError::Backend(format!("join: {e}")))??;
-        parse_decision(&output)
+        parse_verdict(&output)
     }
 }
 
@@ -727,22 +789,72 @@ pub fn config_from_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxyris_supervisor::Decision;
 
     #[test]
-    fn parse_decision_handles_fenced_json() {
-        let d = parse_decision("```json\n{\"decision\":\"approve\"}\n```").unwrap();
-        assert!(matches!(d, Decision::Approve));
+    fn parse_verdict_handles_fenced_json() {
+        let v = parse_verdict("```json\n{\"decision\":\"approve\"}\n```").unwrap();
+        assert!(matches!(v.decision, Decision::Approve));
+        assert!(v.reasoning.is_none());
     }
 
     #[test]
-    fn parse_decision_handles_prose_wrapped() {
-        let d = parse_decision("Sure. {\"decision\":\"reply\",\"text\":\"go on\"} done").unwrap();
-        assert!(matches!(d, Decision::Reply { text } if text == "go on"));
+    fn parse_verdict_handles_prose_wrapped() {
+        let v = parse_verdict("Sure. {\"decision\":\"reply\",\"text\":\"go on\"} done").unwrap();
+        assert!(matches!(v.decision, Decision::Reply { text } if text == "go on"));
     }
 
     #[test]
-    fn parse_decision_rejects_garbage() {
-        assert!(parse_decision("no json here").is_err());
+    fn parse_verdict_captures_reasoning() {
+        let v = parse_verdict(
+            "{\"reasoning\":\"Jupiter is the largest planet\",\"decision\":\"reply\",\"text\":\"C\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            v.reasoning.as_deref(),
+            Some("Jupiter is the largest planet")
+        );
+        assert!(matches!(v.decision, Decision::Reply { text } if text == "C"));
+    }
+
+    #[test]
+    fn parse_verdict_rejects_garbage() {
+        assert!(parse_verdict("no json here").is_err());
+    }
+
+    #[test]
+    fn parse_verdict_handles_approve_always() {
+        let v = parse_verdict("{\"decision\":\"approve_always\"}").unwrap();
+        assert!(matches!(v.decision, Decision::ApproveAlways));
+    }
+
+    #[test]
+    fn dont_ask_again_finds_option_two() {
+        let menu = "Do you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for basemaster — run_query commands in /home/x\n  3. No\n";
+        // Option 2 → one arrow-down from the highlighted option 1.
+        assert_eq!(dont_ask_again_steps(menu), 1);
+    }
+
+    #[test]
+    fn dont_ask_again_handles_curly_apostrophe() {
+        let menu =
+            "Do you want to proceed?\n  1. Yes\n  2. Yes, and don\u{2019}t ask again\n  3. No";
+        assert_eq!(dont_ask_again_steps(menu), 1);
+    }
+
+    #[test]
+    fn dont_ask_again_absent_returns_zero() {
+        // Two-option menu (no "don't ask again") → plain approve (option 1).
+        let menu = "Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude what to do";
+        assert_eq!(dont_ask_again_steps(menu), 0);
+    }
+
+    #[test]
+    fn dont_ask_again_ignores_numbered_prose_above_menu() {
+        // A document with "## 1." / "2." lines must not be mistaken for the menu;
+        // scoping to the last "do you want to" prompt prevents it.
+        let scroll = "## 1. Intro\n## 2. don't ask again (a heading, not a menu)\nlots of text\nDo you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again for X\n  3. No";
+        assert_eq!(dont_ask_again_steps(scroll), 1);
     }
 
     #[test]
