@@ -3,6 +3,11 @@ import {
   type ClaudeLanguage,
   isClaudeLanguage,
 } from "~/lib/claudeLanguage.ts";
+import {
+  type AutopilotDefaults,
+  type SupervisorKind,
+  autopilotSetDefaults,
+} from "~/ipc/autopilot.ts";
 
 /**
  * App-wide UI preferences that don't belong to any one session. Persisted to
@@ -51,6 +56,12 @@ function loadClaudeLanguage(): ClaudeLanguage {
  * {@link import("./autopilotStore").useAutopilotStore}).
  */
 export interface AutopilotSettings {
+  /**
+   * Default supervisor backend. The per-thread popover can still override this
+   * per engagement; this is the default used by the Settings UI and — crucially
+   * — by a backend-originated (MCP) engage that has no per-thread choice.
+   */
+  supervisor: SupervisorKind;
   /** Model id for the custom (OpenAI-compatible) supervisor, e.g. `gpt-4o`. */
   model: string;
   /** OpenAI-compatible base URL for the custom supervisor. */
@@ -64,12 +75,35 @@ export interface AutopilotSettings {
 }
 
 const DEFAULT_AUTOPILOT: AutopilotSettings = {
+  supervisor: "multi_model",
   model: "",
   baseUrl: "",
   apiKey: "",
   claudeModel: "",
   maxTurns: 30,
 };
+
+/** Map the camelCase UI shape to the snake_case backend default payload. */
+function toDefaults(s: AutopilotSettings): AutopilotDefaults {
+  return {
+    supervisor: s.supervisor,
+    model: s.model,
+    base_url: s.baseUrl,
+    api_key: s.apiKey,
+    claude_model: s.claudeModel,
+    max_turns: s.maxTurns,
+  };
+}
+
+/**
+ * Mirror the config to the backend so the MCP engage tool can read it.
+ * Fire-and-forget: the frontend localStorage stays the UI source of truth, and
+ * a failed sync (e.g. Tauri not ready yet) just means the backend keeps its
+ * previous copy until the next change.
+ */
+export function syncAutopilotDefaults(s: AutopilotSettings): void {
+  void autopilotSetDefaults(toDefaults(s)).catch(() => {});
+}
 
 function loadAutopilot(): AutopilotSettings {
   const raw = window.localStorage.getItem(AUTOPILOT_KEY);
@@ -160,6 +194,8 @@ export const useAppSettingsStore = create<AppSettingsState>((set) => ({
     set((s) => {
       const next = { ...s.autopilot, ...patch };
       window.localStorage.setItem(AUTOPILOT_KEY, JSON.stringify(next));
+      // Keep the backend copy (consulted by the MCP engage tool) in step.
+      syncAutopilotDefaults(next);
       return { autopilot: next };
     }),
 }));

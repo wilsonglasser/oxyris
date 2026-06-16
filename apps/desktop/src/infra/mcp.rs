@@ -60,10 +60,20 @@ fn mcp_bin_filename() -> &'static str {
 /// - the project is not Windows (WSL MCP setup lands in the next sprint), or
 /// - the MCP binary can't be located on disk (don't generate a config that
 ///   would point at a non-existent command).
+///
+/// When `session` is `Some`, the config is written per-session as
+/// `mcp-<session>.json` (instead of the shared `mcp.json`) and carries
+/// `--session-id`. Combined with `Some(autopilot_bridge_port)` it also wires the
+/// `oxyris_autopilot_*` tools so the pure-mode claude can hand the wheel to the
+/// pilot for its own session. Structured-provider callers pass `None` for both
+/// and keep the shared, autopilot-less config.
 pub fn prepare_for_worktree(
     env: &Environment,
     worktree_root: &str,
     lsp_bridge_port: Option<u16>,
+    session: Option<&str>,
+    autopilot_bridge_port: Option<u16>,
+    browser_bridge_port: Option<u16>,
 ) -> std::io::Result<Option<McpSetup>> {
     let Some(bin) = resolve_mcp_bin() else {
         tracing::debug!("oxyris-mcp binary not located; skipping MCP config");
@@ -89,7 +99,12 @@ pub fn prepare_for_worktree(
     let oxyris_dir = Path::new(worktree_root).join(".oxyris");
     std::fs::create_dir_all(&oxyris_dir)?;
     let index_db = oxyris_dir.join("index.db");
-    let config_path = oxyris_dir.join("mcp.json");
+    // Per-session config when a session id is given (so each carries its own
+    // `--session-id` for the autopilot tools); the shared `mcp.json` otherwise.
+    let config_path = match session {
+        Some(id) => oxyris_dir.join(format!("mcp-{id}.json")),
+        None => oxyris_dir.join("mcp.json"),
+    };
 
     // Build args. `--lsp-bridge` is included only when the desktop's TCP
     // bridge is actually up — fallback path lets the MCP server spawn its
@@ -104,6 +119,28 @@ pub fn prepare_for_worktree(
         args.push("--lsp-bridge".into());
         args.push(format!("tcp://127.0.0.1:{port}"));
     }
+    // Autopilot hand-off tools: only wired when we have both the calling
+    // session's id and a live control bridge. The session id is baked here
+    // (never a tool argument) so Claude can only ever engage its own session.
+    let autopilot_wired = match (session, autopilot_bridge_port) {
+        (Some(id), Some(port)) => {
+            args.push("--session-id".into());
+            args.push(id.to_owned());
+            args.push("--autopilot-bridge".into());
+            args.push(format!("tcp://127.0.0.1:{port}"));
+            true
+        }
+        _ => false,
+    };
+    // Browser tools: shared headless browser, not session-scoped, so any
+    // session gets them when the bridge is up.
+    let browser_wired = if let Some(port) = browser_bridge_port {
+        args.push("--browser-bridge".into());
+        args.push(format!("tcp://127.0.0.1:{port}"));
+        true
+    } else {
+        false
+    };
 
     let contents = json!({
         "mcpServers": {
@@ -118,15 +155,44 @@ pub fn prepare_for_worktree(
     });
     std::fs::write(&config_path, serde_json::to_vec_pretty(&contents)?)?;
 
+    let mut system_prompt_nudge = SYSTEM_PROMPT_NUDGE.to_owned();
+    if autopilot_wired {
+        system_prompt_nudge.push_str("\n\n");
+        system_prompt_nudge.push_str(AUTOPILOT_NUDGE);
+    }
+    if browser_wired {
+        system_prompt_nudge.push_str("\n\n");
+        system_prompt_nudge.push_str(BROWSER_NUDGE);
+    }
+
     Ok(Some(McpSetup {
         config_path: config_path.to_string_lossy().into_owned(),
-        system_prompt_nudge: SYSTEM_PROMPT_NUDGE.to_owned(),
+        system_prompt_nudge,
     }))
 }
 
 /// Appended to the system prompt so Claude prefers the MCP tools over Grep
 /// when looking for code symbols. Kept short — tool descriptions carry the
 /// detailed contract.
+/// Appended only when the autopilot hand-off tools are wired (pure-mode session
+/// with a live control bridge). Tells Claude the tools exist and that engaging
+/// is a one-shot hand-off, not a conversation.
+const AUTOPILOT_NUDGE: &str = r#"This session can hand itself off to the Oxyris auto-pilot — a supervisor agent that drives this same Claude session autonomously toward a stated mission:
+- `oxyris_autopilot_engage(mission)` — turn the pilot ON for THIS session with a mission (a concrete spec of what to accomplish), then STOP and end your turn. The pilot takes over from there; do not keep calling it or talking to it. Use when the user asks you to "let the autopilot finish/continue this" or to run long autonomous work unattended.
+- `oxyris_autopilot_disengage()` — turn the pilot OFF for this session.
+The supervisor backend/model comes from the user's saved Settings — you only supply the mission. Engage is fire-and-forget: call it once, then stop."#;
+
+/// Appended when the browser bridge is wired. Tells Claude the headless-browser
+/// tools exist so it can navigate + screenshot to validate its own work.
+const BROWSER_NUDGE: &str = r#"This session has a shared headless browser for validating work in a real page (open a dev server, check a UI, read rendered output):
+- `browser_navigate(url)` — go to a URL (e.g. http://localhost:5173) and wait for load.
+- `browser_screenshot()` — capture the current page as a PNG image you can look at to verify it renders correctly.
+- `browser_snapshot()` — the page's visible text, when you don't need pixels.
+- `browser_click(selector)` / `browser_type(selector, text)` — interact via CSS selectors.
+- `browser_eval(expression)` — run JavaScript in the page and get the result.
+- `browser_wait_for(selector)` — wait until an element appears.
+Prefer screenshotting to confirm a frontend change actually looks right instead of assuming. The browser launches on first use."#;
+
 const SYSTEM_PROMPT_NUDGE: &str = r#"This project ships an `Oxyris` MCP server with a tree-sitter symbol index, an LSP bridge, and (when the workspace is a Laravel app) Laravel-aware tools.
 
 For code identifiers (function/class/struct/type names), prefer `oxyris_find_symbol` over Grep — it returns precise file:line locations across all indexed languages and falls back to a case-insensitive prefix when the exact name isn't found. Use `oxyris_list_symbols` for a file outline before reading large files end-to-end, and `oxyris_project_map` at the start of unfamiliar tasks.

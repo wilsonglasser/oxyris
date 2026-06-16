@@ -126,12 +126,25 @@ struct LiveTerminal {
 /// frame in the sniffer's append-only tail still drops out of "busy".
 struct IdleState {
     last_output: Instant,
+    /// Last instant the current TUI frame showed a running turn
+    /// ([`PureSniffer::is_busy_now`]). claude interleaves response text and the
+    /// spinner/interrupt footer, so `is_busy_now` flickers false on frames whose
+    /// last line is content — which made the dot flap blue→settled→blue mid-turn.
+    /// Treating "busy seen within [`BUSY_HYSTERESIS_MS`]" as still busy smooths
+    /// that at the source. Seeded in the past so a fresh PTY isn't born "busy".
+    last_busy: Instant,
 }
 
 /// Output silence (ms) after which a turn with no live spinner/interrupt footer
 /// is treated as done. A live spinner repaints as content, so a genuinely
 /// thinking turn keeps refreshing the clock and stays "busy".
 const IDLE_DONE_MS: u64 = 2500;
+
+/// How long after the last "turn is running" frame the dot stays busy even if the
+/// current frame's last line is content rather than the spinner/interrupt footer.
+/// Absorbs the per-frame `is_busy_now` flicker without noticeably delaying the
+/// real settle (the silence clock, [`IDLE_DONE_MS`], still bounds it).
+const BUSY_HYSTERESIS_MS: u64 = 1200;
 
 /// Heartbeat (ms) at which the pure-state snapshot is re-evaluated and re-emitted
 /// if it changed. Self-heals a snapshot the frontend missed (session switch,
@@ -189,7 +202,11 @@ pub struct PureState {
 fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     let needs_input = sniffer.prompt_open();
     let fresh = idle.last_output.elapsed() < Duration::from_millis(IDLE_DONE_MS);
-    let busy = !needs_input && sniffer.is_busy_now() && fresh;
+    // Hysteresis: a turn counts as running if the current frame shows it OR one
+    // did within BUSY_HYSTERESIS_MS — so content-last-line frames mid-turn don't
+    // momentarily read "settled" and flap the dot.
+    let busy_recent = idle.last_busy.elapsed() < Duration::from_millis(BUSY_HYSTERESIS_MS);
+    let busy = !needs_input && fresh && (sniffer.is_busy_now() || busy_recent);
     PureState { needs_input, busy }
 }
 
@@ -590,6 +607,11 @@ impl PtySupervisor {
         let idle: Option<Arc<Mutex<IdleState>>> = is_claude.then(|| {
             Arc::new(Mutex::new(IdleState {
                 last_output: Instant::now(),
+                // Seed in the past so a freshly spawned, idle claude isn't born
+                // "busy" by the hysteresis window.
+                last_busy: Instant::now()
+                    .checked_sub(Duration::from_millis(BUSY_HYSTERESIS_MS))
+                    .unwrap_or_else(Instant::now),
             }))
         });
         // Last pure-state snapshot emitted on `session:<id>:pure-state`, shared
@@ -698,6 +720,13 @@ impl PtySupervisor {
                             {
                                 if has_content_stripped(stripped) {
                                     st.last_output = Instant::now();
+                                }
+                                // Stamp the running-turn clock whenever this frame
+                                // shows a live turn, so the hysteresis in
+                                // `compute_pure_state` can hold the dot busy across
+                                // a content-last-line frame without flapping.
+                                if sniffer.is_busy_now() {
+                                    st.last_busy = Instant::now();
                                 }
                                 let next = compute_pure_state(&sniffer, &st);
                                 if *prev != Some(next) {

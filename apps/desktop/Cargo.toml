@@ -1,6 +1,6 @@
 [package]
 name = "oxyris-desktop"
-version = "0.4.11"
+version = "0.4.12"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -46,6 +46,7 @@ oxyris-provider.workspace = true
 oxyris-claude.workspace = true
 oxyris-supervisor.workspace = true
 oxyris-watch.workspace = true
+oxyris-browser.workspace = true
 async-trait.workspace = true
 ignore.workspace = true
 regex.workspace = true

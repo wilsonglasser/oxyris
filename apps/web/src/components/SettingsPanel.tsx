@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import {
   BellRing,
+  Bot,
   FileCode,
   FileText,
   Globe,
@@ -19,7 +20,11 @@ import { LanguageSwitcher } from "~/components/LanguageSwitcher.tsx";
 import { localEnvLabel } from "~/lib/host.ts";
 import { LanguagePacksPanel } from "~/components/LanguagePacksPanel.tsx";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
-import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
+import {
+  syncAutopilotDefaults,
+  useAppSettingsStore,
+} from "~/stores/appSettingsStore.ts";
+import type { SupervisorKind } from "~/ipc/autopilot.ts";
 import {
   CLAUDE_LANGUAGES,
   type ClaudeLanguage,
@@ -108,12 +113,16 @@ function GeneralTab() {
   const [escalationSound, setEscalationSound] = useState<string>(() =>
     getChannelSound("escalation"),
   );
+  const [missionSound, setMissionSound] = useState<string>(() =>
+    getChannelSound("mission"),
+  );
   const updateChannel = useCallback(
     (ch: SoundChannel, id: string) => {
       setChannelSound(ch, id);
       if (ch === "completion") setCompletionSound(id);
       else if (ch === "input") setInputSound(id);
-      else setEscalationSound(id);
+      else if (ch === "escalation") setEscalationSound(id);
+      else setMissionSound(id);
       previewSound(id);
     },
     [],
@@ -126,9 +135,14 @@ function GeneralTab() {
   );
   const claudeLanguage = useAppSettingsStore((s) => s.claudeLanguage);
   const setClaudeLanguage = useAppSettingsStore((s) => s.setClaudeLanguage);
+  const autopilot = useAppSettingsStore((s) => s.autopilot);
+  const setAutopilot = useAppSettingsStore((s) => s.setAutopilot);
 
   useEffect(() => {
     void getVersion().then(setVersion).catch(() => {});
+    // Push the current config to the backend once on open, so the MCP engage
+    // tool has it even if the user hasn't touched the settings since upgrading.
+    syncAutopilotDefaults(useAppSettingsStore.getState().autopilot);
   }, []);
 
   const forceCheck = useUpdaterStore((s) => s.forceCheck);
@@ -301,6 +315,14 @@ function GeneralTab() {
             offLabel={t("notifications_sound_off")}
             testLabel={t("notifications_test")}
           />
+          <ChannelPicker
+            label={t("notifications_channel_mission_title")}
+            description={t("notifications_channel_mission_desc")}
+            value={missionSound}
+            onChange={(id) => updateChannel("mission", id)}
+            offLabel={t("notifications_sound_off")}
+            testLabel={t("notifications_test")}
+          />
         </div>
       </Section>
 
@@ -324,6 +346,107 @@ function GeneralTab() {
             </span>
           </span>
         </label>
+      </Section>
+
+      <Section
+        icon={<Bot className="size-3.5" strokeWidth={1.75} />}
+        title={t("section_autopilot")}
+      >
+        <p className="mb-3 text-[11px] text-neutral-500">
+          {t("autopilot_desc")}
+        </p>
+        <div className="flex flex-col gap-3">
+          <label className="block">
+            <span className="mb-1 block text-[11px] text-neutral-400">
+              {t("autopilot_supervisor_label")}
+            </span>
+            <select
+              value={autopilot.supervisor}
+              onChange={(e) =>
+                setAutopilot({
+                  supervisor: e.target.value as SupervisorKind,
+                })
+              }
+              className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-[11px] text-neutral-200"
+            >
+              <option value="multi_model">
+                {t("autopilot_supervisor_multimodel")}
+              </option>
+              <option value="claude">{t("autopilot_supervisor_claude")}</option>
+            </select>
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-[11px] text-neutral-400">
+              {t("autopilot_model_label")}
+            </span>
+            <input
+              value={
+                autopilot.supervisor === "multi_model"
+                  ? autopilot.model
+                  : autopilot.claudeModel
+              }
+              onChange={(e) =>
+                setAutopilot(
+                  autopilot.supervisor === "multi_model"
+                    ? { model: e.target.value }
+                    : { claudeModel: e.target.value },
+                )
+              }
+              placeholder={
+                autopilot.supervisor === "multi_model"
+                  ? t("autopilot_model_ph_openai")
+                  : t("autopilot_model_ph_claude")
+              }
+              className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-[11px] text-neutral-200 outline-none focus:border-neutral-600"
+            />
+          </label>
+
+          {autopilot.supervisor === "multi_model" && (
+            <>
+              <label className="block">
+                <span className="mb-1 block text-[11px] text-neutral-400">
+                  {t("autopilot_base_url_label")}
+                </span>
+                <input
+                  value={autopilot.baseUrl}
+                  onChange={(e) => setAutopilot({ baseUrl: e.target.value })}
+                  placeholder={t("autopilot_base_url_ph")}
+                  className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-[11px] text-neutral-200 outline-none focus:border-neutral-600"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-[11px] text-neutral-400">
+                  {t("autopilot_api_key_label")}
+                </span>
+                <input
+                  type="password"
+                  value={autopilot.apiKey}
+                  onChange={(e) => setAutopilot({ apiKey: e.target.value })}
+                  placeholder={t("autopilot_api_key_ph")}
+                  className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-[11px] text-neutral-200 outline-none focus:border-neutral-600"
+                />
+              </label>
+            </>
+          )}
+
+          <label className="block">
+            <span className="mb-1 block text-[11px] text-neutral-400">
+              {t("autopilot_max_turns_label")}
+            </span>
+            <input
+              type="number"
+              min={1}
+              value={autopilot.maxTurns ?? ""}
+              onChange={(e) =>
+                setAutopilot({
+                  maxTurns: e.target.value ? Number(e.target.value) : null,
+                })
+              }
+              className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-[11px] text-neutral-200 outline-none focus:border-neutral-600"
+            />
+          </label>
+        </div>
       </Section>
 
       <Section

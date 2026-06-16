@@ -4,6 +4,9 @@
 
 pub mod agent_pool;
 pub mod autopilot;
+pub mod autopilot_bridge;
+pub mod autopilot_config;
+pub mod browser_bridge;
 pub mod checkpoint;
 pub mod docker_cleanup;
 pub mod dotenv_render;

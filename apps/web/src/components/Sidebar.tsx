@@ -44,6 +44,7 @@ import {
   playCompletionChime,
   playEscalationChime,
   playInputChime,
+  playMissionDoneChime,
   shouldNotify,
 } from "~/lib/notificationSound.ts";
 import { useAutopilotAlertStore } from "~/stores/autopilotAlertStore.ts";
@@ -292,13 +293,21 @@ export function Sidebar({
         if (
           event.kind === "halted" ||
           event.kind === "error" ||
-          event.kind === "escalated"
+          event.kind === "escalated" ||
+          event.kind === "done"
         ) {
           store.setEnabled(s.id, false);
         }
         if (event.kind === "escalated") {
           playEscalationChime();
           useAutopilotAlertStore.getState().raise(s.id, event.why);
+        }
+        if (event.kind === "done") {
+          // Mission complete: mark the thread done (purple dot) and chime.
+          store.setDone(s.id, true);
+          markAttention(s.id);
+          playMissionDoneChime();
+          bumpBadge();
         }
       }).then((fn) => {
         if (cancelled) fn();
@@ -1004,6 +1013,8 @@ function SessionEntry({
   // so a thread being driven hands-free is recognizable from any tab.
   const autopilot = useAutopilotStore((s) => !!s.enabled[session.id]);
   const autopilotThinking = useAutopilotStore((s) => !!s.thinking[session.id]);
+  // Purple dot — the pilot finished its mission on this thread (now disengaged).
+  const pilotDone = useAutopilotStore((s) => !!s.done[session.id]);
 
   const onRename = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1075,6 +1086,7 @@ function SessionEntry({
           busy={busy}
           autopilot={autopilot}
           autopilotThinking={autopilotThinking}
+          pilotDone={pilotDone}
           lastActivityAt={session.last_activity_at}
           liveActivityAt={liveActivityAt}
         />
@@ -1169,6 +1181,7 @@ function StatusDot({
   busy,
   autopilot,
   autopilotThinking,
+  pilotDone,
   lastActivityAt,
   liveActivityAt,
 }: {
@@ -1180,6 +1193,8 @@ function StatusDot({
   autopilot?: boolean;
   /** Pilot is mid-step (consulting the Supervisor) → spin the robot. */
   autopilotThinking?: boolean;
+  /** Auto-pilot finished its mission on this thread → purple dot. */
+  pilotDone?: boolean;
   lastActivityAt: string;
   /** Wall-clock ms of last live PTY output (pure threads); overrides recency. */
   liveActivityAt?: number | undefined;
@@ -1191,15 +1206,20 @@ function StatusDot({
     (liveActivityAt !== undefined && Date.now() - liveActivityAt < RECENT_MS);
   // Literal class strings (not built via concat) so Tailwind's JIT emits them.
   const red = needsInput || status === "errored";
+  // Purple — the auto-pilot completed its mission and shut off. Ranks just below
+  // a red "needs you" so a finished hands-free run stands out from a plain
+  // recent/attention thread.
   const dotBg = red
     ? "bg-red-500"
-    : busy
-      ? "bg-sky-400"
-      : attention
-        ? "bg-orange-400"
-        : recent
-          ? "bg-emerald-400"
-          : "bg-neutral-600";
+    : pilotDone
+      ? "bg-purple-500"
+      : busy
+        ? "bg-sky-400"
+        : attention
+          ? "bg-orange-400"
+          : recent
+            ? "bg-emerald-400"
+            : "bg-neutral-600";
 
   if (autopilot) {
     // Same color, robot shape. Pulses while a turn is in flight (mirrors the

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use oxyris_index::Index;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 
 use crate::laravel_state::LaravelState;
 use crate::lsp_backend::LspBackend;
@@ -82,6 +83,15 @@ async fn main() -> std::io::Result<()> {
         .map(LaravelState::looks_like_laravel)
         .unwrap_or(false);
 
+    // Auto-pilot hand-off is available only when the desktop wired both the
+    // control-bridge address and this session's id. `(addr, session_id)`.
+    let autopilot: Option<(String, String)> = match (cli.autopilot_bridge, cli.session_id) {
+        (Some(addr), Some(sid)) => Some((addr, sid)),
+        _ => None,
+    };
+    // Browser tools need only the bridge address (shared, not session-scoped).
+    let browser: Option<String> = cli.browser_bridge;
+
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin).lines();
@@ -98,6 +108,8 @@ async fn main() -> std::io::Result<()> {
             &laravel,
             laravel_workspace.as_deref(),
             laravel_advertised,
+            autopilot.as_ref(),
+            browser.as_deref(),
         )
         .await;
         if let Some(resp) = response {
@@ -114,21 +126,36 @@ struct Cli {
     index_db: String,
     workspace: Option<PathBuf>,
     lsp_bridge: Option<String>,
+    /// Desktop auto-pilot control bridge (`tcp://host:port`). When present the
+    /// `oxyris_autopilot_*` tools are advertised and forward to it.
+    autopilot_bridge: Option<String>,
+    /// The session this MCP server belongs to — baked by the desktop so the
+    /// engage tool can only ever drive its own session.
+    session_id: Option<String>,
+    /// Desktop browser control bridge (`tcp://host:port`). When present the
+    /// `browser_*` tools are advertised and forward to it.
+    browser_bridge: Option<String>,
 }
 
 fn parse_cli() -> Result<Cli, String> {
     let mut index_db: Option<String> = None;
     let mut workspace: Option<PathBuf> = None;
     let mut lsp_bridge: Option<String> = None;
+    let mut autopilot_bridge: Option<String> = None;
+    let mut session_id: Option<String> = None;
+    let mut browser_bridge: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--index-db" => index_db = args.next(),
             "--workspace" => workspace = args.next().map(PathBuf::from),
             "--lsp-bridge" => lsp_bridge = args.next(),
+            "--autopilot-bridge" => autopilot_bridge = args.next(),
+            "--session-id" => session_id = args.next(),
+            "--browser-bridge" => browser_bridge = args.next(),
             "--help" | "-h" => {
                 println!(
-                    "oxyris-mcp — MCP server exposing the Oxyris symbol index + LSP bridge\n\nUsage:\n  oxyris-mcp --index-db <path> [--workspace <dir>] [--lsp-bridge tcp://host:port]"
+                    "oxyris-mcp — MCP server exposing the Oxyris symbol index + LSP bridge\n\nUsage:\n  oxyris-mcp --index-db <path> [--workspace <dir>] [--lsp-bridge tcp://host:port] [--autopilot-bridge tcp://host:port --session-id <id>]"
                 );
                 std::process::exit(0);
             }
@@ -140,6 +167,9 @@ fn parse_cli() -> Result<Cli, String> {
         index_db,
         workspace,
         lsp_bridge,
+        autopilot_bridge,
+        session_id,
+        browser_bridge,
     })
 }
 
@@ -156,6 +186,7 @@ fn install_logging() {
 
 /// Process a single JSON-RPC message line. Returns `None` for notifications
 /// (no `id` field) per the spec — those don't get responses.
+#[allow(clippy::too_many_arguments)]
 async fn handle_message(
     line: &str,
     index: Option<&Index>,
@@ -163,6 +194,8 @@ async fn handle_message(
     laravel: &Arc<LaravelState>,
     laravel_workspace: Option<&Path>,
     laravel_advertised: bool,
+    autopilot: Option<&(String, String)>,
+    browser: Option<&str>,
 ) -> Option<Value> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -185,9 +218,23 @@ async fn handle_message(
             Ok(initialize_response())
         }
         "initialized" | "notifications/initialized" => return None,
-        "tools/list" => Ok(tools_list_response(lsp.is_some(), laravel_advertised)),
+        "tools/list" => Ok(tools_list_response(
+            lsp.is_some(),
+            laravel_advertised,
+            autopilot.is_some(),
+            browser.is_some(),
+        )),
         "tools/call" => {
-            handle_tool_call(msg.get("params"), index, lsp, laravel, laravel_workspace).await
+            handle_tool_call(
+                msg.get("params"),
+                index,
+                lsp,
+                laravel,
+                laravel_workspace,
+                autopilot,
+                browser,
+            )
+            .await
         }
         "ping" => Ok(json!({})),
         "" => Err((-32600, "Invalid request: missing method".to_string())),
@@ -223,7 +270,12 @@ fn initialize_response() -> Value {
     })
 }
 
-fn tools_list_response(has_lsp: bool, has_laravel: bool) -> Value {
+fn tools_list_response(
+    has_lsp: bool,
+    has_laravel: bool,
+    has_autopilot: bool,
+    has_browser: bool,
+) -> Value {
     let mut tools = vec![
         json!({
             "name": "oxyris_find_symbol",
@@ -381,15 +433,108 @@ fn tools_list_response(has_lsp: bool, has_laravel: bool) -> Value {
         ]);
     }
 
+    if has_autopilot {
+        tools.extend([
+            json!({
+                "name": "oxyris_autopilot_engage",
+                "description": "Hand THIS Claude session off to the Oxyris auto-pilot — a supervisor agent that then drives this same session autonomously toward the given mission. Fire-and-forget: call this ONCE with a concrete mission, then STOP and end your turn. Do NOT keep calling it or try to converse with the pilot. The supervisor backend/model come from the user's saved Settings; you only supply the mission. Use when the user asks to let the autopilot finish/continue the work or run unattended.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "mission": {
+                            "type": "string",
+                            "description": "Concrete spec of what the pilot should accomplish — the goal/changelog to drive toward."
+                        }
+                    },
+                    "required": ["mission"]
+                }
+            }),
+            json!({
+                "name": "oxyris_autopilot_disengage",
+                "description": "Turn the Oxyris auto-pilot OFF for this session, handing control back to the human. Takes no arguments.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+        ]);
+    }
+
+    if has_browser {
+        tools.extend([
+            json!({
+                "name": "browser_navigate",
+                "description": "Navigate the shared headless browser to a URL (e.g. http://localhost:5173) and wait for the page to load. Use to open a running dev server / page before validating it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "url": { "type": "string", "description": "Absolute URL to open." } },
+                    "required": ["url"]
+                }
+            }),
+            json!({
+                "name": "browser_screenshot",
+                "description": "Capture the current page as a PNG image and return it so you can visually verify the page renders correctly. Prefer this over assuming a frontend change looks right.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "browser_snapshot",
+                "description": "Return the page's visible text (document.body.innerText). Cheaper than a screenshot when you only need the rendered text content.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "browser_click",
+                "description": "Click the first element matching a CSS selector on the current page.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "selector": { "type": "string", "description": "CSS selector." } },
+                    "required": ["selector"]
+                }
+            }),
+            json!({
+                "name": "browser_type",
+                "description": "Set the value of a form field (by CSS selector) and fire input/change events so frameworks react.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "selector": { "type": "string", "description": "CSS selector of the input." },
+                        "text": { "type": "string", "description": "Text to enter." }
+                    },
+                    "required": ["selector", "text"]
+                }
+            }),
+            json!({
+                "name": "browser_eval",
+                "description": "Evaluate a JavaScript expression in the current page and return its value (promises are awaited). Use to read DOM state or trigger app behaviour.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "expression": { "type": "string", "description": "JavaScript expression." } },
+                    "required": ["expression"]
+                }
+            }),
+            json!({
+                "name": "browser_wait_for",
+                "description": "Wait until an element matching a CSS selector appears (default up to 10s). Use after navigation or an action before screenshotting.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "selector": { "type": "string", "description": "CSS selector to wait for." },
+                        "timeout_ms": { "type": "integer", "minimum": 1, "description": "Max wait in ms (default 10000)." }
+                    },
+                    "required": ["selector"]
+                }
+            }),
+        ]);
+    }
+
     json!({ "tools": tools })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_tool_call(
     params: Option<&Value>,
     index: Option<&Index>,
     lsp: Option<&Arc<LspBackend>>,
     laravel: &Arc<LaravelState>,
     laravel_workspace: Option<&Path>,
+    autopilot: Option<&(String, String)>,
+    browser: Option<&str>,
 ) -> Result<Value, (i64, String)> {
     let params = params.ok_or((-32602, "missing params".to_string()))?;
     let name = params
@@ -400,6 +545,31 @@ async fn handle_tool_call(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+
+    // Auto-pilot hand-off tools forward to the desktop control bridge over TCP.
+    // The session id is the one the desktop baked into our argv — never taken
+    // from the tool arguments — so a session can only ever engage itself.
+    if name == "oxyris_autopilot_engage" || name == "oxyris_autopilot_disengage" {
+        let (addr, session_id) = autopilot.ok_or((
+            -32601,
+            "auto-pilot tools not enabled (no control bridge configured)".to_string(),
+        ))?;
+        let text = call_autopilot(name, addr, session_id, &args)
+            .await
+            .map_err(|e| (-32603, e))?;
+        return Ok(json!({ "content": [ { "type": "text", "text": text } ] }));
+    }
+
+    // Browser tools forward to the shared browser bridge. `browser_screenshot`
+    // returns an MCP image content block (base64 PNG) so the model can see it;
+    // the rest return text.
+    if name.starts_with("browser_") {
+        let addr = browser.ok_or((
+            -32601,
+            "browser tools not enabled (no browser bridge configured)".to_string(),
+        ))?;
+        return call_browser(name, addr, &args).await;
+    }
 
     let text = match name {
         "oxyris_find_symbol" => tools::find_symbol(index, &args),
@@ -458,13 +628,129 @@ async fn handle_tool_call(
     }))
 }
 
+/// Forward an auto-pilot tool call to the desktop control bridge. `addr` is the
+/// `tcp://host:port` the desktop baked into our argv; we strip the scheme, send
+/// one JSON-RPC line, read one response line, and turn it into human text.
+async fn call_autopilot(
+    tool: &str,
+    addr: &str,
+    session_id: &str,
+    args: &Value,
+) -> Result<String, String> {
+    let method = match tool {
+        "oxyris_autopilot_engage" => "autopilot.engage",
+        "oxyris_autopilot_disengage" => "autopilot.disengage",
+        other => return Err(format!("unknown autopilot tool: {other}")),
+    };
+    let mut params = json!({ "session_id": session_id });
+    if tool == "oxyris_autopilot_engage" {
+        let mission = args
+            .get("mission")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'mission'".to_string())?;
+        params["mission"] = json!(mission);
+    }
+
+    bridge_rpc(addr, method, params).await?;
+
+    Ok(match tool {
+        "oxyris_autopilot_engage" => "Auto-pilot engaged for this session. End your turn now — the pilot drives autonomously toward the mission from here.".to_string(),
+        _ => "Auto-pilot disengaged for this session. Control is back with the human.".to_string(),
+    })
+}
+
+/// Forward a `browser_*` tool to the browser bridge and shape the MCP content.
+/// `browser_screenshot` returns an image block; the rest return text.
+async fn call_browser(tool: &str, addr: &str, args: &Value) -> Result<Value, (i64, String)> {
+    let bad = |m: String| (-32603, m);
+    let need = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| (-32602, format!("missing '{k}'")))
+    };
+    let (method, params) = match tool {
+        "browser_navigate" => ("browser.navigate", json!({ "url": need("url")? })),
+        "browser_screenshot" => ("browser.screenshot", json!({})),
+        "browser_snapshot" => ("browser.snapshot", json!({})),
+        "browser_click" => ("browser.click", json!({ "selector": need("selector")? })),
+        "browser_type" => (
+            "browser.type",
+            json!({ "selector": need("selector")?, "text": need("text")? }),
+        ),
+        "browser_eval" => ("browser.eval", json!({ "expression": need("expression")? })),
+        "browser_wait_for" => {
+            let mut p = json!({ "selector": need("selector")? });
+            if let Some(t) = args.get("timeout_ms") {
+                p["timeout_ms"] = t.clone();
+            }
+            ("browser.wait_for", p)
+        }
+        other => return Err((-32601, format!("unknown browser tool: {other}"))),
+    };
+
+    let result = bridge_rpc(addr, method, params).await.map_err(bad)?;
+
+    let content = match tool {
+        "browser_screenshot" => {
+            let data = result
+                .get("data")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bad("screenshot returned no data".into()))?;
+            json!({ "type": "image", "data": data, "mimeType": "image/png" })
+        }
+        "browser_snapshot" => {
+            let text = result.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            json!({ "type": "text", "text": text })
+        }
+        "browser_eval" => {
+            let v = result.get("value").cloned().unwrap_or(Value::Null);
+            json!({ "type": "text", "text": serde_json::to_string(&v).unwrap_or_default() })
+        }
+        _ => json!({ "type": "text", "text": "ok" }),
+    };
+    Ok(json!({ "content": [ content ] }))
+}
+
+/// One JSON-RPC round-trip to a desktop bridge over TCP: connect, send one line,
+/// read one response line. Returns the `result` value or the bridge's error
+/// message. Shared by the auto-pilot and browser tool forwarders.
+async fn bridge_rpc(addr: &str, method: &str, params: Value) -> Result<Value, String> {
+    let host = addr.strip_prefix("tcp://").unwrap_or(addr);
+    let stream = TcpStream::connect(host)
+        .await
+        .map_err(|e| format!("connect {host}: {e}"))?;
+    let (read, mut write) = stream.into_split();
+    let req = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let mut line = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+    line.push(b'\n');
+    write.write_all(&line).await.map_err(|e| e.to_string())?;
+    write.flush().await.map_err(|e| e.to_string())?;
+
+    let mut reader = BufReader::new(read);
+    let mut resp = String::new();
+    reader
+        .read_line(&mut resp)
+        .await
+        .map_err(|e| e.to_string())?;
+    let value: Value = serde_json::from_str(resp.trim()).map_err(|e| e.to_string())?;
+    if let Some(err) = value.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("bridge error");
+        return Err(msg.to_string());
+    }
+    Ok(value.get("result").cloned().unwrap_or(Value::Null))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     async fn req(line: &str) -> Option<Value> {
         let laravel = Arc::new(LaravelState::new());
-        handle_message(line, None, None, &laravel, None, false).await
+        handle_message(line, None, None, &laravel, None, false, None, None).await
     }
 
     #[tokio::test]

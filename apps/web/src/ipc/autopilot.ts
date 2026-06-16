@@ -25,12 +25,38 @@ export async function autopilotDisengage(sessionId: string): Promise<void> {
   await invoke("autopilot_disengage", { input: { session_id: sessionId } });
 }
 
+/**
+ * App-wide default supervisor config, persisted backend-side so an MCP-driven
+ * engage (Claude handing off via `oxyris_autopilot_engage`) can build a config
+ * without the frontend in the loop. Mirrors `AutopilotDefaults` in
+ * `infra/autopilot_config.rs` (snake_case wire shape).
+ */
+export type AutopilotDefaults = {
+  supervisor: SupervisorKind;
+  model: string;
+  base_url: string;
+  api_key: string;
+  claude_model: string;
+  max_turns: number | null;
+};
+
+export async function autopilotGetDefaults(): Promise<AutopilotDefaults> {
+  return invoke<AutopilotDefaults>("autopilot_get_defaults");
+}
+
+export async function autopilotSetDefaults(
+  input: AutopilotDefaults,
+): Promise<void> {
+  await invoke("autopilot_set_defaults", { input });
+}
+
 /** Decision/outcome the backend pilot emits, mirroring `AutopilotEvent`. */
 export type AutopilotEvent =
   | { kind: "thinking" }
   | { kind: "approved" }
   | { kind: "rejected"; reason: string }
   | { kind: "replied"; text: string }
+  | { kind: "done"; summary: string }
   | { kind: "halted"; reason: string }
   | { kind: "escalated"; why: string }
   | { kind: "error"; message: string };

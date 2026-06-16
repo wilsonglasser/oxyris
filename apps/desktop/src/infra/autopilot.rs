@@ -1,12 +1,22 @@
 //! Auto-pilot integration — wires the pure `Supervisor` decision core
 //! (`oxyris-supervisor`) to live sessions.
 //!
-//! Flow: the PTY reader detects a pure-signal and pushes a [`PureSignalNotice`]
-//! to this manager's channel. For an *engaged* session the manager builds the
-//! transcript context from the PTY scrollback, runs [`Autopilot::step`]
-//! (denylist → Supervisor → budget), and carries out the resulting [`Action`]
-//! by writing to the PTY stdin. Every step emits `session:<id>:autopilot` so the
-//! UI mini-log can show what the pilot did; a [`Action::Halt`] disengages.
+//! Flow: per engaged session a **state-driven watchdog** ([`AutopilotManager::watchdog`])
+//! polls the claude PTY's ground-truth turn state ([`PtySupervisor::pure_state`])
+//! plus a fingerprint of its scrollback. When the session has been *idle and
+//! stable* (settled or a menu waiting) for [`RESPOND_DEBOUNCE_MS`], and that exact
+//! screen hasn't been acted on before, it runs one [`Autopilot::step`] (denylist →
+//! Supervisor → budget) and carries out the [`Action`] by writing to the PTY.
+//!
+//! Why a watchdog and not raw marker edges: the TUI emits *several* turn-end
+//! markers per turn (poll + "Worked for…" + recap), it can settle by silence with
+//! no marker at all, and a submitted Enter can be swallowed by paste-burst
+//! detection. Reacting to each marker double-fired the reply; relying only on
+//! markers stalled the pilot when one was missed. Polling ground-truth state with
+//! a debounce + per-screen dedup fixes both, and an explicit *await-start* phase
+//! retries a swallowed Enter (idempotently) instead of re-asking the Supervisor.
+//! The [`PureSignalNotice`] channel is kept only as a low-latency *wake nudge* so
+//! the watchdog re-evaluates promptly instead of waiting a full poll tick.
 //!
 //! Two Supervisor backends ship:
 //! - [`OpenAiCompatSupervisor`] — any OpenAI-compatible `/chat/completions`
@@ -14,8 +24,10 @@
 //! - [`ClaudeCliSupervisor`] — a headless `claude -p` acting as judge.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use oxyris_core::AggregateId;
@@ -25,13 +37,35 @@ use oxyris_supervisor::{
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{Mutex, mpsc::UnboundedReceiver};
+use tokio::sync::{Mutex, Notify, mpsc::UnboundedReceiver};
 
 use crate::infra::pty::{PtySupervisor, PureSignalNotice};
 use crate::infra::pure_signals::PureSignal;
 
 /// How much PTY scrollback (chars) to feed the Supervisor as context.
 const CONTEXT_CHARS: usize = 4000;
+
+/// Watchdog poll cadence (ms). A wake nudge from a marker signal can fire a tick
+/// sooner; this is the safety-net interval that catches silence-based settles.
+const POLL_MS: u64 = 350;
+
+/// How long the session must stay idle **and** show the same screen before the
+/// pilot acts. Wider than the TUI's mid-turn settle blips so a transient idle
+/// frame can't trigger a premature (or duplicate) response.
+const RESPOND_DEBOUNCE_MS: u64 = 1000;
+
+/// After the pilot submits, how long to wait for claude to start the turn (go
+/// busy) before assuming the Enter was swallowed and re-sending it.
+const START_TIMEOUT_MS: u64 = 1300;
+
+/// Max Enter re-sends for one swallowed submit before handing back to the human.
+const MAX_SUBMIT_RETRIES: u32 = 3;
+
+/// Gap (ms) between writing the reply text and the submitting Enter. claude's
+/// paste-burst detection folds `text\r` in one write (or too close together)
+/// into a literal newline instead of a submit, so the Enter is a separate write
+/// after this pause. 60 ms was on the edge and intermittently swallowed.
+const SUBMIT_GAP_MS: u64 = 120;
 
 /// Config chosen in the auto-pilot panel, passed through `autopilot_engage`.
 #[derive(Debug, Clone)]
@@ -60,12 +94,26 @@ impl SupervisorConfig {
 }
 
 struct EngagedSession {
+    session_id: AggregateId,
     term_id: String,
     cwd: String,
     mission: Mission,
     /// Serializes steps for one session — the Supervisor call is async and we
     /// must not interleave two steps on the same conversation.
     pilot: Mutex<Autopilot>,
+    /// Low-latency nudge: a marker signal pokes this so the watchdog re-evaluates
+    /// without waiting a full [`POLL_MS`] tick. Also poked on disengage to break
+    /// the watchdog out of its wait promptly.
+    wake: Notify,
+}
+
+/// Where the per-session watchdog is in its act → confirm loop.
+enum Phase {
+    /// Watching for a settled, stable, not-yet-acted screen to respond to.
+    Observe,
+    /// We submitted and are waiting for claude to actually start the turn (go
+    /// busy). If it never does, the Enter was likely swallowed — re-send it.
+    AwaitingStart { since: Instant, retries: u32 },
 }
 
 /// What the frontend gets on `session:<id>:autopilot` for its mini-log.
@@ -82,6 +130,12 @@ enum AutopilotEvent {
     },
     Replied {
         text: String,
+    },
+    /// The Supervisor judged the mission complete and shut the pilot off. Its own
+    /// event (not a plain `Halted`) so the UI can mark the thread done — a purple
+    /// dot + a "work complete" chime — distinct from a budget/loop/denylist stop.
+    Done {
+        summary: String,
     },
     Halted {
         reason: String,
@@ -133,75 +187,187 @@ impl AutopilotManager {
 
         let pilot = Autopilot::new(config.build(), max_turns);
         let engaged = Arc::new(EngagedSession {
+            session_id,
             term_id: term.id,
             cwd: term.cwd,
             mission,
             pilot: Mutex::new(pilot),
+            wake: Notify::new(),
         });
         self.engaged
             .lock()
             .await
             .insert(session_id, engaged.clone());
 
-        // Kick the first decision. The pilot is otherwise reactive — it acts only
-        // when a NEW pure-signal arrives. Engaging while claude sits idle (the
-        // common case: you set a mission on a quiet session) never produces one,
-        // so the run would never start. Treat the current idle state as a
-        // `TurnEnded` and let the supervisor send the opening instruction. A short
-        // delay lets any in-flight signal settle; the per-session `pilot` mutex
-        // serializes this against a real signal racing in.
+        // The watchdog drives everything from here: it sees claude sitting idle
+        // (the common case — a mission set on a quiet session), debounces, and
+        // sends the opening instruction itself. No separate kickoff needed.
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            let last_output = this
-                .pty
-                .scrollback_tail(&engaged.term_id, CONTEXT_CHARS)
-                .unwrap_or_default();
-            this.drive(session_id, &engaged, PendingKind::TurnEnded { last_output })
-                .await;
+            this.watchdog(engaged).await;
         });
         Ok(())
     }
 
     pub async fn disengage(&self, session_id: AggregateId) {
-        self.engaged.lock().await.remove(&session_id);
+        if let Some(session) = self.engaged.lock().await.remove(&session_id) {
+            // Break the watchdog out of its wait so it notices it's gone and exits.
+            session.wake.notify_one();
+        }
     }
 
-    /// Consume the PTY reader's notice channel forever. Each notice for an
-    /// engaged session is handled on its own task so a slow Supervisor call
-    /// doesn't stall the channel; per-session serialization is enforced by the
-    /// session's `pilot` mutex.
+    fn is_engaged(&self, session_id: AggregateId, term_id: &str) -> bool {
+        self.engaged
+            .try_lock()
+            .ok()
+            .and_then(|m| m.get(&session_id).map(|s| s.term_id == term_id))
+            .unwrap_or(false)
+    }
+
+    /// Consume the PTY reader's notice channel forever. A marker signal for an
+    /// engaged session is only a *wake nudge* — the watchdog reads ground-truth
+    /// turn state itself, so we just poke it to re-evaluate without delay.
     pub async fn run(self: Arc<Self>, mut rx: UnboundedReceiver<PureSignalNotice>) {
         while let Some(notice) = rx.recv().await {
             // Working is a keep-alive only — no decision to make.
             if matches!(notice.signal, PureSignal::Working) {
                 continue;
             }
-            let Some(session) = self.engaged.lock().await.get(&notice.session_id).cloned() else {
-                continue;
-            };
-            // Ignore signals from a stale PTY (e.g. a respawned claude after a
-            // crash) that no longer matches the engaged terminal.
-            if notice.terminal_id != session.term_id {
-                continue;
+            let map = self.engaged.lock().await;
+            if let Some(session) = map.get(&notice.session_id)
+                && notice.terminal_id == session.term_id
+            {
+                session.wake.notify_one();
             }
-            let this = self.clone();
-            tokio::spawn(async move {
-                this.handle(notice, session).await;
-            });
         }
     }
 
-    async fn handle(&self, notice: PureSignalNotice, session: Arc<EngagedSession>) {
-        let Some(ask) = self.build_pending(&notice, &session) else {
-            return;
-        };
-        self.drive(notice.session_id, &session, ask).await;
+    /// Per-session state-driven loop. Polls ground-truth turn state + a scrollback
+    /// fingerprint; acts once per distinct settled screen, then waits for claude
+    /// to start before observing again (re-sending a swallowed Enter if needed).
+    async fn watchdog(self: Arc<Self>, session: Arc<EngagedSession>) {
+        let session_id = session.session_id;
+        let mut phase = Phase::Observe;
+        // Stability tracking: the screen must read the same fingerprint for
+        // RESPOND_DEBOUNCE_MS before we treat it as truly settled.
+        let mut stable_fp: Option<u64> = None;
+        let mut stable_since = Instant::now();
+        // Dedup: the last screen we responded to. Guards against acting twice on
+        // the same idle frame (the "sent the same answer twice" bug).
+        let mut last_acted_fp: Option<u64> = None;
+
+        loop {
+            if !self.is_engaged(session_id, &session.term_id) {
+                return;
+            }
+            tokio::select! {
+                _ = session.wake.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(POLL_MS)) => {}
+            }
+            if !self.is_engaged(session_id, &session.term_id) {
+                return;
+            }
+
+            let state = self.pty.pure_state(session_id);
+            let tail = self
+                .pty
+                .scrollback_tail(&session.term_id, CONTEXT_CHARS)
+                .unwrap_or_default();
+            let fp = fingerprint(&tail);
+
+            match &mut phase {
+                Phase::Observe => {
+                    if state.busy {
+                        // A turn is running — nothing to settle yet.
+                        stable_fp = None;
+                        continue;
+                    }
+                    // Idle: either a menu is waiting (needs_input) or the turn
+                    // settled. Require the screen to hold still before acting.
+                    if stable_fp != Some(fp) {
+                        stable_fp = Some(fp);
+                        stable_since = Instant::now();
+                        continue;
+                    }
+                    if stable_since.elapsed() < Duration::from_millis(RESPOND_DEBOUNCE_MS) {
+                        continue;
+                    }
+                    if last_acted_fp == Some(fp) {
+                        // Already responded to this exact screen — don't double-fire.
+                        continue;
+                    }
+                    let ask = if state.needs_input {
+                        PendingKind::Permission {
+                            request_id: None,
+                            tool_name: None,
+                            command: None,
+                            raw_prompt: tail.clone(),
+                        }
+                    } else {
+                        PendingKind::TurnEnded {
+                            last_output: tail.clone(),
+                        }
+                    };
+                    last_acted_fp = Some(fp);
+                    if self.drive(session_id, &session, ask).await {
+                        phase = Phase::AwaitingStart {
+                            since: Instant::now(),
+                            retries: 0,
+                        };
+                    }
+                    // A non-submitting action (Halt/Escalate/error) disengaged the
+                    // session; the next loop's is_engaged check returns.
+                }
+                Phase::AwaitingStart { since, retries } => {
+                    if state.busy {
+                        // claude accepted the input and started the turn.
+                        phase = Phase::Observe;
+                        stable_fp = None;
+                        continue;
+                    }
+                    if state.needs_input {
+                        // A genuine menu surfaced (not our doing) — decide it the
+                        // normal way rather than blind-Entering an approval.
+                        phase = Phase::Observe;
+                        stable_fp = None;
+                        continue;
+                    }
+                    if since.elapsed() < Duration::from_millis(START_TIMEOUT_MS) {
+                        continue;
+                    }
+                    if *retries >= MAX_SUBMIT_RETRIES {
+                        self.emit(
+                            session_id,
+                            AutopilotEvent::Error {
+                                message: "claude did not accept the submitted input after \
+                                          several attempts — handing back to you"
+                                    .into(),
+                            },
+                        );
+                        self.disengage(session_id).await;
+                        return;
+                    }
+                    // Still idle with no menu after submitting → the Enter was very
+                    // likely swallowed by paste-burst detection. Re-send a bare
+                    // Enter (idempotent: an empty input box is a no-op, a filled
+                    // one submits) instead of re-asking the Supervisor.
+                    let _ = self.pty.write(&session.term_id, "\r");
+                    *retries += 1;
+                    *since = Instant::now();
+                }
+            }
+        }
     }
 
-    /// Run one Supervisor step for `ask` and carry out its action. Shared by the
-    /// signal-driven path ([`Self::handle`]) and the engage kickoff.
-    async fn drive(&self, session_id: AggregateId, session: &EngagedSession, ask: PendingKind) {
+    /// Run one Supervisor step for `ask` and carry out its action. Returns `true`
+    /// when the action submitted input to claude (so the caller should wait for
+    /// the turn to start), `false` when it halted / errored (session disengaged).
+    async fn drive(
+        &self,
+        session_id: AggregateId,
+        session: &EngagedSession,
+        ask: PendingKind,
+    ) -> bool {
         // Signal "reacting now" up front — the Supervisor call can take seconds,
         // and without this the user sees no movement between a prompt appearing
         // and the pilot acting.
@@ -235,38 +401,20 @@ impl AutopilotManager {
                 // A backend failure isn't a reason to keep retrying blindly —
                 // hand control back so the user notices.
                 self.disengage(session_id).await;
+                false
             }
         }
     }
 
-    fn build_pending(
-        &self,
-        notice: &PureSignalNotice,
-        session: &EngagedSession,
-    ) -> Option<PendingKind> {
-        let tail = self
-            .pty
-            .scrollback_tail(&session.term_id, CONTEXT_CHARS)
-            .unwrap_or_default();
-        match notice.signal {
-            PureSignal::NeedsInput => Some(PendingKind::Permission {
-                request_id: None,
-                tool_name: None,
-                command: None,
-                raw_prompt: tail,
-            }),
-            PureSignal::TurnEnded => Some(PendingKind::TurnEnded { last_output: tail }),
-            PureSignal::Working => None,
-        }
-    }
-
-    async fn act(&self, session_id: AggregateId, session: &EngagedSession, action: Action) {
+    /// Carry out an [`Action`]. Returns `true` when it submitted input to claude.
+    async fn act(&self, session_id: AggregateId, session: &EngagedSession, action: Action) -> bool {
         let term = &session.term_id;
         match action {
             Action::Approve => {
                 // Accept the highlighted default (option 1 = Yes) with Enter.
                 let _ = self.pty.write(term, "\r");
                 self.emit(session_id, AutopilotEvent::Approved);
+                true
             }
             Action::Reject(reason) => {
                 // Esc cancels the menu; then send the reason as a message.
@@ -274,10 +422,12 @@ impl AutopilotManager {
                 tokio::time::sleep(Duration::from_millis(80)).await;
                 self.submit(term, &reason).await;
                 self.emit(session_id, AutopilotEvent::Rejected { reason });
+                true
             }
             Action::Reply(text) => {
                 self.submit(term, &text).await;
                 self.emit(session_id, AutopilotEvent::Replied { text });
+                true
             }
             Action::Halt(reason) => {
                 self.disengage(session_id).await;
@@ -286,22 +436,27 @@ impl AutopilotManager {
                 // gets its own event so the UI can alert louder than a plain halt
                 // (distinct chime + a balloon with the explanation).
                 let event = match &reason {
+                    HaltReason::Done(summary) => AutopilotEvent::Done {
+                        summary: summary.clone(),
+                    },
                     HaltReason::Escalated(why) => AutopilotEvent::Escalated { why: why.clone() },
                     _ => AutopilotEvent::Halted {
                         reason: halt_reason_str(&reason),
                     },
                 };
                 self.emit(session_id, event);
+                false
             }
         }
     }
 
     /// Send text then a separate carriage return — claude's TUI has paste-burst
-    /// detection, so `text\r` in one write becomes a literal newline instead of
-    /// submitting. Mirrors the frontend `sendToPty`.
+    /// detection, so `text\r` in one write (or too close together) becomes a
+    /// literal newline instead of submitting. The watchdog's await-start phase
+    /// re-sends the Enter if this one is still swallowed. Mirrors `sendToPty`.
     async fn submit(&self, term_id: &str, text: &str) {
         let _ = self.pty.write(term_id, text);
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::sleep(Duration::from_millis(SUBMIT_GAP_MS)).await;
         let _ = self.pty.write(term_id, "\r");
     }
 
@@ -310,6 +465,16 @@ impl AutopilotManager {
             .app
             .emit(&format!("session:{session_id}:autopilot"), event);
     }
+}
+
+/// Hash of a scrollback tail with whitespace collapsed, so cosmetic TUI redraws
+/// (cursor blinks, the animated tip hint already stripped upstream) read as the
+/// same screen. Keys the watchdog's stability tracking and per-screen dedup.
+fn fingerprint(tail: &str) -> u64 {
+    let normalized = tail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut h = DefaultHasher::new();
+    normalized.hash(&mut h);
+    h.finish()
 }
 
 fn halt_reason_str(reason: &HaltReason) -> String {

@@ -15,6 +15,7 @@ members = [
     "crates/oxyris-claude",
     "crates/oxyris-supervisor",
     "crates/oxyris-watch",
+    "crates/oxyris-browser",
 ]
 
 [workspace.package]
@@ -74,6 +75,10 @@ flate2 = "1.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 zip = { version = "5.0", default-features = false, features = ["deflate"] }
 
+# WebSocket client for the CDP (Chrome DevTools Protocol) browser bridge.
+# No TLS feature: we only ever talk ws:// to a localhost headless Edge.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake", "stream"] }
+
 # Internal crates
 oxyris-core = { path = "crates/oxyris-core" }
 oxyris-git = { path = "crates/oxyris-git" }
@@ -86,6 +91,7 @@ oxyris-provider = { path = "crates/oxyris-provider" }
 oxyris-claude = { path = "crates/oxyris-claude" }
 oxyris-supervisor = { path = "crates/oxyris-supervisor" }
 oxyris-watch = { path = "crates/oxyris-watch" }
+oxyris-browser = { path = "crates/oxyris-browser" }
 
 [profile.dev]
 opt-level = 0

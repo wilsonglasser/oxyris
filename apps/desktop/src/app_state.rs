@@ -56,6 +56,20 @@ pub struct AppState {
     /// chip, debugging) that need to know the port.
     #[allow(dead_code)]
     pub lsp_bridge_port: Arc<StdMutex<Option<u16>>>,
+    /// TCP port the auto-pilot control bridge is listening on. Filled async
+    /// after boot; read by `infra::mcp` to wire `--autopilot-bridge` into a
+    /// pure session's `mcp.json` so the `oxyris_autopilot_*` tools can reach
+    /// the desktop's [`AutopilotManager`].
+    pub autopilot_bridge_port: Arc<StdMutex<Option<u16>>>,
+    /// Shared headless browser for navigate/screenshot/validate, driven by both
+    /// Claude (via the `browser_*` MCP tools) and the auto-pilot. Launched lazily
+    /// on first use. Held here for upcoming Tauri commands / the browser panel;
+    /// today it's driven through the bridge, which owns its own clone.
+    #[allow(dead_code)]
+    pub browser: Arc<oxyris_browser::BrowserManager>,
+    /// TCP port the browser control bridge listens on; read by `infra::mcp` to
+    /// wire `--browser-bridge` into a session's `mcp.json`.
+    pub browser_bridge_port: Arc<StdMutex<Option<u16>>>,
     /// Held so the async file-writer for NDJSON traces stays alive.
     #[allow(dead_code)]
     pub log_guard: LogGuard,
@@ -84,6 +98,18 @@ pub enum AppStateError {
 }
 
 impl AppState {
+    /// The auto-pilot control-bridge port, or `None` until it has bound (or if
+    /// the bind failed). Read when generating a pure session's `mcp.json`.
+    pub fn autopilot_bridge_port(&self) -> Option<u16> {
+        self.autopilot_bridge_port.lock().ok().and_then(|p| *p)
+    }
+
+    /// The browser control-bridge port, or `None` until it has bound. Read when
+    /// generating any session's `mcp.json` (the `browser_*` tools).
+    pub fn browser_bridge_port(&self) -> Option<u16> {
+        self.browser_bridge_port.lock().ok().and_then(|p| *p)
+    }
+
     /// Initialize the application state under the user's data directory,
     /// creating the directory if it doesn't exist yet.
     pub fn initialize(app: AppHandle, data_dir: PathBuf) -> Result<Self, AppStateError> {
@@ -213,6 +239,52 @@ impl AppState {
             tauri::async_runtime::spawn(async move { manager.run(sig_rx).await });
         }
 
+        // Auto-pilot control bridge — lets the out-of-process MCP server engage
+        // / disengage the pilot for a pure session (the `oxyris_autopilot_*`
+        // tools). Port captured async after binding, mirroring `lsp_bridge`.
+        let autopilot_bridge_port: Arc<StdMutex<Option<u16>>> = Arc::new(StdMutex::new(None));
+        {
+            let ap = autopilot.clone();
+            let slot = autopilot_bridge_port.clone();
+            let dd = data_dir.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::infra::autopilot_bridge::serve(ap, dd).await {
+                    Ok(port) => {
+                        if let Ok(mut slot) = slot.lock() {
+                            *slot = Some(port);
+                        }
+                        tracing::info!(port, "autopilot_bridge: ready");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "autopilot_bridge: bind failed; engage tool disabled");
+                    }
+                }
+            });
+        }
+
+        // Shared headless browser + its control bridge. Same async-port-capture
+        // pattern; the browser process itself is launched lazily on first tool
+        // call, not here.
+        let browser = Arc::new(oxyris_browser::BrowserManager::new());
+        let browser_bridge_port: Arc<StdMutex<Option<u16>>> = Arc::new(StdMutex::new(None));
+        {
+            let br = browser.clone();
+            let slot = browser_bridge_port.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::infra::browser_bridge::serve(br).await {
+                    Ok(port) => {
+                        if let Ok(mut slot) = slot.lock() {
+                            *slot = Some(port);
+                        }
+                        tracing::info!(port, "browser_bridge: ready");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "browser_bridge: bind failed; browser tools disabled");
+                    }
+                }
+            });
+        }
+
         Ok(Self {
             event_store,
             projections,
@@ -227,6 +299,9 @@ impl AppState {
             lsp,
             language_packs,
             lsp_bridge_port,
+            autopilot_bridge_port,
+            browser,
+            browser_bridge_port,
             log_guard,
             logs_dir,
             data_dir,

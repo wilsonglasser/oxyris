@@ -34,7 +34,10 @@ import {
   terminalWrite,
 } from "~/ipc/terminal.ts";
 import { attachmentSave, blobToBase64 } from "~/ipc/attachments.ts";
-import { playEscalationChime } from "~/lib/notificationSound.ts";
+import {
+  playEscalationChime,
+  playMissionDoneChime,
+} from "~/lib/notificationSound.ts";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import {
@@ -358,6 +361,7 @@ function PureSessionView({
   const autopilotPushLog = useAutopilotStore((s) => s.pushLog);
   const autopilotSetEnabled = useAutopilotStore((s) => s.setEnabled);
   const autopilotSetThinking = useAutopilotStore((s) => s.setThinking);
+  const autopilotSetDone = useAutopilotStore((s) => s.setDone);
   useEffect(() => {
     autopilotHydrate(sessionId);
   }, [sessionId, autopilotHydrate]);
@@ -380,7 +384,8 @@ function PureSessionView({
       if (
         event.kind === "halted" ||
         event.kind === "error" ||
-        event.kind === "escalated"
+        event.kind === "escalated" ||
+        event.kind === "done"
       ) {
         autopilotSetEnabled(sessionId, false);
       }
@@ -389,6 +394,12 @@ function PureSessionView({
       if (event.kind === "escalated") {
         playEscalationChime();
         useAutopilotAlertStore.getState().raise(sessionId, event.why);
+      }
+      // Mission complete — the pilot shut itself off. Mark the thread done
+      // (purple dot) and play the "work complete" chime.
+      if (event.kind === "done") {
+        autopilotSetDone(sessionId, true);
+        playMissionDoneChime();
       }
     }).then((fn) => {
       if (cancelled) fn();

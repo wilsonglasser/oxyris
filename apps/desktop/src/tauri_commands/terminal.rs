@@ -172,7 +172,17 @@ pub async fn claude_pty_spawn(
     // runs without it.
     let (mcp_config_path, mcp_nudge) = if matches!(env, Environment::Local) {
         let lsp_port = state.session_supervisor.lsp_bridge_port();
-        match crate::infra::mcp::prepare_for_worktree(&env, &cwd, lsp_port) {
+        let session = input.session_id.to_string();
+        let autopilot_port = state.autopilot_bridge_port();
+        let browser_port = state.browser_bridge_port();
+        match crate::infra::mcp::prepare_for_worktree(
+            &env,
+            &cwd,
+            lsp_port,
+            Some(&session),
+            autopilot_port,
+            browser_port,
+        ) {
             Ok(Some(setup)) => (Some(setup.config_path), Some(setup.system_prompt_nudge)),
             _ => (None, None),
         }

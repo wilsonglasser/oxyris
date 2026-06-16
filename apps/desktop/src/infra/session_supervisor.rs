@@ -491,7 +491,17 @@ fn derive_auto_title(text: &str) -> Option<String> {
 /// Claude knows the tools exist. WSL projects and missing-binary cases skip
 /// silently — the provider runs without MCP, which is the same as before.
 fn augment_with_mcp(mut opts: SessionOptions, lsp_bridge_port: Option<u16>) -> SessionOptions {
-    let setup = match mcp::prepare_for_worktree(&opts.environment, &opts.cwd, lsp_bridge_port) {
+    // Structured-provider sessions don't run the autopilot (no pure claude PTY
+    // to drive) and don't get the browser tools yet (wired into pure mode
+    // first) — `None` for the session id and both bridge ports.
+    let setup = match mcp::prepare_for_worktree(
+        &opts.environment,
+        &opts.cwd,
+        lsp_bridge_port,
+        None,
+        None,
+        None,
+    ) {
         Ok(Some(s)) => s,
         Ok(None) => return opts,
         Err(e) => {

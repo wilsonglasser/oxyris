@@ -200,6 +200,7 @@
   "autopilot_log_approved": "🤖 approved",
   "autopilot_log_rejected": "🤖 rejected — {{reason}}",
   "autopilot_log_replied": "🤖 replied — {{text}}",
+  "autopilot_log_done": "🏁 mission complete — {{summary}}",
   "autopilot_log_halted": "⏹ halted — {{reason}}",
   "autopilot_log_error": "⚠ error — {{message}}",
   "mv_no_project": "Select a project to use Multi View.",

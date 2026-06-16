@@ -19,7 +19,7 @@ import workCompleteUrl from "~/assets/work-complete-warcraft-ii.mp3";
  * Each channel picks a sound from `SOUND_OPTIONS` or `"off"` to mute it.
  */
 
-export type SoundChannel = "completion" | "input" | "escalation";
+export type SoundChannel = "completion" | "input" | "escalation" | "mission";
 
 export type SoundOption = {
   id: string;
@@ -49,12 +49,16 @@ const DEFAULTS: Record<SoundChannel, string> = {
   // Auto-pilot escalation — the "I'm stuck, a human is needed" alert. Loud and
   // distinct from the other two by default.
   escalation: "aoe2-attack",
+  // Auto-pilot mission complete — the pilot finished the whole job and shut off.
+  // The triumphant "work complete" by default.
+  mission: "wc2-work-complete",
 };
 
 const PREF_KEYS: Record<SoundChannel, string> = {
   completion: "oxyris.notificationSound.completion",
   input: "oxyris.notificationSound.input",
   escalation: "oxyris.notificationSound.escalation",
+  mission: "oxyris.notificationSound.mission",
 };
 
 // Legacy single-channel pref ("on" / "off"). When the user had it set to "off"
@@ -133,6 +137,11 @@ export function playInputChime(): void {
 /** Chime: the auto-pilot escalated — it can't proceed without you. */
 export function playEscalationChime(): void {
   playSoundById(getChannelSound("escalation"));
+}
+
+/** Chime: the auto-pilot completed its mission and shut itself off. */
+export function playMissionDoneChime(): void {
+  playSoundById(getChannelSound("mission"));
 }
 
 /** Preview-play a specific sound (used by the settings test button). */

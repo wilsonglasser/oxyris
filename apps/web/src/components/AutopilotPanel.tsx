@@ -54,6 +54,8 @@ export function AutopilotPanel({ sessionId, onClose }: Props) {
         return t("autopilot_log_rejected", { reason: e.reason });
       case "replied":
         return t("autopilot_log_replied", { text: e.text });
+      case "done":
+        return t("autopilot_log_done", { summary: e.summary });
       case "halted":
         return t("autopilot_log_halted", { reason: e.reason });
       case "escalated":
