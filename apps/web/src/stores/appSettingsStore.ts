@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { RuntimeMode } from "~/ipc/session.ts";
 import {
   type ClaudeLanguage,
   isClaudeLanguage,
@@ -19,7 +20,22 @@ const PURE_MODE_KEY = "oxyris.pureMode";
 const OPEN_EXTERNAL_KEY = "oxyris.openFilesExternally";
 const TERM_FONT_KEY = "oxyris.terminalFontSize";
 const CLAUDE_LANG_KEY = "oxyris.claudeLanguage";
+const DEFAULT_RUNTIME_KEY = "oxyris.defaultRuntime";
 const AUTOPILOT_KEY = "oxyris.autopilot.settings";
+
+const RUNTIME_MODES: readonly RuntimeMode[] = [
+  "supervised",
+  "accept_edits",
+  "full_access",
+  "plan",
+];
+
+function loadDefaultRuntime(): RuntimeMode {
+  const raw = window.localStorage.getItem(DEFAULT_RUNTIME_KEY);
+  return RUNTIME_MODES.includes(raw as RuntimeMode)
+    ? (raw as RuntimeMode)
+    : "supervised";
+}
 
 /** Default xterm font size (px). Base 100% for the zoom indicator. */
 export const TERM_FONT_DEFAULT = 12;
@@ -149,6 +165,16 @@ interface AppSettingsState {
   claudeLanguage: ClaudeLanguage;
   setClaudeLanguage: (lang: ClaudeLanguage) => void;
   /**
+   * Permission/runtime mode applied to threads started from the one-click
+   * "New thread" entry points (sidebar button, Multi View tile) — those have no
+   * picker of their own. `"supervised"` (default) keeps the safe ask-first
+   * behavior; `"full_access"` starts in dangerous bypass-everything mode. The
+   * in-thread runtime pickers (Chat bottom bar, Pure start view) still override
+   * per session.
+   */
+  defaultRuntime: RuntimeMode;
+  setDefaultRuntime: (mode: RuntimeMode) => void;
+  /**
    * Global auto-pilot supervisor config (endpoint, credentials, turn budget).
    * Shared across every session — the per-session store holds only the mission
    * and supervisor-kind choice.
@@ -188,6 +214,11 @@ export const useAppSettingsStore = create<AppSettingsState>((set) => ({
   setClaudeLanguage: (lang) => {
     window.localStorage.setItem(CLAUDE_LANG_KEY, lang);
     set({ claudeLanguage: lang });
+  },
+  defaultRuntime: loadDefaultRuntime(),
+  setDefaultRuntime: (mode) => {
+    window.localStorage.setItem(DEFAULT_RUNTIME_KEY, mode);
+    set({ defaultRuntime: mode });
   },
   autopilot: loadAutopilot(),
   setAutopilot: (patch) =>

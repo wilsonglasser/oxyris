@@ -44,6 +44,7 @@ import { useMultiViewStore } from "~/stores/multiViewStore.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
+import { useWhipStore } from "~/stores/whipStore.ts";
 
 type Tab = "chat" | "multi" | "files" | "git" | "settings";
 
@@ -277,6 +278,32 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [bindings, activeSessionId, activeId, setActiveSession, tab, toggleTerminal]);
 
+  // Whip mode: Ctrl+W arms the whip cursor, Esc disarms. The body class drives
+  // the global cursor swap (see index.css). Ctrl+W must preventDefault or the
+  // WebView treats it as "close". Esc only disarms when whip is actually armed,
+  // so it doesn't swallow Esc from modals/menus the rest of the time.
+  const whipActive = useWhipStore((s) => s.active);
+  const whipToggle = useWhipStore((s) => s.toggle);
+  const whipSetActive = useWhipStore((s) => s.setActive);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "w") {
+        e.preventDefault();
+        whipToggle();
+        return;
+      }
+      if (e.key === "Escape" && useWhipStore.getState().active) {
+        whipSetActive(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [whipToggle, whipSetActive]);
+  useEffect(() => {
+    document.body.classList.toggle("whip-armed", whipActive);
+    return () => document.body.classList.remove("whip-armed");
+  }, [whipActive]);
+
   const quickWorktreeId =
     sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
 
@@ -290,8 +317,9 @@ export function App() {
   };
 
   // "New thread": immediately spin up a session with the default config
-  // (primary worktree → project root, provider's default model, supervised
-  // runtime, auto thinking, no worktree env) and select it. The sidebar is
+  // (primary worktree → project root, provider's default model, the configured
+  // default runtime — supervised unless changed in Settings, auto thinking, no
+  // worktree env) and select it. The sidebar is
   // visible from Files/Git too, so jump to the chat tab as well. On failure
   // we fall back to the empty composer so the user can still start manually.
   const startNewSession = (project?: ProjectRow | null) => {
@@ -310,7 +338,7 @@ export function App() {
           cwd: p.root_path,
           model: "",
           thinking: "auto",
-          runtime: "supervised",
+          runtime: useAppSettingsStore.getState().defaultRuntime,
           env_mode: "default",
           // Persist the kind that matches the current display toggle. Pure mode
           // renders the claude PTY, so the session must be stored as `pure` —

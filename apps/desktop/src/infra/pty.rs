@@ -251,7 +251,8 @@ pub struct ClaudePtyOpts {
     /// Empty → let claude pick its default model.
     pub model: String,
     /// e.g. "default" | "acceptEdits" | "bypassPermissions" | "plan". Empty →
-    /// claude's interactive default.
+    /// claude's interactive default. "bypassPermissions" is emitted as the bare
+    /// `--dangerously-skip-permissions` flag (see `build_pty_args`).
     pub permission_mode: String,
     /// `--mcp-config <path>` when present (oxyris index/LSP server).
     pub mcp_config_path: Option<String>,
@@ -409,8 +410,15 @@ fn claude_args(opts: &ClaudePtyOpts) -> Vec<String> {
         args.push(opts.model.clone());
     }
     if !opts.permission_mode.trim().is_empty() {
-        args.push("--permission-mode".into());
-        args.push(opts.permission_mode.clone());
+        // FullAccess maps to the real "dangerous" bare flag rather than
+        // `--permission-mode bypassPermissions`, which the CLI refuses in some
+        // contexts. Every other mode passes through as a `--permission-mode`.
+        if opts.permission_mode == "bypassPermissions" {
+            args.push("--dangerously-skip-permissions".into());
+        } else {
+            args.push("--permission-mode".into());
+            args.push(opts.permission_mode.clone());
+        }
     }
     if let Some(p) = &opts.mcp_config_path {
         args.push("--mcp-config".into());

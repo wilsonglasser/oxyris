@@ -12,6 +12,7 @@ import {
   SquareTerminal,
   Terminal as TerminalIcon,
   X,
+  Zap,
 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { ProjectRow } from "~/ipc/commands.ts";
@@ -53,6 +54,7 @@ import { AutopilotPanel } from "~/components/AutopilotPanel.tsx";
 import { useAutopilotStore } from "~/stores/autopilotStore.ts";
 import { useAutopilotAlertStore } from "~/stores/autopilotAlertStore.ts";
 import { onAutopilotEvent } from "~/ipc/autopilot.ts";
+import { useWhipStore, WHIP_LADDER } from "~/stores/whipStore.ts";
 
 /**
  * Turn a path token clicked in the terminal into a worktree-relative path the
@@ -355,6 +357,13 @@ function PureSessionView({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const ensuredRef = useRef<string | null>(null);
 
+  // Whip mode: armed globally (Ctrl+W / header button); cracking this session's
+  // terminal bumps its effort rung. `rung` here only drives the header tooltip.
+  const whipActive = useWhipStore((s) => s.active);
+  const whipToggle = useWhipStore((s) => s.toggle);
+  const whipCrack = useWhipStore((s) => s.crack);
+  const whipRung = useWhipStore((s) => s.rung[sessionId] ?? -1);
+
   // Auto-pilot: floating mission panel + engaged indicator on the header button.
   const [autopilotOpen, setAutopilotOpen] = useState(false);
   // Auto-opening "thinking" tooltip on the auto-pilot button.
@@ -615,6 +624,15 @@ function PureSessionView({
     [termId],
   );
 
+  // Crack the whip at this session: escalate the effort rung and inject the
+  // thinking keyword into the live claude prompt + Enter. `sendToPty` appends to
+  // whatever the user already typed (keyword carries a leading space) and submits
+  // it paste-safe, so the next message runs at the boosted reasoning effort.
+  const crackWhip = useCallback(() => {
+    if (!termId) return;
+    sendToPty(whipCrack(sessionId));
+  }, [termId, sendToPty, whipCrack, sessionId]);
+
   // Ctrl/Cmd+click on a file path in the TUI. Resolve it against the PTY cwd,
   // then either hand off to the external editor or pop the in-app modal.
   const onOpenPath = useCallback(
@@ -801,6 +819,26 @@ function PureSessionView({
           <span className="font-medium">{t("pure_header")}</span>
           <span className="truncate text-neutral-500">· {project.name}</span>
           <div className="ml-auto flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => whipToggle()}
+              aria-label={t("whip_toggle")}
+              title={
+                whipRung >= 0
+                  ? t("whip_armed_at", { level: WHIP_LADDER[whipRung] })
+                  : t("whip_hint")
+              }
+              className={`flex size-6 items-center justify-center rounded transition ${
+                whipActive
+                  ? "bg-amber-500/20 text-amber-400"
+                  : "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+              }`}
+            >
+              <Zap
+                className={`size-3.5 ${whipActive ? "animate-pulse" : ""}`}
+                strokeWidth={1.75}
+              />
+            </button>
             <div className="relative">
               <button
                 type="button"
@@ -868,6 +906,17 @@ function PureSessionView({
       )}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
+        {/* Whip overlay: while armed it sits over the xterm and turns any click
+            into a "crack" (effort bump) instead of a terminal focus/selection.
+            Only mounted when armed so normal terminal interaction is untouched. */}
+        {whipActive && termId && (
+          <button
+            type="button"
+            aria-label={t("whip_crack")}
+            onClick={crackWhip}
+            className="absolute inset-0 z-20 bg-amber-400/5"
+          />
+        )}
         {termId ? (
           <TerminalView
             terminalId={termId}

@@ -133,6 +133,18 @@ body {
   -webkit-user-select: none;
 }
 
+/* Whip mode (OpenWhip-style effort booster): when armed, the cursor becomes a
+   whip everywhere so clicking a pure terminal reads as "cracking" it. Esc/Ctrl+W
+   disarms (App removes the class). !important + the `*` reach beats per-element
+   cursor rules (xterm sets its own). Hotspot at the whip tip (3,3). */
+body.whip-armed,
+body.whip-armed * {
+  cursor:
+    url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='32'%20height='32'%20viewBox='0%200%2032%2032'%3E%3Cpath%20d='M3%203C12%206%2014%2014%2022%2016%2026%2017%2028%2020%2029%2024'%20fill='none'%20stroke='%23f5c542'%20stroke-width='2.5'%20stroke-linecap='round'/%3E%3Ccircle%20cx='29'%20cy='25'%20r='2.2'%20fill='%23f5c542'/%3E%3C/svg%3E")
+      3 3,
+    crosshair !important;
+}
+
 /* Scrollbar — slim Island-Dark style. */
 *::-webkit-scrollbar {
   width: 10px;

@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Save,
   Settings as SettingsIcon,
+  ShieldAlert,
   TerminalSquare,
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
@@ -25,6 +26,7 @@ import {
   useAppSettingsStore,
 } from "~/stores/appSettingsStore.ts";
 import type { SupervisorKind } from "~/ipc/autopilot.ts";
+import type { RuntimeMode } from "~/ipc/session.ts";
 import {
   CLAUDE_LANGUAGES,
   type ClaudeLanguage,
@@ -135,6 +137,8 @@ function GeneralTab() {
   );
   const claudeLanguage = useAppSettingsStore((s) => s.claudeLanguage);
   const setClaudeLanguage = useAppSettingsStore((s) => s.setClaudeLanguage);
+  const defaultRuntime = useAppSettingsStore((s) => s.defaultRuntime);
+  const setDefaultRuntime = useAppSettingsStore((s) => s.setDefaultRuntime);
   const autopilot = useAppSettingsStore((s) => s.autopilot);
   const setAutopilot = useAppSettingsStore((s) => s.setAutopilot);
 
@@ -346,6 +350,45 @@ function GeneralTab() {
             </span>
           </span>
         </label>
+      </Section>
+
+      <Section
+        icon={<ShieldAlert className="size-3.5" strokeWidth={1.75} />}
+        title={t("section_default_runtime")}
+      >
+        <label className="flex items-start gap-3 text-[11px] text-neutral-400">
+          <span className="flex-1">
+            <span className="font-medium text-neutral-200">
+              {t("default_runtime_title")}
+            </span>
+            <span className="block text-neutral-500">
+              {t("default_runtime_desc")}
+            </span>
+          </span>
+          <select
+            value={defaultRuntime}
+            onChange={(e) =>
+              setDefaultRuntime(e.target.value as RuntimeMode)
+            }
+            className="mt-0.5 shrink-0 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-neutral-200"
+          >
+            <option value="supervised">
+              {t("default_runtime_supervised")}
+            </option>
+            <option value="accept_edits">
+              {t("default_runtime_accept_edits")}
+            </option>
+            <option value="full_access">
+              {t("default_runtime_full_access")}
+            </option>
+            <option value="plan">{t("default_runtime_plan")}</option>
+          </select>
+        </label>
+        {defaultRuntime === "full_access" && (
+          <p className="mt-2 rounded border border-amber-900/60 bg-amber-950/30 px-2.5 py-1.5 text-[10px] text-amber-200">
+            {t("default_runtime_danger_warning")}
+          </p>
+        )}
       </Section>
 
       <Section

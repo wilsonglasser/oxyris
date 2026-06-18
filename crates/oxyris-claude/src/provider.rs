@@ -367,7 +367,10 @@ fn build_command(opts: &SessionOptions) -> Result<Command, ProviderError> {
     // CLI's own plan-approval flow.
     match opts.runtime {
         oxyris_provider::RuntimeMode::FullAccess => {
-            cmd.args(["--permission-mode", "bypassPermissions"]);
+            // The real "dangerous" switch: skip every permission check outright.
+            // `--permission-mode bypassPermissions` is refused by the CLI in
+            // some non-interactive contexts, so use the dedicated bare flag.
+            cmd.args(["--dangerously-skip-permissions"]);
         }
         oxyris_provider::RuntimeMode::AcceptEdits => {
             cmd.args([

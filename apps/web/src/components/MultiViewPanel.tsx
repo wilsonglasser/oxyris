@@ -180,7 +180,7 @@ export function MultiViewPanel() {
           environment: project.environment,
           cwd: project.root_path,
           model: "",
-          runtime: "supervised",
+          runtime: useAppSettingsStore.getState().defaultRuntime,
           env_mode: "default",
           kind: "pure",
         });
