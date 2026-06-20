@@ -43,10 +43,14 @@ import {
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import {
+  type SpeechRecognitionHook,
+  stripVoiceSubmitCommand,
   toSpeechLocale,
   useSpeechRecognition,
 } from "~/hooks/useSpeechRecognition.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
+import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
+import { matchesKey } from "~/lib/keybindings.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import { TerminalView } from "~/components/TerminalPanel.tsx";
 import { FileViewerModal } from "~/components/FileViewerModal.tsx";
@@ -655,16 +659,33 @@ function PureSessionView({
     [cwd, openFilesExternally, openProjectId, worktreeId],
   );
 
-  const speech = useSpeechRecognition({
-    lang: toSpeechLocale(i18nLang),
-    onFinal: (chunk) => setText((prev) => (prev ? `${prev} ${chunk}` : chunk)),
-  });
-
   // Ctrl/Cmd+click on the mic dictates then auto-submits to the PTY once
-  // recognition ends. Armed via ref so it survives until `onend`.
+  // recognition ends. Armed via ref so it survives until `onend`. The same path
+  // fires when the spoken "câmbio" command is detected mid-dictation.
   const autoSubmitOnEndRef = useRef(false);
   const [autoSubmitArmed, setAutoSubmitArmed] = useState(false);
   const prevListeningRef = useRef(false);
+  // Lets the `onFinal` closure stop recognition without depending on `speech`
+  // before it is initialized.
+  const speechRef = useRef<SpeechRecognitionHook | null>(null);
+
+  const speech = useSpeechRecognition({
+    lang: toSpeechLocale(i18nLang),
+    onFinal: (chunk) => {
+      const { text: cleaned, submit: spokenSubmit } = stripVoiceSubmitCommand(chunk);
+      setText((prev) => {
+        const piece = cleaned.trim();
+        if (!piece) return prev;
+        return prev ? `${prev} ${piece}` : piece;
+      });
+      if (spokenSubmit) {
+        autoSubmitOnEndRef.current = true;
+        setAutoSubmitArmed(true);
+        speechRef.current?.stop();
+      }
+    },
+  });
+  speechRef.current = speech;
 
   const onMicClick = (e: React.MouseEvent) => {
     if (speech.listening) {
@@ -730,6 +751,20 @@ function PureSessionView({
       submitRef.current();
     }
   }, [speech.listening]);
+
+  // Toggle dictation from anywhere (default Ctrl+Shift+M). Say "câmbio" to send.
+  const dictateBinding = useKeybindingsStore((s) => s.bindings.toggle_dictation);
+  useEffect(() => {
+    if (!speech.supported) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (matchesKey(e, dictateBinding)) {
+        e.preventDefault();
+        speech.toggle();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [speech.supported, speech.toggle, dictateBinding]);
 
   // For WSL projects a picked file comes back as a `\\wsl.localhost\<distro>\…`
   // UNC path — claude runs inside the distro and needs the POSIX form.
@@ -1003,7 +1038,7 @@ function PureSessionView({
                 ? autoSubmitArmed
                   ? t("speech_listening_autosubmit")
                   : t("voice_stop")
-                : `${t("voice_start")} · ${t("speech_autosubmit_hint")}`
+                : `${t("voice_start")} · ${t("speech_autosubmit_hint")} · ${t("speech_cambio_hint")}`
             }
             className={`flex size-[34px] items-center justify-center rounded border ${
               speech.listening

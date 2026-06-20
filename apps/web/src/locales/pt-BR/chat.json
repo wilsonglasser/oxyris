@@ -32,6 +32,7 @@
   "speech_start": "Começar ditado",
   "speech_stop": "Parar ditado",
   "speech_autosubmit_hint": "Ctrl+clique: ditar e enviar automaticamente ao parar",
+  "speech_cambio_hint": "Diga \"câmbio\" para enviar · Ctrl+Shift+M alterna",
   "speech_stop_autosubmit": "Parar e enviar",
   "speech_listening": "Ouvindo…",
   "speech_listening_autosubmit": "Ouvindo — envia quando você parar",

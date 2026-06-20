@@ -5,6 +5,7 @@ export interface Keybindings {
   interrupt: string;
   toggle_terminal: string;
   focus_search: string;
+  toggle_dictation: string;
 }
 
 export const DEFAULT_KEYBINDINGS: Keybindings = {
@@ -12,6 +13,7 @@ export const DEFAULT_KEYBINDINGS: Keybindings = {
   interrupt: "Escape",
   toggle_terminal: "Ctrl+`",
   focus_search: "Ctrl+K",
+  toggle_dictation: "Ctrl+Shift+M",
 };
 
 export async function loadKeybindings(): Promise<Keybindings> {

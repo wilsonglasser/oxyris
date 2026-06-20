@@ -67,6 +67,8 @@ import { IndexingChip } from "~/components/IndexingChip.tsx";
 import { LspChip } from "~/components/LspChip.tsx";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import {
+  type SpeechRecognitionHook,
+  stripVoiceSubmitCommand,
   toSpeechLocale,
   useSpeechRecognition,
 } from "~/hooks/useSpeechRecognition.ts";
@@ -1242,23 +1244,34 @@ function Composer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const speech = useSpeechRecognition({
-    lang: toSpeechLocale(i18n.resolvedLanguage ?? i18n.language),
-    onFinal: (chunk) => {
-      setText((prev) => {
-        const trimmedPrev = prev.replace(/\s+$/u, "");
-        const glue = trimmedPrev.length > 0 ? " " : "";
-        return `${trimmedPrev}${glue}${chunk.trim()}`;
-      });
-    },
-  });
-
   // Ctrl/Cmd+click on the mic dictates and then auto-submits once recognition
   // ends. Armed via a ref so the value survives until `onend`; mirrored to
-  // state only for the button's affordance.
+  // state only for the button's affordance. The same path fires when the spoken
+  // "câmbio" command is detected mid-dictation.
   const autoSubmitOnEndRef = useRef(false);
   const [autoSubmitArmed, setAutoSubmitArmed] = useState(false);
   const prevListeningRef = useRef(false);
+  // Lets the `onFinal` closure stop recognition without depending on `speech`
+  // before it is initialized.
+  const speechRef = useRef<SpeechRecognitionHook | null>(null);
+
+  const speech = useSpeechRecognition({
+    lang: toSpeechLocale(i18n.resolvedLanguage ?? i18n.language),
+    onFinal: (chunk) => {
+      const { text: cleaned, submit: spokenSubmit } = stripVoiceSubmitCommand(chunk);
+      setText((prev) => {
+        const trimmedPrev = prev.replace(/\s+$/u, "");
+        const glue = trimmedPrev.length > 0 && cleaned.trim().length > 0 ? " " : "";
+        return `${trimmedPrev}${glue}${cleaned.trim()}`;
+      });
+      if (spokenSubmit) {
+        autoSubmitOnEndRef.current = true;
+        setAutoSubmitArmed(true);
+        speechRef.current?.stop();
+      }
+    },
+  });
+  speechRef.current = speech;
 
   const onMicClick = (e: React.MouseEvent) => {
     if (speech.listening) {
@@ -1421,6 +1434,20 @@ function Composer({
     return () => window.removeEventListener("keydown", onKey);
   }, [onInterrupt, interruptBinding]);
 
+  // Toggle dictation from anywhere (default Ctrl+Shift+M). Say "câmbio" to send.
+  const dictateBinding = useKeybindingsStore((s) => s.bindings.toggle_dictation);
+  useEffect(() => {
+    if (!speech.supported) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (matchesKey(e, dictateBinding)) {
+        e.preventDefault();
+        speech.toggle();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [speech.supported, speech.toggle, dictateBinding]);
+
   const placeholder = useMemo(
     () =>
       busy
@@ -1566,7 +1593,7 @@ function Composer({
                       ? autoSubmitArmed
                         ? t("speech_listening_autosubmit")
                         : t("speech_stop")
-                      : `${t("speech_start")} · ${t("speech_autosubmit_hint")}`
+                      : `${t("speech_start")} · ${t("speech_autosubmit_hint")} · ${t("speech_cambio_hint")}`
                   }
                   className={`flex size-7 items-center justify-center rounded-md border transition ${
                     speech.listening

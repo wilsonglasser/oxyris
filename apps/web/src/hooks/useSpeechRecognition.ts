@@ -63,6 +63,28 @@ export function toSpeechLocale(locale: string | undefined): string {
   }
 }
 
+/**
+ * Spoken end-of-message command. Saying "câmbio" (radio "over") at the end of a
+ * dictation submits the message. Matches the trailing word case-insensitively,
+ * with or without the accent, and tolerates trailing punctuation the recognizer
+ * may append (e.g. "câmbio.").
+ */
+const VOICE_SUBMIT_RE = /[\s,.!?]*\bc[âa]mbio\b[\s,.!?]*$/iu;
+
+/**
+ * Detect the trailing "câmbio" submit command in a transcript chunk. Returns the
+ * chunk with the command stripped and whether a submit was requested.
+ */
+export function stripVoiceSubmitCommand(text: string): {
+  text: string;
+  submit: boolean;
+} {
+  if (VOICE_SUBMIT_RE.test(text)) {
+    return { text: text.replace(VOICE_SUBMIT_RE, ""), submit: true };
+  }
+  return { text, submit: false };
+}
+
 export interface SpeechRecognitionHook {
   supported: boolean;
   listening: boolean;

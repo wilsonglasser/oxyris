@@ -32,6 +32,7 @@
   "speech_start": "Start voice input",
   "speech_stop": "Stop voice input",
   "speech_autosubmit_hint": "Ctrl+click: dictate, then send automatically when you stop",
+  "speech_cambio_hint": "Say \"câmbio\" to send · Ctrl+Shift+M toggles",
   "speech_stop_autosubmit": "Stop & send",
   "speech_listening": "Listening…",
   "speech_listening_autosubmit": "Listening — will send when you stop",
