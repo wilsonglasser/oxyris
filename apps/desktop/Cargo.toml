@@ -1,6 +1,6 @@
 [package]
 name = "oxyris-desktop"
-version = "0.4.15"
+version = "0.4.16"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -61,6 +61,20 @@ reqwest = { workspace = true, features = ["json"] }
 flate2.workspace = true
 futures-util.workspace = true
 zip.workspace = true
+# Mobile-takeover companion server: a LAN HTTP/WS bridge that mirrors a pure
+# session's PTY to a phone. axum for routing + WebSocket, tower-http to serve
+# the static mobile UI, qrcode to render the pairing QR, getrandom for the
+# unguessable pairing token.
+axum = { version = "0.7", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+# Self-signed cert generated at start so the LAN server can serve HTTPS — a
+# secure context is required for the phone's mic (Web Speech API). `ring` is the
+# rustls crypto provider (no C toolchain needed, unlike aws-lc-rs on Windows).
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = "3.16"
