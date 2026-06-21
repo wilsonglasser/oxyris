@@ -14,6 +14,7 @@ pub mod fs;
 pub mod git;
 pub mod indexing;
 pub mod language_packs;
+pub mod mobile;
 pub mod project;
 pub mod session;
 pub mod settings;

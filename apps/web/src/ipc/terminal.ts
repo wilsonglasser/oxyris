@@ -158,3 +158,26 @@ export async function onPureState(
     (e) => cb(e.payload),
   );
 }
+
+export type TakeoverState = {
+  /** True while a phone holds this session's pure PTY; the desktop view freezes. */
+  active: boolean;
+  /** Who took over — `"mobile"` today. */
+  by: string;
+};
+
+/**
+ * Subscribe to mobile-takeover transitions for a pure session. When `active`,
+ * the desktop terminal must stop sending input/resize (the phone owns the PTY)
+ * and show a frozen overlay; on release it resumes. Keyed by session id to match
+ * the backend's `session:<id>:takeover` emit.
+ */
+export async function onTakeover(
+  sessionId: string,
+  cb: (state: TakeoverState) => void,
+): Promise<UnlistenFn> {
+  return listen<TakeoverState>(
+    `session:${sessionId}:takeover`,
+    (e) => cb(e.payload),
+  );
+}

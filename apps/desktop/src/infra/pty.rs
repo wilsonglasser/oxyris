@@ -4,7 +4,7 @@
 //! Windows-only in this MVP slice (`Environment::Wsl` returns "not yet
 //! supported" until the agent gains a `pty.spawn` op).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -16,8 +16,15 @@ use regex::Regex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use thiserror::Error;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
+
+/// Fan-out capacity for the mobile-takeover output broadcast. Sized to cover a
+/// burst (e.g. `cargo run` flooding output) without a slow mobile reader
+/// lagging out — on `Lagged` the mobile WS handler re-attaches a fresh snapshot
+/// to resync, so an occasional drop is recoverable, just wasteful.
+const OUTPUT_BROADCAST_CAP: usize = 4096;
 
 use crate::infra::pure_signals::{
     PureSignal, PureSniffer, has_content_stripped, strip_ansi, strip_for_detection,
@@ -116,6 +123,15 @@ struct LiveTerminal {
     /// chunk so `compute_pure_state` can drop a quiet turn out of "busy" even
     /// when a stale spinner frame lingers in the sniffer tail. `None` for shells.
     idle: Option<Arc<Mutex<IdleState>>>,
+    /// App handle kept so takeover acquire/release can emit
+    /// `session:<id>:takeover` without threading an `AppHandle` through every
+    /// supervisor method.
+    app: AppHandle,
+    /// Last desktop-driven size `(cols, rows)`. Updated by the desktop `resize`
+    /// path and seeded at spawn. When a phone takes over and resizes the PTY to
+    /// its own dimensions, releasing the takeover restores this so the desktop
+    /// view comes back at the size it had.
+    desktop_size: Mutex<(u16, u16)>,
 }
 
 /// Output-silence clock for a claude PTY. The reader stamps `last_output` on
@@ -172,6 +188,29 @@ struct ReplayBuffer {
 struct OutputEvent {
     seq: u64,
     data: String,
+}
+
+/// A single PTY output chunk, fanned out to mobile-takeover subscribers over a
+/// [`broadcast`] channel alongside the desktop's `terminal:<id>:output` Tauri
+/// event. Carries the terminal id so one shared channel serves every terminal —
+/// the mobile WS handler filters to the terminal it mirrors. `seq` mirrors the
+/// replay buffer's sequence so a mobile client can dedup against the snapshot it
+/// fetched on attach, exactly like the desktop frontend does.
+#[derive(Debug, Clone)]
+pub struct TerminalOutput {
+    pub terminal_id: String,
+    pub seq: u64,
+    pub data: String,
+}
+
+/// Payload of the `session:<id>:takeover` Tauri event. The desktop frontend
+/// listens for this to freeze/unfreeze its terminal view when a phone takes over
+/// (or releases) a pure session's PTY. `by` names the actor for future UIs
+/// (always `"mobile"` today).
+#[derive(Debug, Clone, Serialize)]
+struct TakeoverEvent {
+    active: bool,
+    by: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -450,17 +489,45 @@ fn apply_wslenv(cmd: &mut CommandBuilder, extra_env: &[(String, String)]) {
     }
 }
 
-#[derive(Default)]
 pub struct PtySupervisor {
     terminals: Mutex<HashMap<String, LiveTerminal>>,
     /// Optional in-process sink for pure-signal notices (the auto-pilot
     /// controller). Set once at boot via [`PtySupervisor::set_signal_sink`].
     signal_sink: Mutex<Option<UnboundedSender<PureSignalNotice>>>,
+    /// Fan-out of every PTY's output to mobile-takeover subscribers. One shared
+    /// channel for all terminals; receivers filter by `terminal_id`. The reader
+    /// thread only publishes when there is at least one receiver, so the desktop
+    /// pays nothing when no phone is connected.
+    output_tx: broadcast::Sender<TerminalOutput>,
+    /// Terminal ids currently under mobile takeover. While present, the desktop
+    /// `write`/`resize` paths no-op (the phone owns the PTY) and the desktop UI
+    /// shows a frozen overlay.
+    takeover: Mutex<HashSet<String>>,
+}
+
+impl Default for PtySupervisor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PtySupervisor {
     pub fn new() -> Self {
-        Self::default()
+        let (output_tx, _) = broadcast::channel(OUTPUT_BROADCAST_CAP);
+        Self {
+            terminals: Mutex::new(HashMap::new()),
+            signal_sink: Mutex::new(None),
+            output_tx,
+            takeover: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Subscribe to the output of every live terminal. The mobile-takeover WS
+    /// handler filters the stream to the one terminal it mirrors. Pair with
+    /// [`PtySupervisor::attach_snapshot`] for the initial backfill, then drop any
+    /// streamed chunk whose `seq` is `<=` the snapshot's `last_seq`.
+    pub fn subscribe_output(&self) -> broadcast::Receiver<TerminalOutput> {
+        self.output_tx.subscribe()
     }
 
     /// Wire the auto-pilot controller's notice channel. Called once at boot,
@@ -644,6 +711,10 @@ impl PtySupervisor {
         // Snapshot the auto-pilot sink (if any) so signal notices reach the
         // controller in-process, not just the frontend via Tauri events.
         let reader_sink = self.signal_sink.lock().ok().and_then(|g| g.clone());
+        // Mobile-takeover fan-out. Clone of the shared sender; the reader only
+        // publishes when a phone is actually subscribed (`receiver_count > 0`),
+        // so the desktop-only path stays clone-free.
+        let reader_output_tx = self.output_tx.clone();
         std::thread::spawn(move || {
             let mut reader = {
                 let Ok(guard) = reader_master.lock() else {
@@ -690,6 +761,16 @@ impl PtySupervisor {
                         // emit — so the strip runs a single time and the emit
                         // doesn't need a clone.
                         let stripped = reader_pure.as_ref().map(|_| strip_for_detection(&chunk));
+                        // Mobile-takeover fan-out — only pay the clone when a
+                        // phone is actually subscribed. Same (seq, data) the
+                        // desktop event carries, tagged with the terminal id.
+                        if reader_output_tx.receiver_count() > 0 {
+                            let _ = reader_output_tx.send(TerminalOutput {
+                                terminal_id: reader_id.clone(),
+                                seq,
+                                data: chunk.clone(),
+                            });
+                        }
                         let _ = reader_app.emit(
                             &format!("terminal:{reader_id}:output"),
                             OutputEvent { seq, data: chunk },
@@ -825,6 +906,8 @@ impl PtySupervisor {
                 replay,
                 pure,
                 idle,
+                app,
+                desktop_size: Mutex::new((cols, rows)),
             },
         );
 
@@ -910,6 +993,23 @@ impl PtySupervisor {
     }
 
     pub fn write(&self, id: &str, data: &str) -> Result<(), PtyError> {
+        // Desktop input is frozen while a phone holds the takeover — the UI
+        // shows an overlay, but enforce it here too so a stray keystroke that
+        // races the overlay can't reach the PTY the phone is driving.
+        if self.is_takeover(id) {
+            return Ok(());
+        }
+        self.write_raw(id, data)
+    }
+
+    /// Mobile-takeover input path: write bytes regardless of the takeover lock
+    /// (the phone IS the lock holder). The WS handler only calls this after a
+    /// successful [`acquire_takeover`].
+    pub fn write_mobile(&self, id: &str, data: &str) -> Result<(), PtyError> {
+        self.write_raw(id, data)
+    }
+
+    fn write_raw(&self, id: &str, data: &str) -> Result<(), PtyError> {
         let terminals = self.terminals.lock().expect("pty mutex poisoned");
         let live = terminals
             .get(id)
@@ -942,16 +1042,106 @@ impl PtySupervisor {
         let live = terminals
             .get(id)
             .ok_or_else(|| PtyError::UnknownTerminal(id.to_owned()))?;
-        let master = live.master.lock().expect("pty master mutex poisoned");
-        master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| PtyError::Other(e.to_string()))?;
-        Ok(())
+        // Remember the desktop's size even while a phone owns the PTY, so
+        // releasing the takeover can restore it. While locked, don't actually
+        // resize — the phone's dimensions win until it releases.
+        if let Ok(mut ds) = live.desktop_size.lock() {
+            *ds = (cols, rows);
+        }
+        let locked = self
+            .takeover
+            .lock()
+            .map(|t| t.contains(id))
+            .unwrap_or(false);
+        if locked {
+            return Ok(());
+        }
+        resize_master(live, cols, rows)
+    }
+
+    /// Mobile-takeover resize: apply the phone's dimensions to the PTY without
+    /// touching the stored desktop size, so [`release_takeover`] can put the
+    /// desktop's size back.
+    pub fn resize_mobile(&self, id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
+        let terminals = self.terminals.lock().expect("pty mutex poisoned");
+        let live = terminals
+            .get(id)
+            .ok_or_else(|| PtyError::UnknownTerminal(id.to_owned()))?;
+        resize_master(live, cols, rows)
+    }
+
+    /// Whether `id` is currently under mobile takeover.
+    pub fn is_takeover(&self, id: &str) -> bool {
+        self.takeover
+            .lock()
+            .map(|t| t.contains(id))
+            .unwrap_or(false)
+    }
+
+    /// Resolve the live `claude` (pure-mode) terminal for a session, if one is
+    /// running. Mobile mirrors the pure TUI, so it maps a session id → the
+    /// single `Claude` PTY under it.
+    pub fn claude_terminal_for_session(&self, session_id: AggregateId) -> Option<String> {
+        let terminals = self.terminals.lock().expect("pty mutex poisoned");
+        terminals
+            .iter()
+            .find(|(_, t)| t.session_id == session_id && t.kind == TerminalKind::Claude)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Hand control of a pure session's PTY to a phone. Fails if the terminal is
+    /// gone or already under takeover. Emits `session:<id>:takeover {active:true}`
+    /// so the desktop view freezes. The phone may now resize/write via the
+    /// `*_mobile` paths; the desktop's are no-ops until [`release_takeover`].
+    pub fn acquire_takeover(&self, id: &str) -> Result<AggregateId, PtyError> {
+        let terminals = self.terminals.lock().expect("pty mutex poisoned");
+        let live = terminals
+            .get(id)
+            .ok_or_else(|| PtyError::UnknownTerminal(id.to_owned()))?;
+        let session_id = live.session_id;
+        let app = live.app.clone();
+        {
+            let mut t = self.takeover.lock().expect("pty takeover mutex poisoned");
+            if t.contains(id) {
+                return Err(PtyError::Other("terminal already under takeover".into()));
+            }
+            t.insert(id.to_owned());
+        }
+        let _ = app.emit(
+            &format!("session:{session_id}:takeover"),
+            TakeoverEvent {
+                active: true,
+                by: "mobile",
+            },
+        );
+        Ok(session_id)
+    }
+
+    /// Return control to the desktop: clear the lock, restore the desktop's
+    /// pre-takeover size, and emit `session:<id>:takeover {active:false}`. Called
+    /// on the phone's explicit release, on WS disconnect, and by the desktop's
+    /// force-release command. Idempotent — releasing a terminal that isn't locked
+    /// is a no-op.
+    pub fn release_takeover(&self, id: &str) {
+        {
+            let mut t = self.takeover.lock().expect("pty takeover mutex poisoned");
+            if !t.remove(id) {
+                return;
+            }
+        }
+        let terminals = self.terminals.lock().expect("pty mutex poisoned");
+        let Some(live) = terminals.get(id) else {
+            return;
+        };
+        let (cols, rows) = live.desktop_size.lock().map(|d| *d).unwrap_or((80, 24));
+        let _ = resize_master(live, cols, rows);
+        let _ = live.app.emit(
+            &format!("session:{}:takeover", live.session_id),
+            TakeoverEvent {
+                active: false,
+                by: "mobile",
+            },
+        );
     }
 
     /// Kill is dispatched to a worker thread and returns immediately. The
@@ -984,4 +1174,19 @@ impl PtySupervisor {
         });
         Ok(())
     }
+}
+
+/// Apply a size to a terminal's ConPTY master. Shared by the desktop resize, the
+/// mobile-takeover resize, and the takeover release (which restores the desktop
+/// size). Kept free-standing so all three go through one place.
+fn resize_master(live: &LiveTerminal, cols: u16, rows: u16) -> Result<(), PtyError> {
+    let master = live.master.lock().expect("pty master mutex poisoned");
+    master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| PtyError::Other(e.to_string()))
 }

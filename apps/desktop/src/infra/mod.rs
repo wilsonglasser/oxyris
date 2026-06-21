@@ -21,6 +21,7 @@ pub mod language_packs;
 pub mod lsp;
 pub mod lsp_bridge;
 pub mod mcp;
+pub mod mobile;
 pub mod observability;
 
 /// Pick which distro a workspace path belongs to.

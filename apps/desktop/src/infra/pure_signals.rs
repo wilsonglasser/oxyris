@@ -94,7 +94,15 @@ fn prompt_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)(❯\s*\d+\.\s+\S[\s\S]{0,400}\n\s+\d+\.\s)|(enter to select[\s\S]{0,200}navigate)|(ctrl-g to edit)|(do you want to (proceed|make this edit|create|run|continue))|(would you like to proceed)|(yes, and don'?t ask again)|(no, and tell claude)",
+            // Branch 1 (numbered menu): the selection marker glyph varies across
+            // builds/menus — `❯` (U+276F) for tool-approval menus, `›` (U+203A)
+            // for the multi-question AskUserQuestion menu — so accept both plus a
+            // plain `>`. The gap to the second item is wide (800) because option
+            // descriptions can be long. Branch 2/3 (footer hints) are
+            // glyph-independent: any selectable prompt paints a "…to navigate" /
+            // "Esc to cancel" footer, which the busy footer ("esc to interrupt")
+            // never does — so they catch menus whose layout branch 1 misses.
+            r"(?i)([❯›>]\s*\d+\.\s+\S[\s\S]{0,800}\n\s+\d+\.\s)|(keys to navigate)|(esc to cancel)|(enter to select[\s\S]{0,200}navigate)|(ctrl-g to edit)|(do you want to (proceed|make this edit|create|run|continue))|(would you like to proceed)|(yes, and don'?t ask again)|(no, and tell claude)",
         )
         .expect("pure prompt regex")
     })
@@ -366,6 +374,26 @@ mod tests {
     fn detects_english_proceed_prompt() {
         let mut s = PureSniffer::new();
         let sigs = s.feed("Do you want to make this edit to lib.rs?");
+        assert!(sigs.contains(&PureSignal::NeedsInput));
+    }
+
+    #[test]
+    fn detects_multi_question_menu_prompt() {
+        // The AskUserQuestion multi-question menu uses a `›` chevron (not `❯`),
+        // long option descriptions, and a "…to navigate · Esc to cancel" footer.
+        let mut s = PureSniffer::new();
+        let menu = "\
+← ☐ Controle abas   ☐ Escopo   ✓ Submit   →
+Como deve ser o controle de cor opaca vs gradient nas abas?
+› 1. Pick list (Gradient/Sólido)
+    Um seletor 'Tab fill style' com opções Gradient (padrão) / Solid color, \
+igual aos picklists existentes em outras telas do app que você já conhece e usa.
+  2. Toggle (Solid fill)
+    Um toggle simples 'Solid tab fill (no gradient)', off por padrão.
+  3. Type something.
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+";
+        let sigs = s.feed(menu);
         assert!(sigs.contains(&PureSignal::NeedsInput));
     }
 

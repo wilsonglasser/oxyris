@@ -85,6 +85,10 @@ pub struct AppState {
     /// closes its modal tab — otherwise the detached reader task keeps the
     /// process alive forever.
     pub action_procs: Arc<StdMutex<HashMap<String, u32>>>,
+    /// The mobile-takeover companion server, when running. `None` until the user
+    /// enables it. The `mobile_takeover_*` commands flip this on/off; it serves
+    /// pure sessions' PTYs to a paired phone over LAN.
+    pub mobile: Arc<StdMutex<Option<crate::infra::mobile::MobileServer>>>,
 }
 
 #[derive(Debug, Error)]
@@ -306,6 +310,7 @@ impl AppState {
             logs_dir,
             data_dir,
             action_procs: Arc::new(StdMutex::new(HashMap::new())),
+            mobile: Arc::new(StdMutex::new(None)),
         })
     }
 }

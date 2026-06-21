@@ -9,6 +9,7 @@ import {
   MicOff,
   Paperclip,
   Send,
+  Smartphone,
   SquareTerminal,
   Terminal as TerminalIcon,
   X,
@@ -31,10 +32,12 @@ import {
   claudePtySpawn,
   claudePureRefreshTitle,
   onPureState,
+  onTakeover,
   terminalKill,
   terminalList,
   terminalWrite,
 } from "~/ipc/terminal.ts";
+import { mobileTakeoverForceRelease } from "~/ipc/mobile.ts";
 import { attachmentSave, blobToBase64 } from "~/ipc/attachments.ts";
 import {
   playEscalationChime,
@@ -54,6 +57,7 @@ import { matchesKey } from "~/lib/keybindings.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import { TerminalView } from "~/components/TerminalPanel.tsx";
 import { FileViewerModal } from "~/components/FileViewerModal.tsx";
+import { MobileTakeoverModal } from "~/components/MobileTakeoverModal.tsx";
 import { AutopilotPanel } from "~/components/AutopilotPanel.tsx";
 import { useAutopilotStore } from "~/stores/autopilotStore.ts";
 import { useAutopilotAlertStore } from "~/stores/autopilotAlertStore.ts";
@@ -339,6 +343,10 @@ function PureSessionView({
   const [cwd, setCwd] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
+  // True while a phone has taken over this session's PTY — the desktop view
+  // freezes (overlay + disabled composer) until the phone releases or the user
+  // forces control back. Driven by the backend `session:<id>:takeover` event.
+  const [takenOver, setTakenOver] = useState(false);
   // Ctrl/Cmd+click target when opening a terminal file path in the in-app modal.
   const [openRelPath, setOpenRelPath] = useState<string | null>(null);
   const openFilesExternally = useAppSettingsStore((s) => s.openFilesExternally);
@@ -367,6 +375,10 @@ function PureSessionView({
   const whipToggle = useWhipStore((s) => s.toggle);
   const whipCrack = useWhipStore((s) => s.crack);
   const whipRung = useWhipStore((s) => s.rung[sessionId] ?? -1);
+
+  // Mobile takeover pairing dialog (QR + on/off). Server is global; this is the
+  // on-ramp. Non-embedded header only.
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   // Auto-pilot: floating mission panel + engaged indicator on the header button.
   const [autopilotOpen, setAutopilotOpen] = useState(false);
@@ -537,6 +549,27 @@ function PureSessionView({
     const id = window.setTimeout(refreshTitle, 3000);
     return () => window.clearTimeout(id);
   }, [refreshTitle]);
+
+  // Mobile takeover: freeze this view while a phone drives the PTY.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void onTakeover(sessionId, (snap) => setTakenOver(snap.active)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      // Leaving the view drops the listener; clear the local flag so a remount
+      // starts un-frozen and re-syncs from the next event.
+      setTakenOver(false);
+    };
+  }, [sessionId]);
+
+  const forceRelease = useCallback(() => {
+    void mobileTakeoverForceRelease({ session_id: sessionId }).catch(() => {});
+  }, [sessionId]);
 
   const onPtyInput = useCallback((data: string) => {
     // A submit (Enter, unless Shift held for a newline) starts a turn. The
@@ -709,6 +742,7 @@ function PureSessionView({
     setAttachments((prev) => prev.filter((a) => a.id !== id));
 
   const submit = useCallback(() => {
+    if (takenOver) return; // a phone owns the PTY; backend would reject anyway
     const trimmed = text.trim();
     if (!trimmed && attachments.length === 0) return;
     // Assemble the real claude input: each `@path` followed by a space, which
@@ -722,7 +756,7 @@ function PureSessionView({
     sendToPty(`${refs}${trimmed}`);
     setText("");
     setAttachments([]);
-  }, [text, attachments, sessionId, sendToPty, setBusy]);
+  }, [text, attachments, sessionId, sendToPty, setBusy, takenOver]);
   // Latest `submit` reachable from effects without making them a dep (which
   // would re-run / re-subscribe on every keystroke as text/attachments change).
   const submitRef = useRef(submit);
@@ -908,6 +942,15 @@ function PureSessionView({
                 </div>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => setMobileOpen(true)}
+              aria-label={t("mobile_button")}
+              title={t("mobile_button")}
+              className="flex size-6 items-center justify-center rounded text-neutral-500 transition hover:bg-neutral-800 hover:text-neutral-200"
+            >
+              <Smartphone className="size-3.5" strokeWidth={1.75} />
+            </button>
             {onToggleTerminal && (
               <button
                 type="button"
@@ -926,6 +969,8 @@ function PureSessionView({
           </div>
         </header>
       )}
+
+      {mobileOpen && <MobileTakeoverModal onClose={() => setMobileOpen(false)} />}
 
       {autopilotOpen && (
         <AutopilotPanel
@@ -964,6 +1009,27 @@ function PureSessionView({
         ) : (
           <div className="flex h-full items-center justify-center text-[11px] text-neutral-500">
             {t("pure_spawning")}
+          </div>
+        )}
+        {/* Takeover overlay: a phone owns the PTY. Block desktop interaction
+            (the backend also rejects desktop input while locked) and offer to
+            pull control back. The live output still renders underneath. */}
+        {takenOver && (
+          <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-neutral-950/70 backdrop-blur-[1px]">
+            <Smartphone className="size-7 text-sky-400" strokeWidth={1.5} />
+            <p className="text-[13px] font-medium text-neutral-100">
+              {t("takeover_active")}
+            </p>
+            <p className="max-w-xs text-center text-[11px] text-neutral-400">
+              {t("takeover_active_desc")}
+            </p>
+            <button
+              type="button"
+              onClick={forceRelease}
+              className="rounded bg-neutral-200 px-3 py-1.5 text-[12px] font-medium text-neutral-900 hover:bg-white"
+            >
+              {t("takeover_resume")}
+            </button>
           </div>
         )}
       </div>
@@ -1019,8 +1085,9 @@ function PureSessionView({
             }
           }}
           rows={1}
-          placeholder={t("pure_composer_placeholder")}
-          className="max-h-32 min-h-[34px] flex-1 resize-none overflow-y-auto rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700"
+          disabled={takenOver}
+          placeholder={takenOver ? t("takeover_composer_locked") : t("pure_composer_placeholder")}
+          className="max-h-32 min-h-[34px] flex-1 resize-none overflow-y-auto rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[12px] text-neutral-200 outline-none focus:border-neutral-700 disabled:opacity-50"
         />
         {speech.supported && (
           <button
