@@ -217,6 +217,21 @@ pub async fn worktree_remove(
     )
     .await?;
 
+    // Reap the worktree's resident processes before dropping the row. Its
+    // language servers (rust-analyzer / node / intelephense — each hundreds of
+    // MB to several GB) live in the LSP pool keyed by this worktree id; without
+    // this they'd stay resident for the whole app session. Any live session PTYs
+    // rooted in this worktree (pure-mode `claude`) are killed too.
+    state.lsp.close(input.id).await;
+    if let Ok(sessions) = state.projections.list_sessions(data.project_id) {
+        for s in sessions
+            .into_iter()
+            .filter(|s| s.worktree_id == Some(input.id))
+        {
+            state.pty.kill_for_session(s.id);
+        }
+    }
+
     let events = Worktree::decide(&wt_state, WorktreeCommand::Remove { now: Utc::now() })
         .map_err(|e| TauriWorktreeError::Domain(e.to_string()))?;
     let stored = state

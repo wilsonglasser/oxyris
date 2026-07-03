@@ -132,6 +132,15 @@ struct LiveTerminal {
     /// its own dimensions, releasing the takeover restores this so the desktop
     /// view comes back at the size it had.
     desktop_size: Mutex<(u16, u16)>,
+    /// `(distro, marker)` for a WSL PTY whose Linux-side process must be killed
+    /// *inside* the distro on close — `kill_tree` only reaps the Windows
+    /// `wsl.exe` relay, and the real `claude` (node) child survives it as an
+    /// orphan. `marker` is a string guaranteed to appear in that process's
+    /// Linux command line (the session UUID, passed as `--session-id`), so
+    /// `pkill -f <marker>` targets it precisely. `None` for Local PTYs and for
+    /// WSL shells (an interactive login shell gets SIGHUP when the relay's pty
+    /// closes and exits on its own).
+    wsl_kill: Option<(String, String)>,
 }
 
 /// Output-silence clock for a claude PTY. The reader stamps `last_output` on
@@ -432,6 +441,21 @@ fn wsl_exe() -> String {
         .unwrap_or_else(|_| "wsl.exe".into())
 }
 
+/// Kill a WSL PTY's Linux-side process from the Windows host by running
+/// `pkill -f <marker>` *inside* the distro. `kill_tree` only terminates the
+/// Windows `wsl.exe` relay; the actual `claude` (node) child runs in the distro
+/// and outlives the relay as an orphan (the observed multi-hundred-MB `claude`
+/// pileup). `marker` is a string unique to that process's command line — the
+/// session UUID — so no unrelated process is hit. Best-effort and blocking: a
+/// missing pattern just yields a non-zero exit we ignore.
+fn wsl_pkill(distro: &str, marker: &str) {
+    use oxyris_procutil::HideConsole;
+    let _ = std::process::Command::new(wsl_exe())
+        .args(["-d", distro, "--", "pkill", "-f", marker])
+        .hide_console()
+        .output();
+}
+
 fn claude_args(opts: &ClaudePtyOpts) -> Vec<String> {
     let mut args = Vec::new();
     if !opts.session_id.trim().is_empty() {
@@ -654,6 +678,20 @@ impl PtySupervisor {
 
         let title_prefix = program.title_prefix();
         let kind = program.kind();
+        // For a WSL `claude` PTY, remember how to kill its Linux-side process
+        // directly — `kill_tree` only reaps the Windows `wsl.exe` relay. The
+        // claude session id is passed through as `--session-id`, so it appears
+        // verbatim in the node process's Linux command line and makes a precise
+        // `pkill -f <marker>` target. Empty session id (claude picks its own) →
+        // no reliable marker, so skip. See `LiveTerminal::wsl_kill`.
+        let wsl_kill = match (env, &program) {
+            (Environment::Wsl { distro }, PtyProgram::Claude(opts))
+                if !opts.session_id.trim().is_empty() =>
+            {
+                Some((distro.clone(), opts.session_id.clone()))
+            }
+            _ => None,
+        };
         let cmd = build_cmd(env, cwd, extra_env, &program)?;
         let child = pair
             .slave
@@ -908,6 +946,7 @@ impl PtySupervisor {
                 idle,
                 app,
                 desktop_size: Mutex::new((cols, rows)),
+                wsl_kill,
             },
         );
 
@@ -1151,17 +1190,89 @@ impl PtySupervisor {
     /// We do **not** want any of that on the IPC thread — a slow kill there
     /// freezes the WebView's response loop.
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
-        let mut terminals = self.terminals.lock().expect("pty mutex poisoned");
-        let Some(live) = terminals.remove(id) else {
+        let live = {
+            let mut terminals = self.terminals.lock().expect("pty mutex poisoned");
+            terminals.remove(id)
+        };
+        let Some(live) = live else {
             return Ok(());
         };
-        std::thread::spawn(move || {
-            // Kill the whole descendant tree first — `Child::kill()` below only
-            // terminates the direct child (the shell), so a `cargo run` app it
-            // spawned would survive as an orphan. taskkill /T (Windows) /
-            // process-group kill (unix) takes the shell and everything under it.
+        Self::kill_live(live);
+        Ok(())
+    }
+
+    /// Kill every terminal owned by `session_id` — the claude (pure-mode) PTY
+    /// plus any auxiliary shells. Called when a session is stopped or deleted so
+    /// its `claude` child (and, for WSL, the `wsl.exe` relay behind it) doesn't
+    /// linger. Returns how many terminals were reaped. Without this, closing a
+    /// session left its PTY process resident, piling up multi-hundred-MB `claude`
+    /// processes inside the distro.
+    pub fn kill_for_session(&self, session_id: AggregateId) -> usize {
+        let victims: Vec<LiveTerminal> = {
+            let mut terminals = self.terminals.lock().expect("pty mutex poisoned");
+            let ids: Vec<String> = terminals
+                .iter()
+                .filter(|(_, t)| t.session_id == session_id)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| terminals.remove(&id))
+                .collect()
+        };
+        let n = victims.len();
+        for live in victims {
+            Self::kill_live(live);
+        }
+        n
+    }
+
+    /// Kill **every** live terminal, blocking until each tree-kill is issued.
+    /// Called on app exit: Windows does not auto-reap a GUI app's console
+    /// children, so a `pwsh` / `claude` (or the `wsl.exe` relay behind a WSL
+    /// session) would outlive Oxyris as an orphan. Unlike `kill_live`, the
+    /// `taskkill` runs inline here — a detached worker thread could be torn
+    /// down before it fires when the process is already exiting.
+    pub fn kill_all(&self) {
+        let victims: Vec<LiveTerminal> = {
+            let mut terminals = self.terminals.lock().expect("pty mutex poisoned");
+            terminals.drain().map(|(_, t)| t).collect()
+        };
+        if victims.is_empty() {
+            return;
+        }
+        tracing::info!(count = victims.len(), "killing all PTYs on app exit");
+        for live in victims {
             if let Some(pid) = live.pid {
                 oxyris_procutil::kill_tree(pid);
+            }
+            if let Some((distro, marker)) = &live.wsl_kill {
+                wsl_pkill(distro, marker);
+            }
+            if let Ok(mut child) = live._child.lock() {
+                let _ = child.kill();
+            }
+            drop(live);
+        }
+    }
+
+    /// Shared teardown for a `LiveTerminal` already removed from the map. The
+    /// actual `TerminateProcess` + dropping of the `Box<dyn MasterPty>` / writer
+    /// can block on Windows ConPTY, so we dispatch it to a worker thread and
+    /// return immediately — a slow kill must never stall the IPC thread.
+    fn kill_live(live: LiveTerminal) {
+        std::thread::spawn(move || {
+            // Kill the whole descendant tree first — `Child::kill()` below only
+            // terminates the direct child (the shell / wsl.exe relay), so a
+            // `cargo run` app it spawned would survive as an orphan. taskkill /T
+            // (Windows) / process-group kill (unix) takes the shell and
+            // everything under it.
+            if let Some(pid) = live.pid {
+                oxyris_procutil::kill_tree(pid);
+            }
+            // For a WSL claude PTY, kill_tree only reaped the Windows relay —
+            // finish the job inside the distro so the node `claude` doesn't orphan.
+            if let Some((distro, marker)) = &live.wsl_kill {
+                wsl_pkill(distro, marker);
             }
             if let Ok(mut child) = live._child.lock() {
                 let _ = child.kill();
@@ -1172,7 +1283,6 @@ impl PtySupervisor {
             // on its own.
             drop(live);
         });
-        Ok(())
     }
 }
 

@@ -197,6 +197,10 @@ impl AppState {
         let wsl_fs_watcher = Arc::new(WslFsWatchService::new(agent_pool.clone()));
         let app_for_packs = app_for_lsp.clone();
         let lsp = Arc::new(LspManager::new(app_for_lsp));
+        // Idle-reap language servers nobody has queried in a while — a warmed
+        // rust-analyzer/tsserver is 1–5 GB resident, and without this they pile
+        // up across worktrees until WSL runs the host out of memory.
+        lsp.spawn_idle_reaper();
         let language_packs = Arc::new(LanguagePacksService::new(app_for_packs, data_dir.clone()));
         // Wire packs into LSP so freshly-installed managed binaries win
         // over older PATH entries. Done off the hot path so AppState

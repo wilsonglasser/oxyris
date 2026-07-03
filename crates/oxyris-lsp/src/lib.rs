@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lsp_types::{
     ClientCapabilities, Diagnostic, DidOpenTextDocumentParams, Hover, HoverContents, HoverParams,
@@ -87,6 +87,12 @@ pub struct LspClient {
     /// Files we've already sent `didOpen` for — keeps us idempotent so the
     /// caller can be lazy.
     opened: Arc<Mutex<HashMap<PathBuf, ()>>>,
+    /// Wall-clock of the last request/notification we sent to the server.
+    /// Read by the manager's idle reaper to shut down language servers nobody
+    /// has queried in a while — a warmed rust-analyzer is ~1–5 GB resident, so
+    /// leaving idle ones alive across many worktrees balloons WSL memory. Only
+    /// *our* traffic bumps it; server-pushed diagnostics don't count as use.
+    last_activity: std::sync::Mutex<Instant>,
 }
 
 impl LspClient {
@@ -186,6 +192,7 @@ impl LspClient {
             next_id: AtomicI64::new(1),
             root: workspace_root,
             opened: Arc::new(Mutex::new(HashMap::new())),
+            last_activity: std::sync::Mutex::new(Instant::now()),
         });
 
         client.initialize().await?;
@@ -306,6 +313,23 @@ impl LspClient {
         Ok(cache.get(&uri).cloned().unwrap_or_default())
     }
 
+    /// How long since we last sent this server a request or notification.
+    /// The manager's idle reaper compares this against its TTL.
+    pub fn idle_for(&self) -> Duration {
+        self.last_activity
+            .lock()
+            .map(|t| t.elapsed())
+            .unwrap_or_default()
+    }
+
+    /// Stamp "used now". Called on every outbound request/notify so an actively
+    /// queried server is never idle-reaped.
+    fn touch(&self) {
+        if let Ok(mut t) = self.last_activity.lock() {
+            *t = Instant::now();
+        }
+    }
+
     /// Best-effort clean shutdown. Failures are swallowed since the child
     /// will be killed on drop anyway.
     pub async fn shutdown(&self) {
@@ -328,6 +352,7 @@ impl LspClient {
         params: P,
         timeout: Duration,
     ) -> Result<R> {
+        self.touch();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (resp_tx, resp_rx) = oneshot::channel();
         self.pending.lock().await.insert(id, resp_tx);
@@ -363,6 +388,7 @@ impl LspClient {
     }
 
     fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<()> {
+        self.touch();
         let frame = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,

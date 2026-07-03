@@ -199,6 +199,13 @@ pub async fn session_stop(
         .session_supervisor
         .stop_session(input.session_id)
         .await?;
+    // Reap the session's PTYs (pure-mode `claude` TUI + aux shells). The
+    // supervisor's `Stop` only reaches the stream-json provider; a Pure
+    // session's PTY child is owned here and would otherwise linger.
+    let reaped = state.pty.kill_for_session(input.session_id);
+    if reaped > 0 {
+        tracing::debug!(session = %input.session_id, reaped, "killed session PTYs on stop");
+    }
     Ok(())
 }
 
@@ -273,6 +280,12 @@ pub async fn session_delete(
         .session_supervisor
         .delete_session(input.session_id)
         .await?;
+    // Reap the session's PTYs so no `claude` (or aux shell) child outlives the
+    // deleted thread. See `session_stop` for why the supervisor alone isn't enough.
+    let reaped = state.pty.kill_for_session(input.session_id);
+    if reaped > 0 {
+        tracing::debug!(session = %input.session_id, reaped, "killed session PTYs on delete");
+    }
     // Best-effort: remove this session's attachment bucket so pasted/dropped
     // images are cleaned up with the thread. Never fails the delete.
     if let Some(env) = env {

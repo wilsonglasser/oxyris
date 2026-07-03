@@ -223,6 +223,18 @@ pub fn run() {
             tracing::info!("oxyris-desktop v{} booted", env!("CARGO_PKG_VERSION"));
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Oxyris");
+        .build(tauri::generate_context!())
+        .expect("error while building Oxyris")
+        .run(|app_handle, event| {
+            // On exit, reap every child we spawned. Windows doesn't kill a GUI
+            // app's console children automatically, so `pwsh` / `claude` / the
+            // `wsl.exe` relays behind WSL sessions would otherwise leak as
+            // orphans — the exact processes that were ballooning WSL memory.
+            // LSP servers are `kill_on_drop`, reaped when `AppState` drops.
+            if let tauri::RunEvent::ExitRequested { .. } = event
+                && let Some(state) = app_handle.try_state::<AppState>()
+            {
+                state.pty.kill_all();
+            }
+        });
 }

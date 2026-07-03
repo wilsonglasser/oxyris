@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use oxyris_core::{AggregateId, Environment};
 use oxyris_lsp::{LspClient, LspLanguage, detect_languages, resolve_server};
@@ -26,6 +27,14 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::infra::language_packs::{self, LanguagePacksService};
+
+/// Shut a language server down after this long with no query. A warmed
+/// rust-analyzer / tsserver holds 1–5 GB resident; across several worktrees
+/// that silently balloons WSL memory. Reaped servers respawn lazily on the
+/// next query (a one-time cold-start cost), so the ceiling stays bounded.
+const IDLE_TTL: Duration = Duration::from_secs(15 * 60);
+/// How often the reaper sweeps the pool.
+const REAPER_TICK: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum LspManagerError {
@@ -116,10 +125,62 @@ impl LspManager {
     }
 
     /// Drop a worktree's pool — the kill_on_drop on every spawned LSP
-    /// reaps its child. Call when the worktree is removed.
-    #[allow(dead_code)]
+    /// reaps its child. Called from `worktree_remove` when the worktree goes
+    /// away, so its rust-analyzer / node / intelephense processes don't stay
+    /// resident for the rest of the app session.
     pub async fn close(&self, worktree_id: AggregateId) {
-        self.entries.lock().await.remove(&worktree_id);
+        if let Some(entry) = self.entries.lock().await.remove(&worktree_id) {
+            let langs = entry.clients.len();
+            tracing::info!(worktree_id = %worktree_id, langs, "lsp pool closed on worktree remove");
+        }
+    }
+
+    /// Start the background idle-reaper. Every [`REAPER_TICK`] it shuts down
+    /// any language server nobody has queried in [`IDLE_TTL`], keeping the
+    /// resident-memory ceiling bounded no matter how many worktrees were warmed.
+    /// Idempotent to *effect* but spawn once — called from `AppState::initialize`.
+    pub fn spawn_idle_reaper(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(REAPER_TICK);
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tick.tick().await;
+                me.reap_idle().await;
+            }
+        });
+    }
+
+    /// One reaper sweep: drop every client idle past [`IDLE_TTL`]. Clients are
+    /// removed under the lock, then shut down after it's released (the clean
+    /// `shutdown`/`exit` handshake awaits the server; dropping the last `Arc`
+    /// then fires `kill_on_drop`). The worktree entry survives so a later query
+    /// respawns into it.
+    async fn reap_idle(&self) {
+        let mut victims: Vec<(AggregateId, LspLanguage, Arc<LspClient>)> = Vec::new();
+        {
+            let mut entries = self.entries.lock().await;
+            for (wt, entry) in entries.iter_mut() {
+                let idle: Vec<LspLanguage> = entry
+                    .clients
+                    .iter()
+                    .filter(|(_, c)| c.idle_for() >= IDLE_TTL)
+                    .map(|(lang, _)| *lang)
+                    .collect();
+                for lang in idle {
+                    if let Some(client) = entry.clients.remove(&lang) {
+                        victims.push((*wt, lang, client));
+                    }
+                }
+            }
+        }
+        for (wt, lang, client) in victims {
+            tracing::info!(worktree_id = %wt, ?lang, "lsp idle-reaped (no query in {IDLE_TTL:?})");
+            client.shutdown().await;
+            // `client` drops here; if no other Arc is held, kill_on_drop reaps
+            // the child. Any stale holder gets `ServerGone` on its next call,
+            // which the bridge treats as a transient miss and re-ensures.
+        }
     }
 
     /// Find or create an entry for a workspace path. Used by the LSP
