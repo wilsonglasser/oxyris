@@ -593,6 +593,27 @@ export function TerminalView({
     let unlistenOut: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
     let cancelled = false;
+
+    // The single 30ms fit can measure the char cell before the webfont
+    // ("JetBrains Mono") has finished loading — FitAddon then computes wrong
+    // cols/rows from stale metrics, the claude TUI paints to that wrong size,
+    // and only a manual window resize (which re-fits with the font now ready)
+    // corrects it. Re-fit once fonts settle, and again after two animation
+    // frames (layout finalised for panels that mount mid-transition), so the
+    // PTY lands on the right size on its own. `onResize` is guarded against
+    // no-op dims, so these extra fits only send a resize when they actually
+    // correct the size.
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) safeFit();
+    });
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        if (!cancelled) safeFit();
+      });
+    });
+
     const dataHandlers: IDisposable[] = [];
 
     // WebGL ghost-cell fix. The claude TUI rewrites lines in place; the WebGL
@@ -706,6 +727,8 @@ export function TerminalView({
       window.clearTimeout(fitTimer);
       window.clearTimeout(resizeTimer);
       window.clearTimeout(refreshTimer);
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
       window.removeEventListener("resize", safeFit);
       textarea?.removeEventListener("paste", onPasteCapture, { capture: true });
       mount.removeEventListener("wheel", onWheelZoom, { capture: true });
