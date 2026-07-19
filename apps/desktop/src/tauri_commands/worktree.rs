@@ -180,9 +180,12 @@ pub async fn worktree_create(
     // semantic query (hover / find references / diagnostics) doesn't pay
     // the full cold-start cost. Status events flow through `lsp:status`
     // for the UI chip.
-    state
-        .lsp
-        .warm_primary(id, project.environment.clone(), created.path.clone());
+    state.lsp.warm_primary(
+        id,
+        input.project_id,
+        project.environment.clone(),
+        created.path.clone(),
+    );
 
     // Return the freshly projected row.
     let rows = state.projections.list_worktrees(input.project_id, true)?;

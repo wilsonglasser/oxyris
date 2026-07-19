@@ -29,6 +29,49 @@ impl LspLanguage {
             LspLanguage::Php => "intelephense / phpactor",
         }
     }
+
+    /// `initializationOptions` handed to the server on `initialize`. `None`
+    /// leaves the server on its defaults.
+    ///
+    /// rust-analyzer on defaults was the main WSL/host memory sink: a warmed
+    /// server sat at 4–5 GB resident, and across several worktrees that
+    /// ballooned WSL until the VM froze. We bound that WITHOUT crippling the
+    /// `oxyris_lsp_diagnostics` MCP tool — that tool is how the agent verifies
+    /// its own edits (trait bounds, lifetimes, macro errors) cheaply after an
+    /// edit instead of running a full `cargo build`, and those errors only
+    /// come from the `cargo check` layer. So `checkOnSave` stays ON; the
+    /// memory cut comes from bounding rust-analyzer's own analysis instead:
+    /// - `cachePriming.enable: false` — the biggest resident cut; no eager
+    ///   index of every dependency at startup, symbols analysed lazily on
+    ///   first query.
+    /// - `numThreads: 4` — bound worker parallelism so a spawn burst can't
+    ///   saturate every core at once.
+    /// - `lru.capacity: 128` — bound the query-analysis cache.
+    /// - `check` on a separate `--target-dir` — keeps diagnostics, but the
+    ///   on-save `cargo check` no longer shares `target/` with the user's own
+    ///   `cargo build`. Sharing it means every save invalidates the build
+    ///   cache and every build invalidates check's — a rebuild-thrash that
+    ///   doubles CPU/RAM churn. An isolated dir costs extra disk but keeps the
+    ///   two from fighting.
+    ///
+    /// The keys are the `rust-analyzer.*` settings with the `rust-analyzer.`
+    /// prefix stripped (that's how they're nested in `initializationOptions`).
+    pub fn initialization_options(self) -> Option<serde_json::Value> {
+        match self {
+            LspLanguage::Rust => Some(serde_json::json!({
+                "cachePriming": { "enable": false },
+                "numThreads": 4,
+                "lru": { "capacity": 128 },
+                "check": {
+                    "command": "check",
+                    "extraArgs": ["--target-dir", "target/rust-analyzer"],
+                },
+            })),
+            // tsserver / intelephense hold far less and have no equivalent
+            // build-on-save subprocess — leave them on defaults for now.
+            LspLanguage::TypeScriptJavaScript | LspLanguage::Php => None,
+        }
+    }
 }
 
 /// Scan workspace markers and return the detected languages. Order is

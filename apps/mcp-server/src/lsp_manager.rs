@@ -97,7 +97,14 @@ impl LspManager {
             return Ok(c.clone());
         }
         self.set_status(lang, LspStatus::Spawning).await;
-        match LspClient::spawn(&binary, &args, &self.workspace).await {
+        match LspClient::spawn(
+            &binary,
+            &args,
+            &self.workspace,
+            lang.initialization_options(),
+        )
+        .await
+        {
             Ok(client) => {
                 clients.insert(lang, client.clone());
                 self.set_status(lang, LspStatus::Ready).await;

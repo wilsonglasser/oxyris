@@ -26,11 +26,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use lsp_types::{
-    ClientCapabilities, Diagnostic, DidOpenTextDocumentParams, Hover, HoverContents, HoverParams,
-    InitializeParams, InitializeResult, InitializedParams, Location, MarkedString, MarkupContent,
+    ClientCapabilities, Diagnostic, DidChangeConfigurationParams, DidChangeWorkspaceFoldersParams,
+    DidOpenTextDocumentParams, Hover, HoverContents, HoverParams, InitializeParams,
+    InitializeResult, InitializedParams, Location, MarkedString, MarkupContent,
     PartialResultParams, Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
     TextDocumentItem, TextDocumentPositionParams, Uri, WindowClientCapabilities,
-    WorkDoneProgressParams, WorkspaceFolder,
+    WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
+    WorkspaceFoldersChangeEvent,
 };
 use oxyris_procutil::HideConsole;
 use serde::Serialize;
@@ -83,10 +85,25 @@ pub struct LspClient {
     pending: PendingMap,
     diagnostics: DiagnosticsMap,
     next_id: AtomicI64,
+    /// The server's *primary* root — the first workspace it was spawned for.
+    /// Used as the (deprecated) `root_uri` at `initialize` and as the base for
+    /// the first workspace folder's display name. Additional roots (other
+    /// worktrees of the same project) live in `roots` and are added at runtime.
     root: PathBuf,
+    /// Every workspace folder this server currently serves. Seeded with `root`
+    /// at spawn; grows/shrinks via [`LspClient::add_folder`] /
+    /// [`LspClient::remove_folder`] as worktrees of the same project open and
+    /// close. One rust-analyzer serving N worktrees dedups their shared
+    /// dependency analysis (same registry source paths → one crate in RA's
+    /// global graph), which is the whole point of the multi-root move.
+    roots: std::sync::Mutex<Vec<PathBuf>>,
     /// Files we've already sent `didOpen` for — keeps us idempotent so the
     /// caller can be lazy.
     opened: Arc<Mutex<HashMap<PathBuf, ()>>>,
+    /// `initializationOptions` sent on the `initialize` handshake. `None`
+    /// leaves the server on its defaults. For rust-analyzer this carries the
+    /// lean, memory-bounded config (see `LspLanguage::initialization_options`).
+    init_options: Option<Value>,
     /// Wall-clock of the last request/notification we sent to the server.
     /// Read by the manager's idle reaper to shut down language servers nobody
     /// has queried in a while — a warmed rust-analyzer is ~1–5 GB resident, so
@@ -102,13 +119,14 @@ impl LspClient {
         binary: &Path,
         args: &[S],
         workspace_root: &Path,
+        init_options: Option<Value>,
     ) -> Result<Arc<Self>> {
         let mut cmd = Command::new(binary);
         for a in args {
             cmd.arg(a);
         }
         cmd.current_dir(workspace_root);
-        Self::spawn_with_command(cmd, workspace_root.to_owned()).await
+        Self::spawn_with_command(cmd, workspace_root.to_owned(), init_options).await
     }
 
     /// WSL variant: spawn the LSP server inside `distro` via
@@ -125,6 +143,7 @@ impl LspClient {
         binary: &str,
         args: &[S],
         posix_workspace: &Path,
+        init_options: Option<Value>,
     ) -> Result<Arc<Self>> {
         let mut shell_cmd = format!("exec {}", shell_escape(binary));
         for a in args {
@@ -138,13 +157,17 @@ impl LspClient {
         cmd.arg(posix_workspace);
         cmd.arg("--");
         cmd.arg("bash").arg("-lc").arg(&shell_cmd);
-        Self::spawn_with_command(cmd, posix_workspace.to_owned()).await
+        Self::spawn_with_command(cmd, posix_workspace.to_owned(), init_options).await
     }
 
     /// Common spawn pipeline: wire stdio, install reaper + reader/writer
     /// tasks, drive `initialize`. Both `spawn` and `spawn_wsl` go through
     /// here so the protocol behaviour is identical.
-    async fn spawn_with_command(mut cmd: Command, workspace_root: PathBuf) -> Result<Arc<Self>> {
+    async fn spawn_with_command(
+        mut cmd: Command,
+        workspace_root: PathBuf,
+        init_options: Option<Value>,
+    ) -> Result<Arc<Self>> {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -190,8 +213,10 @@ impl LspClient {
             pending,
             diagnostics,
             next_id: AtomicI64::new(1),
+            roots: std::sync::Mutex::new(vec![workspace_root.clone()]),
             root: workspace_root,
             opened: Arc::new(Mutex::new(HashMap::new())),
+            init_options,
             last_activity: std::sync::Mutex::new(Instant::now()),
         });
 
@@ -201,21 +226,28 @@ impl LspClient {
 
     async fn initialize(&self) -> Result<()> {
         let root_uri = path_to_uri(&self.root)?;
+        let workspace_folders = self
+            .roots
+            .lock()
+            .map(|roots| roots.iter().filter_map(|r| workspace_folder(r)).collect())
+            .unwrap_or_default();
         #[allow(deprecated)]
         let params = InitializeParams {
             process_id: Some(std::process::id()),
-            root_uri: Some(root_uri.clone()),
-            workspace_folders: Some(vec![WorkspaceFolder {
-                uri: root_uri,
-                name: self
-                    .root
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("workspace")
-                    .to_owned(),
-            }]),
+            root_uri: Some(root_uri),
+            workspace_folders: Some(workspace_folders),
+            initialization_options: self.init_options.clone(),
             capabilities: ClientCapabilities {
                 window: Some(WindowClientCapabilities::default()),
+                // Advertise workspace-folder support so the server honours the
+                // runtime `didChangeWorkspaceFolders` we send when a sibling
+                // worktree opens/closes, and configuration pushes for updated
+                // `linkedProjects`.
+                workspace: Some(WorkspaceClientCapabilities {
+                    workspace_folders: Some(true),
+                    configuration: Some(true),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             client_info: Some(lsp_types::ClientInfo {
@@ -328,6 +360,82 @@ impl LspClient {
         if let Ok(mut t) = self.last_activity.lock() {
             *t = Instant::now();
         }
+    }
+
+    /// The workspace folders this server currently serves.
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.roots.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    /// Add a workspace folder at runtime — a sibling worktree of the same
+    /// project opening. Idempotent: re-adding a folder already served is a
+    /// no-op. Sends `workspace/didChangeWorkspaceFolders` (added) and, when
+    /// `settings` is `Some`, a `workspace/didChangeConfiguration` so the
+    /// server picks up config that depends on the folder set (for
+    /// rust-analyzer that's the refreshed `linkedProjects`). The caller owns
+    /// the settings shape — the client stays language-agnostic.
+    pub fn add_folder(&self, root: &Path, settings: Option<Value>) -> Result<()> {
+        {
+            let mut roots = self.roots.lock().map_err(|_| LspError::ServerGone)?;
+            if roots.iter().any(|r| r == root) {
+                return Ok(());
+            }
+            roots.push(root.to_owned());
+        }
+        let Some(folder) = workspace_folder(root) else {
+            return Ok(());
+        };
+        self.notify(
+            "workspace/didChangeWorkspaceFolders",
+            DidChangeWorkspaceFoldersParams {
+                event: WorkspaceFoldersChangeEvent {
+                    added: vec![folder],
+                    removed: vec![],
+                },
+            },
+        )?;
+        if let Some(settings) = settings {
+            self.notify(
+                "workspace/didChangeConfiguration",
+                DidChangeConfigurationParams { settings },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Remove a workspace folder at runtime — a worktree closing (or idle-
+    /// reaped). Idempotent: removing a folder not served is a no-op. Mirror of
+    /// [`LspClient::add_folder`]. When the last folder is removed the caller
+    /// should shut the whole client down (see the manager's reaper); this
+    /// method does not self-terminate.
+    pub fn remove_folder(&self, root: &Path, settings: Option<Value>) -> Result<()> {
+        {
+            let mut roots = self.roots.lock().map_err(|_| LspError::ServerGone)?;
+            let before = roots.len();
+            roots.retain(|r| r != root);
+            if roots.len() == before {
+                return Ok(());
+            }
+        }
+        let Some(folder) = workspace_folder(root) else {
+            return Ok(());
+        };
+        self.notify(
+            "workspace/didChangeWorkspaceFolders",
+            DidChangeWorkspaceFoldersParams {
+                event: WorkspaceFoldersChangeEvent {
+                    added: vec![],
+                    removed: vec![folder],
+                },
+            },
+        )?;
+        if let Some(settings) = settings {
+            self.notify(
+                "workspace/didChangeConfiguration",
+                DidChangeConfigurationParams { settings },
+            )?;
+        }
+        Ok(())
     }
 
     /// Best-effort clean shutdown. Failures are swallowed since the child
@@ -456,6 +564,35 @@ fn path_to_uri(path: &Path) -> Result<Uri> {
         .map_err(|e| LspError::InvalidPath(format!("{absolute}: {e}")))
 }
 
+/// Build an LSP [`WorkspaceFolder`] for a root path. `None` when the path
+/// can't be expressed as a `file:` URI (returned unchanged so callers can skip
+/// that folder rather than fail the whole operation). The folder name is the
+/// last path component so a multi-root server's folders are distinguishable in
+/// server logs.
+fn workspace_folder(root: &Path) -> Option<WorkspaceFolder> {
+    let uri = path_to_uri(root).ok()?;
+    let name = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workspace")
+        .to_owned();
+    Some(WorkspaceFolder { uri, name })
+}
+
+/// Build the `workspace/didChangeConfiguration` `settings` payload that tells
+/// rust-analyzer which Cargo workspaces to treat as linked projects — one
+/// `Cargo.toml` per served root. Pushed whenever the folder set changes so RA
+/// re-derives its crate graph across exactly the open worktrees. Shaped with
+/// the `rust-analyzer` section key (how the server reads pushed settings),
+/// unlike `initializationOptions` which omits the prefix.
+pub fn rust_linked_projects_settings(roots: &[PathBuf]) -> Value {
+    let linked: Vec<String> = roots
+        .iter()
+        .map(|r| r.join("Cargo.toml").to_string_lossy().replace('\\', "/"))
+        .collect();
+    serde_json::json!({ "rust-analyzer": { "linkedProjects": linked } })
+}
+
 fn flatten_hover(contents: HoverContents) -> Option<String> {
     match contents {
         HoverContents::Scalar(MarkedString::String(s)) if !s.trim().is_empty() => Some(s),
@@ -531,5 +668,29 @@ mod tests {
             s.starts_with("file:///C:/") || s.starts_with("file:///C%3A/"),
             "got {s}"
         );
+    }
+
+    #[test]
+    fn workspace_folder_names_by_last_component() {
+        let f = workspace_folder(Path::new("/home/w/repo/wt-feature")).expect("folder");
+        assert_eq!(f.name, "wt-feature");
+        assert!(f.uri.to_string().ends_with("wt-feature"));
+    }
+
+    #[test]
+    fn linked_projects_settings_one_cargo_per_root() {
+        let roots = vec![
+            PathBuf::from("/home/w/repo/main"),
+            PathBuf::from("/home/w/repo/wt-a"),
+        ];
+        let v = rust_linked_projects_settings(&roots);
+        let linked = v["rust-analyzer"]["linkedProjects"]
+            .as_array()
+            .expect("array");
+        assert_eq!(linked.len(), 2);
+        // POSIX-normalised, one Cargo.toml per root, section-prefixed for a
+        // config *push* (not the prefix-less initializationOptions shape).
+        assert_eq!(linked[0], "/home/w/repo/main/Cargo.toml");
+        assert_eq!(linked[1], "/home/w/repo/wt-a/Cargo.toml");
     }
 }

@@ -175,6 +175,7 @@ pub async fn worktree_ensure_ready(
         WorktreeContext {
             environment: p.environment,
             path: p.root_path,
+            project_id,
         }
     } else {
         lookup_worktree(&state, input.worktree_id)?
@@ -211,9 +212,12 @@ pub async fn worktree_ensure_ready(
     });
 
     // LSP — idempotent: fast-path returns existing client if already ready.
-    state
-        .lsp
-        .warm_primary(worktree_id, ctx.environment.clone(), ctx.path.clone());
+    state.lsp.warm_primary(
+        worktree_id,
+        ctx.project_id,
+        ctx.environment.clone(),
+        ctx.path.clone(),
+    );
 
     // WSL only: arm the in-distro agent watcher (idempotent). Its native
     // inotify stream keeps both the file tree and the symbol index fresh
@@ -250,6 +254,7 @@ pub async fn index_stats(
 struct WorktreeContext {
     environment: Environment,
     path: String,
+    project_id: AggregateId,
 }
 
 /// Like [`lookup_worktree`] but understands the primary sentinel: when
@@ -272,6 +277,7 @@ fn resolve_ctx(
         return Ok(WorktreeContext {
             environment: p.environment,
             path: p.root_path,
+            project_id,
         });
     }
     lookup_worktree(state, worktree_id)
@@ -297,6 +303,7 @@ fn lookup_worktree(
             return Ok(WorktreeContext {
                 environment: p.environment,
                 path: wt.path,
+                project_id: p.id,
             });
         }
     }
