@@ -86,6 +86,7 @@ export function Sidebar({
   const setActiveSession = useSessionStore((s) => s.setActive);
   const markAttention = useSessionStore((s) => s.markAttention);
   const setNeedsInput = useSessionStore((s) => s.setNeedsInput);
+  const setErrored = useSessionStore((s) => s.setErrored);
   const setBusy = useBusyStore((s) => s.setBusy);
 
   const [query, setQuery] = useState("");
@@ -376,6 +377,8 @@ export function Sidebar({
       // `needs_input` (red) outranks `busy` (blue) at the dot — urgent, never
       // debounced.
       setNeedsInput(s.id, snap.needs_input);
+      // API error (red + warning banner) — also urgent, never debounced.
+      setErrored(s.id, snap.errored);
 
       const clearSettle = () => {
         const pending = settleTimersRef.current.get(s.id);
@@ -384,6 +387,21 @@ export function Sidebar({
           settleTimersRef.current.delete(s.id);
         }
       };
+
+      // A failed turn (API error). Backend reports busy=false, so without this
+      // it would fall into the settle path and ring the *completion* chime for a
+      // turn that actually errored. Handle it first: drop blue, cancel any
+      // pending settle, and on the rising edge ring the input chime + badge so a
+      // backgrounded user knows the turn failed. The red dot rides `errored`.
+      if (snap.errored) {
+        clearSettle();
+        setBusy(s.id, false);
+        if (!seed && prev && !prev.errored && shouldNotify()) {
+          playInputChime();
+          bumpBadge();
+        }
+        return;
+      }
 
       // Anything is happening → read blue right away and cancel any pending
       // settle (the turn is still alive — that idle frame was transient).
@@ -462,6 +480,7 @@ export function Sidebar({
     pureWatchKey,
     markAttention,
     setNeedsInput,
+    setErrored,
     setBusy,
     refreshProjectSessions,
   ]);
@@ -817,7 +836,8 @@ function ProjectItem({
   const attnTier = useSessionStore((st) => {
     let tier = 0;
     for (const s of sessions) {
-      if (st.needsInput[s.id] || s.status === "errored") return 4;
+      if (st.needsInput[s.id] || st.errored[s.id] || s.status === "errored")
+        return 4;
       if (st.attention[s.id]) tier = Math.max(tier, 2);
     }
     return tier;
@@ -1011,6 +1031,8 @@ function SessionEntry({
   const needsAttention = useSessionStore((s) => !!s.attention[session.id]);
   // Red — Claude is paused waiting on a tool-approval input.
   const needsInput = useSessionStore((s) => !!s.needsInput[session.id]);
+  // Red — a pure turn hit an API error (also shows a warning banner in-panel).
+  const errored = useSessionStore((s) => !!s.errored[session.id]);
   // Live PTY activity (pure threads have no Turn event to bump
   // last_activity_at). Feeds StatusDot's green "recent" window.
   const liveActivityAt = useSessionStore((s) => s.liveActivity[session.id]);
@@ -1078,7 +1100,7 @@ function SessionEntry({
         className={`group relative flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-[11px] transition ${
           isActive
             ? "bg-[#2e436e]/40 text-neutral-100"
-            : needsInput
+            : needsInput || errored
               ? "bg-red-500/15 text-red-100 hover:bg-red-500/25"
               : needsAttention
                 ? "bg-orange-500/20 text-orange-100 hover:bg-orange-500/30"
@@ -1089,6 +1111,7 @@ function SessionEntry({
           status={session.status}
           attention={needsAttention}
           needsInput={needsInput}
+          errored={errored}
           busy={busy}
           autopilot={autopilot}
           autopilotThinking={autopilotThinking}
@@ -1121,10 +1144,10 @@ function SessionEntry({
             title={
               pinned ? t("sidebar.unpin_session") : t("sidebar.pin_session")
             }
-            className={`flex size-4 items-center justify-center rounded transition ${
+            className={`flex size-4 items-center justify-center rounded opacity-0 transition group-hover:opacity-100 ${
               pinned
                 ? "text-amber-300 hover:bg-amber-950/40"
-                : "text-neutral-500 opacity-0 hover:bg-neutral-700 hover:text-neutral-200 group-hover:opacity-100"
+                : "text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
             }`}
           >
             {pinned ? (
@@ -1184,6 +1207,7 @@ function StatusDot({
   status,
   attention,
   needsInput,
+  errored,
   busy,
   autopilot,
   autopilotThinking,
@@ -1194,6 +1218,8 @@ function StatusDot({
   status: string;
   attention?: boolean;
   needsInput?: boolean;
+  /** A pure turn hit an API error → red dot (same colour as needs-input). */
+  errored?: boolean;
   busy?: boolean;
   /** Auto-pilot engaged → render a robot glyph in the dot's color, not a dot. */
   autopilot?: boolean;
@@ -1211,7 +1237,7 @@ function StatusDot({
     isRecent(lastActivityAt) ||
     (liveActivityAt !== undefined && Date.now() - liveActivityAt < RECENT_MS);
   // Literal class strings (not built via concat) so Tailwind's JIT emits them.
-  const red = needsInput || status === "errored";
+  const red = needsInput || errored || status === "errored";
   // Purple — the auto-pilot completed its mission and shut off. Ranks just below
   // a red "needs you" so a finished hands-free run stands out from a plain
   // recent/attention thread.

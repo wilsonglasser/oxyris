@@ -74,6 +74,7 @@ pub fn prepare_for_worktree(
     session: Option<&str>,
     autopilot_bridge_port: Option<u16>,
     browser_bridge_port: Option<u16>,
+    oxy_bridge_port: Option<u16>,
 ) -> std::io::Result<Option<McpSetup>> {
     let Some(bin) = resolve_mcp_bin() else {
         tracing::debug!("oxyris-mcp binary not located; skipping MCP config");
@@ -141,6 +142,16 @@ pub fn prepare_for_worktree(
     } else {
         false
     };
+    // Oxy cross-thread tools: only for Assistant sessions (the caller passes the
+    // port through only for that kind). The target thread is a tool argument, so
+    // no session id is baked for these — Oxy drives every open thread.
+    let oxy_wired = if let Some(port) = oxy_bridge_port {
+        args.push("--oxy-bridge".into());
+        args.push(format!("tcp://127.0.0.1:{port}"));
+        true
+    } else {
+        false
+    };
 
     let contents = json!({
         "mcpServers": {
@@ -164,6 +175,10 @@ pub fn prepare_for_worktree(
         system_prompt_nudge.push_str("\n\n");
         system_prompt_nudge.push_str(BROWSER_NUDGE);
     }
+    if oxy_wired {
+        system_prompt_nudge.push_str("\n\n");
+        system_prompt_nudge.push_str(OXY_NUDGE);
+    }
 
     Ok(Some(McpSetup {
         config_path: config_path.to_string_lossy().into_owned(),
@@ -181,6 +196,14 @@ const AUTOPILOT_NUDGE: &str = r#"This session can hand itself off to the Oxyris 
 - `oxyris_autopilot_engage(mission)` — turn the pilot ON for THIS session with a mission (a concrete spec of what to accomplish), then STOP and end your turn. The pilot takes over from there; do not keep calling it or talking to it. Use when the user asks you to "let the autopilot finish/continue this" or to run long autonomous work unattended.
 - `oxyris_autopilot_disengage()` — turn the pilot OFF for this session.
 The supervisor backend/model comes from the user's saved Settings — you only supply the mission. Engage is fire-and-forget: call it once, then stop."#;
+
+/// Appended for Assistant (Oxy) sessions. Tells Oxy it can see and drive every
+/// other open thread on the user's behalf.
+const OXY_NUDGE: &str = r#"You are Oxy, the user's cross-thread assistant. You can observe and drive every other open (running) thread — not just this session:
+- `oxyris_threads_list()` — list all open threads (id, title, status, turn count). Start here to discover thread ids.
+- `oxyris_thread_read(thread_id)` — read a thread's title, status and full turn history, to catch up before acting.
+- `oxyris_thread_send(thread_id, text)` — send a message into another thread, starting a turn there as if the user typed it. This is how you steer/drive other threads.
+When the user asks you to check on, summarize, or push work in "the other session / that thread / everything", use these. Confirm before anything destructive or irreversible."#;
 
 /// Appended when the browser bridge is wired. Tells Claude the headless-browser
 /// tools exist so it can navigate + screenshot to validate its own work.

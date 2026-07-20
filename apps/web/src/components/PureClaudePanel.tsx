@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  AlertTriangle,
   Bot,
   FileText,
   Image as ImageIcon,
@@ -342,6 +343,9 @@ function PureSessionView({
   const [termId, setTermId] = useState<string | null>(null);
   const [cwd, setCwd] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Backend sniffer flagged an "API Error" line in this turn's output — show a
+  // warning banner until the user's next submit clears it (reset on `\r`).
+  const [apiError, setApiError] = useState(false);
   const [text, setText] = useState("");
   // True while a phone has taken over this session's PTY — the desktop view
   // freezes (overlay + disabled composer) until the phone releases or the user
@@ -533,6 +537,7 @@ function PureSessionView({
       const wasBusy = prevBusyRef.current;
       prevBusyRef.current = snap.busy;
       if (wasBusy && !snap.busy) refreshTitle();
+      setApiError(snap.errored);
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -579,6 +584,9 @@ function PureSessionView({
     if (data.includes("\r")) {
       setBusy(sessionId, true);
       setNeedsInput(sessionId, false);
+      // A resubmit clears the API-error warning (the backend resets its latch on
+      // the same `\r`); drop the banner now so it doesn't linger a heartbeat.
+      setApiError(false);
     }
   }, [sessionId, setBusy, setNeedsInput]);
 
@@ -753,6 +761,7 @@ function PureSessionView({
     // The trailing `\r` sendToPty emits drives the backend's latch reset;
     // reflect the turn start in the UI immediately. The backend owns detection.
     setBusy(sessionId, true); // sidebar pulse on
+    setApiError(false); // resubmitting clears any prior API-error warning
     sendToPty(`${refs}${trimmed}`);
     setText("");
     setAttachments([]);
@@ -983,6 +992,31 @@ function PureSessionView({
         <p className="border-b border-red-900/50 bg-red-950/30 px-3 py-1.5 text-[11px] text-red-200">
           {error}
         </p>
+      )}
+
+      {apiError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 border-b border-amber-800/60 bg-amber-950/40 px-3 py-1.5 text-[11px] text-amber-200"
+        >
+          <AlertTriangle
+            className="mt-px size-3.5 shrink-0 text-amber-400"
+            strokeWidth={2}
+          />
+          <div className="min-w-0">
+            <p className="font-medium">{t("pure_api_error_title")}</p>
+            <p className="text-amber-300/80">{t("pure_api_error_desc")}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setApiError(false)}
+            aria-label={t("pure_api_error_dismiss")}
+            title={t("pure_api_error_dismiss")}
+            className="ml-auto shrink-0 text-amber-400/70 hover:text-amber-200"
+          >
+            <X className="size-3.5" strokeWidth={2} />
+          </button>
+        </div>
       )}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">

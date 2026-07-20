@@ -38,7 +38,7 @@ pub struct AppState {
     /// through `session_supervisor` rather than poking the registry directly.
     #[allow(dead_code)]
     pub providers: Arc<ProviderRegistry>,
-    pub session_supervisor: SessionSupervisor,
+    pub session_supervisor: Arc<SessionSupervisor>,
     pub pty: Arc<PtySupervisor>,
     /// Drives engaged pure sessions toward their mission. Reacts to the PTY
     /// reader's pure-signals in-process (works with the window unfocused).
@@ -79,6 +79,11 @@ pub struct AppState {
     /// App data root — surfaced so the Settings UI can derive paths like
     /// `keybindings.json` consistently.
     pub data_dir: PathBuf,
+    /// Live Oxy wake-word listener, when armed. `voice_enable` starts it and
+    /// stores the handle; `voice_disable` (or drop) tears it down.
+    pub voice_wake: std::sync::Mutex<Option<crate::infra::voice::WakeHandle>>,
+    /// Lazily-created Kokoro TTS engine (loaded on first `voice_speak`).
+    pub voice_tts: std::sync::Mutex<Option<crate::infra::voice::TtsEngine>>,
     /// Live modal-action runs keyed by `run_id` → OS pid of the spawned shell.
     /// `action_run` registers on spawn and clears on exit; `action_kill` reads
     /// it to tree-kill a still-running command (e.g. a `watch`) when the user
@@ -169,14 +174,39 @@ impl AppState {
         let app_for_lsp = app.clone();
         let app_for_autopilot = app.clone();
         let lsp_bridge_port: Arc<StdMutex<Option<u16>>> = Arc::new(StdMutex::new(None));
-        let session_supervisor = SessionSupervisor::new(
+        // Oxy cross-thread bridge port — populated async once the bridge binds
+        // (below), read at spawn time for Assistant sessions.
+        let oxy_bridge_port: Arc<StdMutex<Option<u16>>> = Arc::new(StdMutex::new(None));
+        let session_supervisor = Arc::new(SessionSupervisor::new(
             providers.clone(),
             event_store.clone(),
             projections.clone(),
             agent_pool.clone(),
             app,
             lsp_bridge_port.clone(),
-        );
+            oxy_bridge_port.clone(),
+        ));
+
+        // Oxy cross-thread control bridge — lets an Assistant session's MCP
+        // server enumerate/read/drive every other open thread. Same async
+        // port-capture pattern as the autopilot bridge.
+        {
+            let sup = session_supervisor.clone();
+            let slot = oxy_bridge_port.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::infra::oxy_bridge::serve(sup).await {
+                    Ok(port) => {
+                        if let Ok(mut slot) = slot.lock() {
+                            *slot = Some(port);
+                        }
+                        tracing::info!(port, "oxy_bridge: ready");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "oxy_bridge: bind failed; cross-thread tools disabled");
+                    }
+                }
+            });
+        }
 
         // Daily checkpoint GC on a background task — keeps the hidden
         // `refs/oxyris/cp/**` namespace from growing forever.
@@ -313,6 +343,8 @@ impl AppState {
             log_guard,
             logs_dir,
             data_dir,
+            voice_wake: std::sync::Mutex::new(None),
+            voice_tts: std::sync::Mutex::new(None),
             action_procs: Arc::new(StdMutex::new(HashMap::new())),
             mobile: Arc::new(StdMutex::new(None)),
         })

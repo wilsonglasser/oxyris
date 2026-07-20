@@ -165,6 +165,16 @@ fn recap_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)([\x{2720}-\x{274F}]|※)\s*recap").expect("pure recap regex"))
 }
 
+/// claude prints an "API Error:" / "API Error (…)" line when a request to the
+/// model API fails mid-turn (e.g. "API Error: Connection closed mid-response",
+/// "API Error (Request timed out)"). A hard failure of the turn — surfaced as
+/// the red bull + a warning banner. Anchored to the CLI's exact `Error:` / `(`
+/// prefix so assistant prose merely *mentioning* an api error can't trip it.
+fn api_error_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)api error\s*[:(]").expect("pure api-error regex"))
+}
+
 /// claude's rotating one-line TUI hint ("Tip: …"), usually under a tree glyph
 /// (└/├/╰). It's chrome, not turn content, and it animates — so it keeps the PTY
 /// dripping and can masquerade as the last line. Port of `PURE_TIP_RE`; stripped
@@ -235,6 +245,9 @@ pub struct PureSniffer {
     turn_end_seen: bool,
     recap_seen: bool,
     working_active: bool,
+    /// Latched once an "API Error" line appears, until [`reset`] (the user's next
+    /// submit). Drives the red bull + warning banner in pure mode.
+    api_error_seen: bool,
 }
 
 impl PureSniffer {
@@ -303,8 +316,21 @@ impl PureSniffer {
             self.recap_seen = true;
             out.push(PureSignal::TurnEnded);
         }
+        // API error — latched, not surfaced as a signal (it drives the dot via
+        // `api_error()`, not the autopilot sink). The whole tail is scanned (not
+        // just the recent window): the CLI's error line can scroll up under its
+        // own retry chrome and we want it to stay flagged until the user resubmits.
+        if !self.api_error_seen && api_error_re().is_match(&self.tail) {
+            self.api_error_seen = true;
+        }
 
         out
+    }
+
+    /// True once an "API Error" line has appeared this turn (until [`reset`]).
+    /// Drives the red bull + the pure-mode warning banner.
+    pub fn api_error(&self) -> bool {
+        self.api_error_seen
     }
 
     /// True while a permission/question menu is on screen. The idle watchdog
@@ -343,6 +369,7 @@ impl PureSniffer {
         self.turn_end_seen = false;
         self.recap_seen = false;
         self.working_active = false;
+        self.api_error_seen = false;
     }
 }
 
@@ -552,6 +579,35 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
         // A cursor-blink redraw of the same frame keeps the menu live.
         s.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude\n");
         assert!(s.prompt_open());
+    }
+
+    #[test]
+    fn detects_api_error_and_latches_until_reset() {
+        let mut s = PureSniffer::new();
+        assert!(!s.api_error());
+        s.feed("API Error: Connection closed mid-response");
+        assert!(s.api_error());
+        // A redraw keeps it flagged.
+        s.feed(" retrying…");
+        assert!(s.api_error());
+        // The user's next submit clears it.
+        s.reset();
+        assert!(!s.api_error());
+    }
+
+    #[test]
+    fn detects_parenthesized_api_error() {
+        let mut s = PureSniffer::new();
+        s.feed("API Error (Request timed out)");
+        assert!(s.api_error());
+    }
+
+    #[test]
+    fn api_error_ignores_prose_mention() {
+        let mut s = PureSniffer::new();
+        // Assistant prose talking about api errors, not the CLI's error line.
+        s.feed("you should handle any API error gracefully in your client");
+        assert!(!s.api_error());
     }
 
     #[test]

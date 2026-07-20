@@ -67,12 +67,17 @@ pub enum EnvMode {
 /// directly in a PTY (the "Claude Code puro" mode) — no stream-json, no
 /// per-turn events; the session aggregate only tracks lifecycle + metadata
 /// (cwd/worktree/title) and the PTY is spawned on demand by the UI.
+/// `Assistant` is **Oxy**: a `Structured` session (same stream-json + event
+/// pump) whose provider is mounted with the privileged cross-thread toolset,
+/// so it can enumerate and drive every other open thread. See
+/// `docs/design/oxy-assistant.md`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionKind {
     #[default]
     Structured,
     Pure,
+    Assistant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

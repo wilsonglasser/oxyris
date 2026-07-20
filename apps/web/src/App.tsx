@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ActionSidebar } from "~/components/ActionSidebar.tsx";
+import { OxyDock } from "~/components/OxyDock.tsx";
+import { OxyVoice } from "~/components/OxyVoice.tsx";
+import { useOxyStore } from "~/stores/oxyStore.ts";
+import { voiceEnable, voiceWakeReady } from "~/ipc/voice.ts";
 import { ChatPanel } from "~/components/ChatPanel.tsx";
 import { PureClaudePanel } from "~/components/PureClaudePanel.tsx";
 import { MultiViewPanel } from "~/components/MultiViewPanel.tsx";
@@ -30,7 +34,7 @@ import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useDragResize } from "~/lib/useDragResize.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
-import { sessionStart } from "~/ipc/session.ts";
+import { sessionStart, type SessionKind } from "~/ipc/session.ts";
 import { useIndexingStore } from "~/stores/indexingStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { useLspStatusStore } from "~/stores/lspStatusStore.ts";
@@ -100,6 +104,8 @@ export function App() {
     });
   }, [activeSessionId]);
   const pureMode = useAppSettingsStore((s) => s.pureMode);
+  const toggleOxy = useOxyStore((s) => s.toggle);
+  const oxyOpen = useOxyStore((s) => s.open);
   const multiSidebarHidden = useMultiViewStore((s) => s.sidebarHidden);
   const terminalResize = useDragResize({
     storageKey: "oxyris.terminal.height",
@@ -118,6 +124,26 @@ export function App() {
     window.addEventListener("focus", onFocus);
     if (document.hasFocus()) clearBadge();
     return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Re-arm the wake word on boot if the user left it enabled and the model is
+  // installed. The backend listener doesn't survive a restart.
+  useEffect(() => {
+    const s = useOxyStore.getState();
+    if (!s.wakeEnabled) return;
+    void (async () => {
+      try {
+        if (await voiceWakeReady()) {
+          await voiceEnable({
+            keywords: s.keyword,
+            threshold: s.threshold,
+            device: s.device || null,
+          });
+        }
+      } catch {
+        /* leave it disarmed; Settings surfaces the error on next toggle */
+      }
+    })();
   }, []);
 
   // NB: pure-mode dot state (busy / needs-input / done) for the active thread —
@@ -322,7 +348,10 @@ export function App() {
   // worktree env) and select it. The sidebar is
   // visible from Files/Git too, so jump to the chat tab as well. On failure
   // we fall back to the empty composer so the user can still start manually.
-  const startNewSession = (project?: ProjectRow | null) => {
+  const startNewSession = (
+    project?: ProjectRow | null,
+    kindOverride?: SessionKind,
+  ) => {
     const p = project ?? active;
     setTab("chat");
     if (!p) {
@@ -344,7 +373,9 @@ export function App() {
           // renders the claude PTY, so the session must be stored as `pure` —
           // otherwise Multi View (which reads `session.kind`) embeds the
           // structured ChatPanel for a session that has no event-sourced turns.
-          kind: pureMode ? "pure" : "structured",
+          // Oxy is a Structured-shaped session with the cross-thread toolset;
+          // an explicit override wins over the pure/structured display toggle.
+          kind: kindOverride ?? (pureMode ? "pure" : "structured"),
           system_prompt: claudeLanguageDirective(
             useAppSettingsStore.getState().claudeLanguage,
           ),
@@ -363,6 +394,18 @@ export function App() {
 
   const titleBarActions = (
     <div className="flex items-center gap-1 pr-2">
+      <button
+        type="button"
+        onClick={toggleOxy}
+        title={t("oxy.launch_hint")}
+        className={`rounded-md px-2 py-0.5 text-[11px] transition ${
+          oxyOpen
+            ? "bg-emerald-900/50 text-emerald-300"
+            : "text-emerald-400 hover:bg-emerald-950/40 hover:text-emerald-300"
+        }`}
+      >
+        {t("oxy.launch")}
+      </button>
       {(["chat", "multi", "files", "git", "settings"] as const).map((id) => (
         <button
           key={id}
@@ -506,6 +549,10 @@ export function App() {
             onOpenTerminal={openTerminal}
           />
         )}
+        {/* Oxy — the app-global assistant dock, present on every tab. */}
+        <OxyDock project={active} />
+        {/* Headless: wake-word → voice-command capture → drive Oxy. */}
+        <OxyVoice project={active} />
       </div>
 
       <Modal

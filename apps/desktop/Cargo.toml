@@ -75,6 +75,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 getrandom = "0.2"
+# Oxy voice (F2/F3): sherpa-onnx (k2-fsa) — one offline lib for wake-word KWS
+# (open-vocabulary: "Oxy" specified as text, no training), STT, and TTS (Kokoro
+# pf_dora pt-BR). Replaces the abandoned rustpotter. cpal feeds the mic stream.
+sherpa-onnx = "1.13"
+cpal = "0.15"
+# Oxy TTS (F3) playback of sherpa-generated audio.
+rodio = { version = "0.19", default-features = false }
+# KWS/STT/TTS model download: sherpa-onnx release archives are `.tar.bz2`.
+tar = "0.4"
+bzip2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3.16"

@@ -182,6 +182,8 @@ pub async fn claude_pty_spawn(
             Some(&session),
             autopilot_port,
             browser_port,
+            // Pure sessions aren't Oxy — no cross-thread tools.
+            None,
         ) {
             Ok(Some(setup)) => (Some(setup.config_path), Some(setup.system_prompt_nudge)),
             _ => (None, None),

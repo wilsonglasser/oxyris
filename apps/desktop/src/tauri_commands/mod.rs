@@ -20,6 +20,7 @@ pub mod session;
 pub mod settings;
 pub mod terminal;
 pub mod validate;
+pub mod voice;
 pub mod worktree;
 
 /// Sprint 1 sanity check — proves the React → Rust roundtrip works.

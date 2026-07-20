@@ -11,6 +11,16 @@
     "git": "Git",
     "settings": "Configurações"
   },
+  "oxy": {
+    "launch": "Oxy",
+    "launch_hint": "Mostra/esconde o Oxy — assistente que enxerga e dirige todas as threads abertas",
+    "title": "Oxy",
+    "close": "Esconder Oxy",
+    "new_session": "Nova conversa",
+    "listening_hint": "Ouvindo… fale o comando, ou diga \"câmbio\" pra enviar.",
+    "no_project": "Abra um projeto primeiro — o Oxy precisa de onde rodar.",
+    "starting": "Iniciando Oxy…"
+  },
   "project_switcher": {
     "label": "Trocar projeto",
     "new_chat": "Novo chat"

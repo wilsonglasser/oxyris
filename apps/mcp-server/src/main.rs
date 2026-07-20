@@ -91,6 +91,9 @@ async fn main() -> std::io::Result<()> {
     };
     // Browser tools need only the bridge address (shared, not session-scoped).
     let browser: Option<String> = cli.browser_bridge;
+    // Oxy cross-thread tools need only the bridge address — the target thread is
+    // a tool argument (`thread_id`), not baked, since Oxy drives every thread.
+    let oxy: Option<String> = cli.oxy_bridge;
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
@@ -110,6 +113,7 @@ async fn main() -> std::io::Result<()> {
             laravel_advertised,
             autopilot.as_ref(),
             browser.as_deref(),
+            oxy.as_deref(),
         )
         .await;
         if let Some(resp) = response {
@@ -135,6 +139,9 @@ struct Cli {
     /// Desktop browser control bridge (`tcp://host:port`). When present the
     /// `browser_*` tools are advertised and forward to it.
     browser_bridge: Option<String>,
+    /// Desktop Oxy cross-thread control bridge (`tcp://host:port`). When present
+    /// the `oxyris_thread_*` tools are advertised (Assistant/Oxy sessions only).
+    oxy_bridge: Option<String>,
 }
 
 fn parse_cli() -> Result<Cli, String> {
@@ -144,6 +151,7 @@ fn parse_cli() -> Result<Cli, String> {
     let mut autopilot_bridge: Option<String> = None;
     let mut session_id: Option<String> = None;
     let mut browser_bridge: Option<String> = None;
+    let mut oxy_bridge: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -153,6 +161,7 @@ fn parse_cli() -> Result<Cli, String> {
             "--autopilot-bridge" => autopilot_bridge = args.next(),
             "--session-id" => session_id = args.next(),
             "--browser-bridge" => browser_bridge = args.next(),
+            "--oxy-bridge" => oxy_bridge = args.next(),
             "--help" | "-h" => {
                 println!(
                     "oxyris-mcp — MCP server exposing the Oxyris symbol index + LSP bridge\n\nUsage:\n  oxyris-mcp --index-db <path> [--workspace <dir>] [--lsp-bridge tcp://host:port] [--autopilot-bridge tcp://host:port --session-id <id>]"
@@ -170,6 +179,7 @@ fn parse_cli() -> Result<Cli, String> {
         autopilot_bridge,
         session_id,
         browser_bridge,
+        oxy_bridge,
     })
 }
 
@@ -196,6 +206,7 @@ async fn handle_message(
     laravel_advertised: bool,
     autopilot: Option<&(String, String)>,
     browser: Option<&str>,
+    oxy: Option<&str>,
 ) -> Option<Value> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -223,6 +234,7 @@ async fn handle_message(
             laravel_advertised,
             autopilot.is_some(),
             browser.is_some(),
+            oxy.is_some(),
         )),
         "tools/call" => {
             handle_tool_call(
@@ -233,6 +245,7 @@ async fn handle_message(
                 laravel_workspace,
                 autopilot,
                 browser,
+                oxy,
             )
             .await
         }
@@ -275,6 +288,7 @@ fn tools_list_response(
     has_laravel: bool,
     has_autopilot: bool,
     has_browser: bool,
+    has_oxy: bool,
 ) -> Value {
     let mut tools = vec![
         json!({
@@ -457,6 +471,39 @@ fn tools_list_response(
         ]);
     }
 
+    if has_oxy {
+        tools.extend([
+            json!({
+                "name": "oxyris_threads_list",
+                "description": "List every currently OPEN (running) thread across all projects/worktrees so you can pick one to inspect or drive. Returns each thread's id, title, status and turn count. Use this first to discover thread ids for the other oxyris_thread_* tools.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "oxyris_thread_read",
+                "description": "Read the current state of one thread by id: its title, status, and the full turn history (user text + assistant blocks). Use to catch up on what a thread is doing before answering about it or sending into it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": { "type": "string", "description": "Thread id from oxyris_threads_list." }
+                    },
+                    "required": ["thread_id"]
+                }
+            }),
+            json!({
+                "name": "oxyris_thread_send",
+                "description": "Send a user message into another open thread — starts a new turn there exactly as if the human had typed it. Use to drive/steer any thread on the user's behalf. Only works on running structured/assistant threads. Returns the started turn id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": { "type": "string", "description": "Target thread id from oxyris_threads_list." },
+                        "text": { "type": "string", "description": "The message to send into that thread." }
+                    },
+                    "required": ["thread_id", "text"]
+                }
+            }),
+        ]);
+    }
+
     if has_browser {
         tools.extend([
             json!({
@@ -535,6 +582,7 @@ async fn handle_tool_call(
     laravel_workspace: Option<&Path>,
     autopilot: Option<&(String, String)>,
     browser: Option<&str>,
+    oxy: Option<&str>,
 ) -> Result<Value, (i64, String)> {
     let params = params.ok_or((-32602, "missing params".to_string()))?;
     let name = params
@@ -557,6 +605,19 @@ async fn handle_tool_call(
         let text = call_autopilot(name, addr, session_id, &args)
             .await
             .map_err(|e| (-32603, e))?;
+        return Ok(json!({ "content": [ { "type": "text", "text": text } ] }));
+    }
+
+    // Oxy cross-thread tools forward to the desktop control bridge over TCP.
+    // The target thread is a tool argument (`thread_id`), since Oxy drives
+    // every open thread — not just its own session.
+    if name == "oxyris_threads_list" || name == "oxyris_thread_read" || name == "oxyris_thread_send"
+    {
+        let addr = oxy.ok_or((
+            -32601,
+            "Oxy cross-thread tools not enabled (Assistant/Oxy sessions only)".to_string(),
+        ))?;
+        let text = call_oxy(name, addr, &args).await.map_err(|e| (-32603, e))?;
         return Ok(json!({ "content": [ { "type": "text", "text": text } ] }));
     }
 
@@ -659,6 +720,36 @@ async fn call_autopilot(
     })
 }
 
+/// Forward an Oxy cross-thread tool to the desktop control bridge. Unlike the
+/// autopilot bridge, the target thread is a tool argument (`thread_id`) — Oxy
+/// drives every open thread, not just its own session. Returns the bridge's
+/// JSON result pretty-printed so the model can read it directly.
+async fn call_oxy(tool: &str, addr: &str, args: &Value) -> Result<String, String> {
+    let thread_id = || {
+        args.get("thread_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| "missing 'thread_id'".to_string())
+    };
+    let (method, params) = match tool {
+        "oxyris_threads_list" => ("threads.list", json!({})),
+        "oxyris_thread_read" => ("thread.read", json!({ "thread_id": thread_id()? })),
+        "oxyris_thread_send" => {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing 'text'".to_string())?;
+            (
+                "thread.send",
+                json!({ "thread_id": thread_id()?, "text": text }),
+            )
+        }
+        other => return Err(format!("unknown oxy tool: {other}")),
+    };
+    let result = bridge_rpc(addr, method, params).await?;
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
 /// Forward a `browser_*` tool to the browser bridge and shape the MCP content.
 /// `browser_screenshot` returns an image block; the rest return text.
 async fn call_browser(tool: &str, addr: &str, args: &Value) -> Result<Value, (i64, String)> {
@@ -750,7 +841,7 @@ mod tests {
 
     async fn req(line: &str) -> Option<Value> {
         let laravel = Arc::new(LaravelState::new());
-        handle_message(line, None, None, &laravel, None, false, None, None).await
+        handle_message(line, None, None, &laravel, None, false, None, None, None).await
     }
 
     #[tokio::test]

@@ -62,6 +62,9 @@ export type PureState = {
   needs_input: boolean;
   /** A turn is in flight with no prompt waiting — the blue "busy" dot. */
   busy: boolean;
+  /** An "API Error" line appeared this turn — the red "errored" dot + a warning
+   * banner. Latched until the user's next submit. */
+  errored: boolean;
 };
 
 /**

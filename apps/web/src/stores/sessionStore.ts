@@ -22,6 +22,13 @@ interface SessionStoreState {
    */
   needsInput: Record<string, boolean>;
   /**
+   * Pure (claude TUI) threads whose turn hit an "API Error" — surfaced as the
+   * red bull (same colour as {@link needsInput}) plus a warning banner in the
+   * panel. Latched by the backend sniffer until the user's next submit; cleared
+   * here when a fresh (non-errored) snapshot lands.
+   */
+  errored: Record<string, boolean>;
+  /**
    * Wall-clock ms of the last live PTY output seen for a thread. Pure (claude
    * TUI) sessions emit no Turn events, so their projected `last_activity_at`
    * never advances on a turn — the bull would read stale-gray right after a
@@ -34,6 +41,8 @@ interface SessionStoreState {
   markAttention: (id: string) => void;
   /** Set/clear the "Claude wants your input" (red) flag for a thread. */
   setNeedsInput: (id: string, on: boolean) => void;
+  /** Set/clear the "API error" (red + warning banner) flag for a pure thread. */
+  setErrored: (id: string, on: boolean) => void;
   /** Stamp a thread as active *now* (live PTY output). Throttled by callers. */
   touchActivity: (id: string) => void;
   hydrate: (snapshot: SessionSnapshot) => void;
@@ -47,6 +56,7 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   activeSessionId: null,
   attention: {},
   needsInput: {},
+  errored: {},
   liveActivity: {},
 
   setActive: (id) =>
@@ -76,6 +86,14 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
       return { needsInput: rest };
     }),
 
+  setErrored: (id, on) =>
+    set((state) => {
+      if (!!state.errored[id] === on) return {};
+      if (on) return { errored: { ...state.errored, [id]: true } };
+      const { [id]: _drop, ...rest } = state.errored;
+      return { errored: rest };
+    }),
+
   touchActivity: (id) =>
     set((state) => {
       // Coarse: 30s granularity is plenty against a 1h recency window, and
@@ -102,11 +120,13 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
       const { [id]: _removed, ...rest } = state.snapshots;
       const { [id]: _seen, ...attRest } = state.attention;
       const { [id]: _input, ...inputRest } = state.needsInput;
+      const { [id]: _err, ...erroredRest } = state.errored;
       const { [id]: _live, ...liveRest } = state.liveActivity;
       return {
         snapshots: rest,
         attention: attRest,
         needsInput: inputRest,
+        errored: erroredRest,
         liveActivity: liveRest,
         activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
       };

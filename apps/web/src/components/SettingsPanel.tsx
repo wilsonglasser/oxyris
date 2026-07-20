@@ -28,6 +28,18 @@ import {
 import type { SupervisorKind } from "~/ipc/autopilot.ts";
 import type { RuntimeMode } from "~/ipc/session.ts";
 import {
+  onOxyWake,
+  voiceDisable,
+  voiceDownloadKws,
+  voiceDownloadTts,
+  voiceEnable,
+  voiceListDevices,
+  voiceSpeak,
+  voiceTtsReady,
+  voiceWakeReady,
+} from "~/ipc/voice.ts";
+import { useOxyStore } from "~/stores/oxyStore.ts";
+import {
   CLAUDE_LANGUAGES,
   type ClaudeLanguage,
 } from "~/lib/claudeLanguage.ts";
@@ -58,7 +70,7 @@ async function settingsProviderDiscover(): Promise<DiscoveredInstall[]> {
   return invoke<DiscoveredInstall[]>("settings_provider_discover");
 }
 
-type Tab = "general" | "languages" | "advanced";
+type Tab = "general" | "voice" | "languages" | "advanced";
 
 export function SettingsPanel() {
   const { t } = useTranslation("settings");
@@ -72,7 +84,7 @@ export function SettingsPanel() {
           {t("heading")}
         </h2>
         <div className="flex gap-1">
-          {(["general", "languages", "advanced"] as const).map((k) => (
+          {(["general", "voice", "languages", "advanced"] as const).map((k) => (
             <button
               key={k}
               type="button"
@@ -91,6 +103,7 @@ export function SettingsPanel() {
 
       <div className="px-5 py-5">
         {tab === "general" && <GeneralTab />}
+        {tab === "voice" && <VoiceTab />}
         {tab === "languages" && <LanguagePacksPanel />}
         {tab === "advanced" && <AdvancedTab />}
       </div>
@@ -686,6 +699,293 @@ function ChannelPicker({
           </option>
         ))}
       </select>
+    </div>
+  );
+}
+
+function VoiceTab() {
+  const { t } = useTranslation("settings");
+  const keyword = useOxyStore((s) => s.keyword);
+  const setKeyword = useOxyStore((s) => s.setKeyword);
+  const threshold = useOxyStore((s) => s.threshold);
+  const setThreshold = useOxyStore((s) => s.setThreshold);
+  const device = useOxyStore((s) => s.device);
+  const setDevice = useOxyStore((s) => s.setDevice);
+  const enabled = useOxyStore((s) => s.wakeEnabled);
+  const setWakeEnabled = useOxyStore((s) => s.setWakeEnabled);
+  const ttsEnabled = useOxyStore((s) => s.ttsEnabled);
+  const setTtsEnabled = useOxyStore((s) => s.setTtsEnabled);
+  const voiceSid = useOxyStore((s) => s.voiceSid);
+  const setVoiceSid = useOxyStore((s) => s.setVoiceSid);
+  const voiceLang = useOxyStore((s) => s.voiceLang);
+  const setVoiceLang = useOxyStore((s) => s.setVoiceLang);
+  const [ready, setReady] = useState(false);
+  const [ttsReady, setTtsReady] = useState(false);
+  const [ttsDownloading, setTtsDownloading] = useState(false);
+  const [devices, setDevices] = useState<string[]>([]);
+  const [downloading, setDownloading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastWake, setLastWake] = useState<number | null>(null);
+
+  useEffect(() => {
+    void voiceWakeReady().then(setReady).catch(() => {});
+    void voiceTtsReady().then(setTtsReady).catch(() => {});
+    void voiceListDevices().then(setDevices).catch(() => {});
+    let un: (() => void) | undefined;
+    void onOxyWake(() => setLastWake(Date.now())).then((u) => {
+      un = u;
+    });
+    return () => un?.();
+  }, []);
+
+  const download = useCallback(async () => {
+    setDownloading(true);
+    setError(null);
+    try {
+      await voiceDownloadKws();
+      setReady(await voiceWakeReady());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDownloading(false);
+    }
+  }, []);
+
+  const downloadTts = useCallback(async () => {
+    setTtsDownloading(true);
+    setError(null);
+    try {
+      await voiceDownloadTts();
+      setTtsReady(await voiceTtsReady());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setTtsDownloading(false);
+    }
+  }, []);
+
+  const testVoice = useCallback(() => {
+    const s = useOxyStore.getState();
+    void voiceSpeak({
+      text: "Oi, eu sou o Oxy. Câmbio.",
+      sid: s.voiceSid,
+      lang: s.voiceLang,
+    }).catch((e) => setError(String(e)));
+  }, []);
+
+  const toggle = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (enabled) {
+        await voiceDisable();
+        setWakeEnabled(false);
+      } else {
+        await voiceEnable({
+          keywords: keyword,
+          threshold,
+          device: device || null,
+        });
+        setWakeEnabled(true);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [enabled, keyword, threshold, device, setWakeEnabled]);
+
+  const wokeRecently = lastWake != null && Date.now() - lastWake < 4000;
+
+  return (
+    <div className="flex flex-col gap-5 text-sm">
+      <div>
+        <h3 className="mb-1 font-medium text-neutral-200">{t("voice.heading")}</h3>
+        <p className="text-[12px] text-neutral-500">{t("voice.blurb")}</p>
+      </div>
+
+      {/* Model */}
+      <div className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900/40 px-3 py-2.5">
+        <div>
+          <div className="text-neutral-200">{t("voice.model")}</div>
+          <div className="text-[12px] text-neutral-500">
+            {ready ? t("voice.model_ready") : t("voice.model_missing")}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void download()}
+          disabled={downloading}
+          className="rounded-md bg-emerald-700/80 px-3 py-1 text-[12px] text-white transition hover:bg-emerald-600 disabled:opacity-50"
+        >
+          {downloading
+            ? t("voice.downloading")
+            : ready
+              ? t("voice.redownload")
+              : t("voice.download")}
+        </button>
+      </div>
+
+      {/* Keyword */}
+      <label className="flex flex-col gap-1">
+        <span className="text-neutral-300">{t("voice.keyword")}</span>
+        <input
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          disabled={enabled}
+          className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-100 outline-none focus:border-emerald-700 disabled:opacity-60"
+        />
+        <span className="text-[11px] text-neutral-600">{t("voice.keyword_hint")}</span>
+      </label>
+
+      {/* Sensitivity */}
+      <label className="flex flex-col gap-1">
+        <span className="text-neutral-300">
+          {t("voice.sensitivity")} — {threshold.toFixed(2)}
+        </span>
+        <input
+          type="range"
+          min={0.05}
+          max={0.6}
+          step={0.05}
+          value={threshold}
+          onChange={(e) => setThreshold(Number(e.target.value))}
+          disabled={enabled}
+          className="accent-emerald-600"
+        />
+        <span className="text-[11px] text-neutral-600">{t("voice.sensitivity_hint")}</span>
+      </label>
+
+      {/* Mic */}
+      <label className="flex flex-col gap-1">
+        <span className="text-neutral-300">{t("voice.mic")}</span>
+        <select
+          value={device}
+          onChange={(e) => setDevice(e.target.value)}
+          disabled={enabled}
+          className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-100 outline-none disabled:opacity-60"
+        >
+          <option value="">{t("voice.mic_default")}</option>
+          {devices.map((d) => (
+            <option key={d} value={d} className="bg-neutral-900">
+              {d}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {/* Arm toggle */}
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void toggle()}
+          disabled={!ready || busy}
+          className={`rounded-md px-3 py-1.5 text-[12px] transition disabled:opacity-50 ${
+            enabled
+              ? "bg-red-700/80 text-white hover:bg-red-600"
+              : "bg-emerald-700/80 text-white hover:bg-emerald-600"
+          }`}
+        >
+          {enabled ? t("voice.disable") : t("voice.enable")}
+        </button>
+        {enabled && (
+          <span
+            className={`flex items-center gap-1.5 text-[12px] transition ${
+              wokeRecently ? "text-emerald-400" : "text-neutral-500"
+            }`}
+          >
+            <span
+              className={`size-2 rounded-full ${
+                wokeRecently ? "bg-emerald-400" : "bg-neutral-600"
+              }`}
+            />
+            {wokeRecently ? t("voice.woke") : t("voice.listening")}
+          </span>
+        )}
+      </div>
+
+      {/* ── Text-to-speech (Oxy replies aloud) ──────────────────────────── */}
+      <div className="mt-2 border-t border-neutral-800 pt-4">
+        <h3 className="mb-1 font-medium text-neutral-200">{t("voice.tts_heading")}</h3>
+        <p className="mb-3 text-[12px] text-neutral-500">{t("voice.tts_blurb")}</p>
+
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900/40 px-3 py-2.5">
+          <div>
+            <div className="text-neutral-200">{t("voice.tts_model")}</div>
+            <div className="text-[12px] text-neutral-500">
+              {ttsReady ? t("voice.model_ready") : t("voice.tts_model_missing")}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void downloadTts()}
+            disabled={ttsDownloading}
+            className="rounded-md bg-emerald-700/80 px-3 py-1 text-[12px] text-white transition hover:bg-emerald-600 disabled:opacity-50"
+          >
+            {ttsDownloading
+              ? t("voice.downloading")
+              : ttsReady
+                ? t("voice.redownload")
+                : t("voice.download")}
+          </button>
+        </div>
+
+        <label className="mb-3 flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={ttsEnabled}
+            onChange={(e) => setTtsEnabled(e.target.checked)}
+            className="accent-emerald-600"
+          />
+          <span className="text-neutral-200">{t("voice.tts_toggle")}</span>
+        </label>
+
+        <label className="mb-3 flex flex-col gap-1">
+          <span className="text-neutral-300">{t("voice.lang")}</span>
+          <select
+            value={voiceLang}
+            onChange={(e) => setVoiceLang(e.target.value)}
+            className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-100 outline-none focus:border-emerald-700"
+          >
+            <option value="pt-br" className="bg-neutral-900">Português (Brasil)</option>
+            <option value="pt" className="bg-neutral-900">Português (Portugal)</option>
+            <option value="en-us" className="bg-neutral-900">English (US)</option>
+            <option value="en-gb" className="bg-neutral-900">English (UK)</option>
+            <option value="es" className="bg-neutral-900">Español</option>
+            <option value="fr-fr" className="bg-neutral-900">Français</option>
+            <option value="it" className="bg-neutral-900">Italiano</option>
+          </select>
+        </label>
+
+        <div className="flex items-end gap-3">
+          <label className="flex flex-1 flex-col gap-1">
+            <span className="text-neutral-300">
+              {t("voice.voice_id")} — {voiceSid}
+            </span>
+            <input
+              type="number"
+              min={0}
+              value={voiceSid}
+              onChange={(e) => setVoiceSid(Number(e.target.value) || 0)}
+              className="rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-100 outline-none focus:border-emerald-700"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={testVoice}
+            disabled={!ttsReady}
+            className="rounded-md border border-neutral-700 px-3 py-1.5 text-[12px] text-neutral-200 transition hover:bg-neutral-800 disabled:opacity-40"
+          >
+            {t("voice.test")}
+          </button>
+        </div>
+        <span className="mt-1 block text-[11px] text-neutral-600">
+          {t("voice.voice_id_hint")}
+        </span>
+      </div>
+
+      {error && <div className="text-[12px] text-red-400">{error}</div>}
     </div>
   );
 }

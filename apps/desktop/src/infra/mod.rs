@@ -23,6 +23,8 @@ pub mod lsp_bridge;
 pub mod mcp;
 pub mod mobile;
 pub mod observability;
+pub mod oxy_bridge;
+pub mod voice;
 
 /// Pick which distro a workspace path belongs to.
 ///

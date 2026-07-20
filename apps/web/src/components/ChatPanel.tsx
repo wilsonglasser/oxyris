@@ -66,6 +66,7 @@ import { EmptyChatState } from "~/components/EmptyChatState.tsx";
 import { IndexingChip } from "~/components/IndexingChip.tsx";
 import { LspChip } from "~/components/LspChip.tsx";
 import { useSessionStore } from "~/stores/sessionStore.ts";
+import { useOxyStore } from "~/stores/oxyStore.ts";
 import {
   type SpeechRecognitionHook,
   stripVoiceSubmitCommand,
@@ -104,6 +105,13 @@ interface ChatPanelProps {
    * never create new sessions, so the `setActive` paths stay dormant.
    */
   sessionId?: string;
+  /**
+   * Embedded mode (the Oxy dock): hides the model/runtime/thinking/env pickers
+   * and pins the panel to its `sessionId` — submitting never spawns a new
+   * session (resumes the pinned one if stopped) and never hijacks the global
+   * active session.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -121,6 +129,7 @@ export function ChatPanel({
   onToggleTerminal,
   terminalOpen = false,
   sessionId,
+  embedded = false,
 }: ChatPanelProps) {
   const { t } = useTranslation("chat");
   const snapshots = useSessionStore((s) => s.snapshots);
@@ -533,6 +542,21 @@ export function ChatPanel({
         ]);
         return;
       }
+      // Embedded (Oxy dock): pinned to one session. Never spawn a new session
+      // and never hijack the global active one — resume if stopped, then send.
+      if (embedded) {
+        const target = sessionId ?? activeId;
+        if (!target) return;
+        if (!isRunning) {
+          try {
+            await sessionResume({ session_id: target });
+          } catch {
+            /* resume best-effort; send below surfaces a real failure */
+          }
+        }
+        await sessionSendMessage({ session_id: target, text });
+        return;
+      }
       // If a session is already running but idle, just send.
       if (activeId && isRunning) {
         await sessionSendMessage({ session_id: activeId, text });
@@ -589,6 +613,8 @@ export function ChatPanel({
       worktreeId,
       worktrees,
       setActive,
+      embedded,
+      sessionId,
     ],
   );
 
@@ -792,6 +818,7 @@ export function ChatPanel({
           setQueue((q) => q.filter((m) => m.id !== id))
         }
         bottomBar={
+          embedded ? null : (
           <BottomBar
             model={model}
             onModel={setModel}
@@ -809,6 +836,7 @@ export function ChatPanel({
             onEnvDown={() => void onEnvDown()}
             onRegenerateDotenv={() => void onRegenerateDotenv()}
           />
+          )
         }
       />
     </section>
@@ -994,6 +1022,8 @@ function ApprovalBar({
 
 function TurnView({ turn, sessionId }: { turn: TurnEntry; sessionId: string }) {
   const { t } = useTranslation("chat");
+  const oxyId = useOxyStore((s) => s.sessionId);
+  const isOxy = !!oxyId && sessionId === oxyId;
   const parsed = useMemo(() => parseUserMessage(turn.user_text), [turn.user_text]);
   return (
     <div className="flex flex-col gap-2">
@@ -1028,7 +1058,7 @@ function TurnView({ turn, sessionId }: { turn: TurnEntry; sessionId: string }) {
       {turn.status === "streaming" && (
         <div className="flex items-center gap-2 text-[11px] text-neutral-500">
           <span className="inline-block size-1.5 animate-pulse rounded-full bg-emerald-400" />
-          {t("turn_streaming_label")}
+          {isOxy ? t("turn_streaming_label_oxy") : t("turn_streaming_label")}
         </div>
       )}
       {turn.status === "interrupted" && (

@@ -69,6 +69,10 @@ pub struct SessionSupervisor {
     /// per-worktree `mcp.json` includes `--lsp-bridge` when the bridge is
     /// up. `None` until the bridge has bound.
     lsp_bridge_port: Arc<std::sync::Mutex<Option<u16>>>,
+    /// Shared with `AppState`. Read at spawn time so an `Assistant` (Oxy)
+    /// session's `mcp.json` includes `--oxy-bridge`, wiring the cross-thread
+    /// tools. `None` until the bridge has bound.
+    oxy_bridge_port: Arc<std::sync::Mutex<Option<u16>>>,
 }
 
 impl SessionSupervisor {
@@ -79,6 +83,7 @@ impl SessionSupervisor {
         agent_pool: Arc<AgentPool>,
         app: AppHandle,
         lsp_bridge_port: Arc<std::sync::Mutex<Option<u16>>>,
+        oxy_bridge_port: Arc<std::sync::Mutex<Option<u16>>>,
     ) -> Self {
         Self {
             registry,
@@ -88,7 +93,30 @@ impl SessionSupervisor {
             app,
             live: Mutex::new(HashMap::new()),
             lsp_bridge_port,
+            oxy_bridge_port,
         }
+    }
+
+    /// Port of the Oxy cross-thread control bridge, once bound.
+    pub fn oxy_bridge_port(&self) -> Option<u16> {
+        self.oxy_bridge_port.lock().ok().and_then(|g| *g)
+    }
+
+    /// Oxy: every currently-open (running) thread across all projects. Backs the
+    /// `oxyris_threads_list` MCP tool via the cross-thread bridge.
+    pub fn list_open_threads(
+        &self,
+    ) -> Result<Vec<crate::infra::projections::SessionSummaryRow>, SupervisorError> {
+        Ok(self.projections.list_running_sessions()?)
+    }
+
+    /// Oxy: full snapshot (title, status, turn history) of one thread. Backs the
+    /// `oxyris_thread_read` MCP tool.
+    pub fn read_thread(
+        &self,
+        id: AggregateId,
+    ) -> Result<Option<crate::infra::projections::SessionSnapshot>, SupervisorError> {
+        Ok(self.projections.get_session(id)?)
     }
 
     pub fn lsp_bridge_port(&self) -> Option<u16> {
@@ -109,11 +137,11 @@ impl SessionSupervisor {
     ) -> Result<AggregateId, SupervisorError> {
         use crate::domain::session::SessionKind;
 
-        // Structured sessions need a registered provider up front; Pure
-        // sessions run the interactive TUI in a PTY (spawned later by the UI)
-        // so they don't touch the stream-json provider registry at all.
+        // Structured (and Assistant/Oxy) sessions need a registered provider up
+        // front; Pure sessions run the interactive TUI in a PTY (spawned later
+        // by the UI) so they don't touch the stream-json provider registry.
         let provider = match kind {
-            SessionKind::Structured => Some(
+            SessionKind::Structured | SessionKind::Assistant => Some(
                 self.registry
                     .get(&provider_id)
                     .ok_or_else(|| SupervisorError::UnknownProvider(provider_id.clone()))?,
@@ -142,7 +170,13 @@ impl SessionSupervisor {
         // the sidebar with its cwd/title), but the conversation happens in the
         // PTY, not over stream-json. No provider, no event pump.
         if let Some(provider) = provider {
-            let opts = augment_with_mcp(opts, self.lsp_bridge_port());
+            let opts = augment_with_mcp(
+                opts,
+                self.lsp_bridge_port(),
+                session_id,
+                kind,
+                self.oxy_bridge_port(),
+            );
             let provider_session = provider.start_session(opts)?;
             self.spawn_event_pump(session_id, provider_session).await;
         }
@@ -385,7 +419,13 @@ impl SessionSupervisor {
             resume_session_id: Some(resume_id),
             mcp_config_path: None,
         };
-        let opts = augment_with_mcp(opts, self.lsp_bridge_port());
+        let opts = augment_with_mcp(
+            opts,
+            self.lsp_bridge_port(),
+            session_id,
+            data.kind,
+            self.oxy_bridge_port(),
+        );
         let provider_session = provider.start_session(opts)?;
         self.spawn_event_pump(session_id, provider_session).await;
         Ok(())
@@ -490,17 +530,30 @@ fn derive_auto_title(text: &str) -> Option<String> {
 /// `opts`: sets `mcp_config_path` and appends the system-prompt nudge so
 /// Claude knows the tools exist. WSL projects and missing-binary cases skip
 /// silently — the provider runs without MCP, which is the same as before.
-fn augment_with_mcp(mut opts: SessionOptions, lsp_bridge_port: Option<u16>) -> SessionOptions {
-    // Structured-provider sessions don't run the autopilot (no pure claude PTY
-    // to drive) and don't get the browser tools yet (wired into pure mode
-    // first) — `None` for the session id and both bridge ports.
+fn augment_with_mcp(
+    mut opts: SessionOptions,
+    lsp_bridge_port: Option<u16>,
+    session_id: AggregateId,
+    kind: crate::domain::session::SessionKind,
+    oxy_bridge_port: Option<u16>,
+) -> SessionOptions {
+    use crate::domain::session::SessionKind;
+    // Assistant (Oxy) sessions get a per-session config carrying `--session-id`
+    // + `--oxy-bridge` so the cross-thread tools light up. Plain Structured
+    // sessions keep the shared, tool-less config (no autopilot/browser here —
+    // those are wired into pure mode first).
+    let (session, oxy_port) = match kind {
+        SessionKind::Assistant => (Some(session_id.to_string()), oxy_bridge_port),
+        _ => (None, None),
+    };
     let setup = match mcp::prepare_for_worktree(
         &opts.environment,
         &opts.cwd,
         lsp_bridge_port,
+        session.as_deref(),
         None,
         None,
-        None,
+        oxy_port,
     ) {
         Ok(Some(s)) => s,
         Ok(None) => return opts,

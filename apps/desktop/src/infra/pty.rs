@@ -168,8 +168,11 @@ const IDLE_DONE_MS: u64 = 2500;
 /// How long after the last "turn is running" frame the dot stays busy even if the
 /// current frame's last line is content rather than the spinner/interrupt footer.
 /// Absorbs the per-frame `is_busy_now` flicker without noticeably delaying the
-/// real settle (the silence clock, [`IDLE_DONE_MS`], still bounds it).
-const BUSY_HYSTERESIS_MS: u64 = 1200;
+/// real settle (the silence clock, [`IDLE_DONE_MS`], still bounds it). Held wider
+/// than the output-silence window so a bursty turn whose footer repaints slowly
+/// (long content bursts between spinner frames) can't flap the dot blue↔settled
+/// mid-work; the real turn-end still lands via the silence clock (`fresh` gate).
+const BUSY_HYSTERESIS_MS: u64 = 3000;
 
 /// Heartbeat (ms) at which the pure-state snapshot is re-evaluated and re-emitted
 /// if it changed. Self-heals a snapshot the frontend missed (session switch,
@@ -240,6 +243,9 @@ pub struct PureState {
     pub needs_input: bool,
     /// A turn is in flight with no prompt waiting — the blue "busy" dot.
     pub busy: bool,
+    /// An "API Error" line appeared this turn — the red "errored" dot + a warning
+    /// banner. Latched until the user's next submit (sniffer `reset`).
+    pub errored: bool,
 }
 
 /// Compute the pure-turn dot snapshot from the live sniffer + output clock.
@@ -249,13 +255,19 @@ pub struct PureState {
 /// turn whose last painted frame still looks like a spinner.
 fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     let needs_input = sniffer.prompt_open();
+    let errored = sniffer.api_error();
     let fresh = idle.last_output.elapsed() < Duration::from_millis(IDLE_DONE_MS);
     // Hysteresis: a turn counts as running if the current frame shows it OR one
     // did within BUSY_HYSTERESIS_MS — so content-last-line frames mid-turn don't
     // momentarily read "settled" and flap the dot.
     let busy_recent = idle.last_busy.elapsed() < Duration::from_millis(BUSY_HYSTERESIS_MS);
-    let busy = !needs_input && fresh && (sniffer.is_busy_now() || busy_recent);
-    PureState { needs_input, busy }
+    // A failed turn (errored) is never "busy" — red outranks blue.
+    let busy = !needs_input && !errored && fresh && (sniffer.is_busy_now() || busy_recent);
+    PureState {
+        needs_input,
+        busy,
+        errored,
+    }
 }
 
 /// What to launch inside a freshly-opened PTY.

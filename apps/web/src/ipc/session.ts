@@ -7,8 +7,11 @@ import type { Environment } from "~/ipc/commands.ts";
 export type RuntimeMode = "supervised" | "accept_edits" | "full_access" | "plan";
 export type ThinkingMode = "auto" | "off" | "on";
 export type EnvMode = "default" | "worktree";
-/** Structured = event-sourced chat; Pure = interactive claude TUI in a PTY. */
-export type SessionKind = "structured" | "pure";
+/**
+ * Structured = event-sourced chat; Pure = interactive claude TUI in a PTY;
+ * Assistant = Oxy, a Structured session with the privileged cross-thread toolset.
+ */
+export type SessionKind = "structured" | "pure" | "assistant";
 
 export type AssistantBlock =
   | { kind: "text"; text: string }
