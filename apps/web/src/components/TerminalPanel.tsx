@@ -356,10 +356,17 @@ export function TerminalView({
     // (visible flicker on the blue "thinking" text). WebGL repaints atomically,
     // killing the flicker. Guarded: if WebGL is unavailable (or the GL context
     // is later lost) we dispose the addon and fall back to the DOM renderer.
+    // Held so the font-load refit can rebuild the glyph atlas (see below).
+    // Null when WebGL is unavailable or its context was lost.
+    let webgl: WebglAddon | null = null;
     try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
+      const gl = new WebglAddon();
+      gl.onContextLoss(() => {
+        gl.dispose();
+        webgl = null;
+      });
+      term.loadAddon(gl);
+      webgl = gl;
     } catch {
       /* no WebGL — DOM renderer stays in place */
     }
@@ -594,18 +601,39 @@ export function TerminalView({
     let unlistenExit: (() => void) | null = null;
     let cancelled = false;
 
-    // The single 30ms fit can measure the char cell before the webfont
-    // ("JetBrains Mono") has finished loading — FitAddon then computes wrong
-    // cols/rows from stale metrics, the claude TUI paints to that wrong size,
-    // and only a manual window resize (which re-fits with the font now ready)
-    // corrects it. Re-fit once fonts settle, and again after two animation
-    // frames (layout finalised for panels that mount mid-transition), so the
-    // PTY lands on the right size on its own. `onResize` is guarded against
-    // no-op dims, so these extra fits only send a resize when they actually
-    // correct the size.
-    void document.fonts?.ready.then(() => {
-      if (!cancelled) safeFit();
-    });
+    // The terminal opens before the webfont ("JetBrains Mono") has loaded, so
+    // xterm measures the char cell against the fallback font and bakes that
+    // wrong cell width into the WebGL glyph atlas. A plain `fit()` on
+    // fonts.ready is NOT enough: FitAddon reads xterm's *cached* char metrics,
+    // so it neither re-measures the cell nor rebuilds the atlas — the glyphs
+    // stay painted at the fallback size and overlap ("garbled until resize").
+    // Reassigning a font option is the public trigger for a char re-measure;
+    // that plus clearing the atlas rebuilds glyphs at the correct cell size.
+    // Then fit (PTY lands on right cols/rows) and force a full repaint. Manual
+    // window resize used to be the only thing that did all this.
+    const refitForFont = () => {
+      if (cancelled) return;
+      const term2 = termRef.current;
+      if (!term2) return;
+      try {
+        // xterm dedupes option writes (`rawOptions[k] !== v`), so re-assigning
+        // the SAME family is a no-op. Toggle a trailing space instead — a
+        // different string (fires the char re-measure) that CSS font-family
+        // parsing treats identically, so nothing renders differently.
+        const fam = term2.options.fontFamily ?? "";
+        term2.options.fontFamily = fam.endsWith(" ") ? fam.trimEnd() : `${fam} `;
+        webgl?.clearTextureAtlas();
+      } catch {
+        /* noop */
+      }
+      safeFit();
+      try {
+        term2.refresh(0, term2.rows - 1);
+      } catch {
+        /* noop */
+      }
+    };
+    void document.fonts?.ready.then(refitForFont);
     let raf1 = 0;
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {

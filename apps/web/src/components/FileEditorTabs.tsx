@@ -3,6 +3,11 @@ import { useTranslation } from "react-i18next";
 import { ChevronLeft, ChevronRight, ExternalLink, Save, X } from "lucide-react";
 import { EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, lineNumbers, keymap } from "@codemirror/view";
+import {
+  highlightSelectionMatches,
+  search,
+  searchKeymap,
+} from "@codemirror/search";
 import { islandDark } from "~/lib/codemirror-theme.ts";
 import { languageForPath } from "~/lib/codemirror-language.ts";
 import { Eye, FileText } from "lucide-react";
@@ -315,6 +320,12 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
       lineNumbers(),
       ...islandDark,
       languageForPath(tab.relPath) ?? [],
+      // In-editor find/replace over the WHOLE document. Without this the
+      // WebView's native Ctrl+F takes over and only matches the visible
+      // (virtualized) viewport lines. searchKeymap binds Mod-f → open panel,
+      // Mod-Alt-f → replace, Enter/Shift-Enter → next/prev.
+      search({ top: true }),
+      highlightSelectionMatches(),
       keymap.of([
         {
           key: "Mod-s",
@@ -324,6 +335,7 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
             return true;
           },
         },
+        ...searchKeymap,
       ]),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) {

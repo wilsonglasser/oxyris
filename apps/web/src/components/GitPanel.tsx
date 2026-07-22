@@ -54,6 +54,14 @@ const EMPTY_DIFF_LOADING: Record<string, boolean> = {};
 const EMPTY_STASHES: never[] = [];
 const EMPTY_TAGS: never[] = [];
 
+// Throttle for the automatic remote fetch that validates "is there a pull to
+// do?" whenever the git panel is entered or the window regains focus. Without
+// a fetch, the behind-count is computed against the stale local tracking ref,
+// so the pull button never lights up until the user manually clicks fetch.
+// Keyed per worktree. Skipped while a fetch is already running.
+const AUTO_FETCH_MS = 30_000;
+const lastAutoFetch = new Map<string, number>();
+
 export function GitPanel({ projectId }: Props) {
   const { t } = useTranslation("git");
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -656,14 +664,28 @@ function GitChangesList({
   const loading = useGitStore((s) => s.loading[worktreeId] ?? false);
   const error = useGitStore((s) => s.error[worktreeId] ?? null);
   const refreshStatus = useGitStore((s) => s.refreshStatus);
+  const fetch = useGitStore((s) => s.fetch);
   const stagePaths = useGitStore((s) => s.stagePaths);
   const unstagePaths = useGitStore((s) => s.unstagePaths);
   const selectDiff = useGitStore((s) => s.selectDiff);
   const selected = useGitStore((s) => s.selected[worktreeId] ?? null);
 
   useEffect(() => {
+    // Always show local status immediately.
     void refreshStatus(projectId, worktreeId);
-  }, [projectId, worktreeId, refreshStatus]);
+    // Validate against the remote (throttled) so the pull button reflects
+    // reality on panel enter and on every window focus while it's open.
+    const validate = () => {
+      const last = lastAutoFetch.get(worktreeId) ?? 0;
+      if (Date.now() - last < AUTO_FETCH_MS) return;
+      if (useGitStore.getState().remote[worktreeId]?.running) return;
+      lastAutoFetch.set(worktreeId, Date.now());
+      void fetch(projectId, worktreeId);
+    };
+    validate();
+    window.addEventListener("focus", validate);
+    return () => window.removeEventListener("focus", validate);
+  }, [projectId, worktreeId, refreshStatus, fetch]);
 
   const sections = useMemo(
     () => (status ? partitionByBucket(status.entries) : null),
