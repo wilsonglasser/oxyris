@@ -187,7 +187,8 @@ jobs:
             libayatana-appindicator3-dev \
             libxdo-dev \
             libssl-dev \
-            build-essential
+            build-essential \
+            libasound2-dev
 
       - name: Install web deps
         run: bun install --frozen-lockfile
