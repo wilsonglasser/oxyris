@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use oxyris_index::{Index, SymbolKind};
 use oxyris_lsp::lsp_types::DiagnosticSeverity;
@@ -170,23 +169,67 @@ pub async fn lsp_hover(lsp: &Arc<LspBackend>, args: &Value) -> Result<String, St
     }
 }
 
-pub async fn lsp_diagnostics(lsp: &Arc<LspBackend>, args: &Value) -> Result<String, String> {
-    let file = args
-        .get("file")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing 'file'".to_string())?;
-    let path = lsp.resolve_path(file)?;
+/// Cap on rendered diagnostics. A workspace mid-refactor can report hundreds;
+/// the first slice (errors first) is what the agent acts on, and the tail would
+/// just evict its context.
+const MAX_RENDERED: usize = 60;
 
-    // The LSP server publishes diagnostics asynchronously after `didOpen`.
-    // Poll for up to ~2 seconds before reporting "no issues" — covers the
-    // common case where the user opens a fresh file and asks for diags
-    // immediately.
-    let diags = wait_for_diagnostics(lsp, &path).await;
-    if diags.is_empty() {
-        return Ok(format!("No diagnostics reported for {file}."));
+pub async fn lsp_diagnostics(lsp: &Arc<LspBackend>, args: &Value) -> Result<String, String> {
+    let file = args.get("file").and_then(|v| v.as_str());
+    let path = match file {
+        Some(f) => Some(lsp.resolve_path(f)?),
+        None => None,
+    };
+
+    let report = lsp.check(path.as_deref()).await?;
+
+    // Flatten to (display path, diagnostic) so the whole set can be ordered by
+    // severity — an error three files away matters more than a hint here.
+    let mut rows: Vec<(String, &oxyris_lsp::lsp_types::Diagnostic)> = Vec::new();
+    for entry in &report.files {
+        let display = match &path {
+            // Single-file mode: we already know the caller's spelling of it.
+            Some(_) => file.unwrap_or("").to_owned(),
+            None => lsp.uri_to_display(&entry.uri),
+        };
+        for d in &entry.diagnostics {
+            rows.push((display.clone(), d));
+        }
     }
-    let mut out = format!("{} diagnostic(s) in {file}:\n", diags.len());
-    for d in diags {
+    rows.sort_by_key(|(f, d)| {
+        (
+            severity_rank(d),
+            f.clone(),
+            d.range.start.line,
+            d.range.start.character,
+        )
+    });
+
+    let scope = match file {
+        Some(f) => f.to_owned(),
+        None => "the workspace".to_owned(),
+    };
+    if rows.is_empty() {
+        let how = if report.checked {
+            "`cargo check` finished clean"
+        } else {
+            "the language server reports nothing"
+        };
+        return Ok(format!("No diagnostics in {scope} — {how}."));
+    }
+
+    let errors = rows.iter().filter(|(_, d)| is_error(d)).count();
+    let total = rows.len();
+    let mut out = format!("{total} diagnostic(s) in {scope} ({errors} error(s))");
+    if !report.checked {
+        // Be explicit: without a completed check this is analysis-only, so a
+        // type error in a *different* crate may be missing. The agent needs to
+        // know it cannot treat a clean-ish read as a green build.
+        out.push_str(" — no completed `cargo check`, analysis-only");
+    }
+    out.push_str(":\n");
+
+    for (display, d) in rows.iter().take(MAX_RENDERED) {
         let sev = match d.severity {
             Some(DiagnosticSeverity::ERROR) => "ERROR",
             Some(DiagnosticSeverity::WARNING) => "WARN",
@@ -198,30 +241,32 @@ pub async fn lsp_diagnostics(lsp: &Arc<LspBackend>, args: &Value) -> Result<Stri
         let col = d.range.start.character + 1;
         let source = d.source.as_deref().unwrap_or("lsp");
         out.push_str(&format!(
-            "  [{sev}] {file}:{line}:{col} ({source}): {}\n",
+            "  [{sev}] {display}:{line}:{col} ({source}): {}\n",
             d.message.lines().next().unwrap_or("")
+        ));
+    }
+    if total > MAX_RENDERED {
+        out.push_str(&format!(
+            "  … {} more (ask for a specific `file` to see them)\n",
+            total - MAX_RENDERED
         ));
     }
     Ok(out)
 }
 
-async fn wait_for_diagnostics(
-    lsp: &Arc<LspBackend>,
-    path: &Path,
-) -> Vec<oxyris_lsp::lsp_types::Diagnostic> {
-    // Up to 8 polls of 250ms = ~2s ceiling. As soon as we get a non-empty
-    // result we return; if it's empty after the budget we report empty
-    // (which is the correct answer when the file genuinely has no issues).
-    for i in 0..8 {
-        if i > 0 {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        match lsp.diagnostics(path).await {
-            Ok(d) if !d.is_empty() => return d,
-            _ => {}
-        }
+fn is_error(d: &oxyris_lsp::lsp_types::Diagnostic) -> bool {
+    matches!(d.severity, Some(DiagnosticSeverity::ERROR))
+}
+
+/// Sort key: errors, warnings, then everything else.
+fn severity_rank(d: &oxyris_lsp::lsp_types::Diagnostic) -> u8 {
+    match d.severity {
+        Some(DiagnosticSeverity::ERROR) => 0,
+        Some(DiagnosticSeverity::WARNING) => 1,
+        Some(DiagnosticSeverity::INFORMATION) => 2,
+        Some(DiagnosticSeverity::HINT) => 3,
+        _ => 2,
     }
-    lsp.diagnostics(path).await.unwrap_or_default()
 }
 
 // ────── Laravel-backed tools ──────────────────────────────────────────────

@@ -12,7 +12,10 @@
 //! - `lsp.find_references({workspace,file,line,column,include_declaration})`
 //!   → `[Location]`
 //! - `lsp.hover({workspace,file,line,column})` → `Option<String>`
-//! - `lsp.diagnostics({workspace,file})` → `[Diagnostic]`
+//! - `lsp.diagnostics({workspace,file})` → `[Diagnostic]` (cached, per file)
+//! - `lsp.check({workspace,file?})` → `{files:[{uri,diagnostics}],checked}` —
+//!   syncs open documents with disk, runs `cargo check`, waits for it, then
+//!   reports. `file` omitted = whole workspace.
 //!
 //! `workspace` and `file` are absolute paths. `line`/`column` are 0-based
 //! (LSP-native), unlike the MCP tool layer which converts from 1-based.
@@ -23,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oxyris_core::Environment;
+use oxyris_lsp::{LspLanguage, detect_languages};
 use serde_json::{Value, json};
 
 use crate::infra::wsl_distro_for_path;
@@ -100,6 +104,7 @@ async fn handle_request(line: &str, lsp: &Arc<LspManager>) -> Value {
         "lsp.find_references" => find_references(lsp, &params).await,
         "lsp.hover" => hover(lsp, &params).await,
         "lsp.diagnostics" => diagnostics(lsp, &params).await,
+        "lsp.check" => check(lsp, &params).await,
         "ping" => Ok(json!({})),
         other => Err(format!("unknown method: {other}")),
     };
@@ -178,6 +183,71 @@ async fn diagnostics(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, Str
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(diags).map_err(|e| e.to_string())
+}
+
+/// `lsp.check` — the workspace-wide, disk-truth counterpart of
+/// `lsp.diagnostics`. Reconciles the server's open documents with the files on
+/// disk (the agent edits them without going through LSP), triggers the check
+/// layer, waits for it, then returns everything published.
+///
+/// With no `file`, the language is the workspace's primary detected one. That
+/// is Rust for a Cargo workspace, which is the only language here with a check
+/// layer worth waiting on.
+async fn check(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, String> {
+    let workspace = params
+        .get("workspace")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'workspace'".to_string())?;
+    let workspace = PathBuf::from(workspace);
+    let file = params
+        .get("file")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+
+    let lang = match &file {
+        Some(f) => LspManager::language_for_workspace(&workspace, f)
+            .ok_or_else(|| format!("no LSP language detected for {}", f.display()))?,
+        None => *detect_languages(&workspace)
+            .first()
+            .ok_or_else(|| format!("no supported language in {}", workspace.display()))?,
+    };
+    let env = bridge_env_for(&workspace);
+    let client = lsp
+        .ensure_at(&workspace, &env, lang)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match &file {
+        Some(f) => {
+            client.sync_from_disk(f).await.map_err(|e| e.to_string())?;
+        }
+        None => {
+            client.sync_open_from_disk().await;
+        }
+    }
+
+    let mut checked = false;
+    if lang == LspLanguage::Rust {
+        match client.run_check_and_wait(file.as_deref()).await {
+            Ok(ran) => checked = ran,
+            Err(e) => tracing::debug!(error = %e, "lsp_bridge: flycheck did not settle"),
+        }
+    }
+
+    let files: Vec<Value> = match &file {
+        Some(f) => {
+            let diags = client.diagnostics_for(f).await.map_err(|e| e.to_string())?;
+            vec![json!({ "uri": f.to_string_lossy(), "diagnostics": diags })]
+        }
+        None => client
+            .all_diagnostics()
+            .await
+            .into_iter()
+            .map(|(uri, diagnostics)| json!({ "uri": uri.to_string(), "diagnostics": diagnostics }))
+            .collect(),
+    };
+
+    Ok(json!({ "files": files, "checked": checked }))
 }
 
 /// Detect whether a workspace path the bridge received refers to a WSL

@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oxyris_lsp::lsp_types::{Diagnostic, Location};
+use oxyris_lsp::{LspClient, LspLanguage};
+use serde::{Deserialize, Serialize};
 
 use crate::lsp_bridge_client::LspBridgeClient;
 use crate::lsp_manager::LspManager;
@@ -19,6 +21,68 @@ use crate::lsp_manager::LspManager;
 pub enum LspBackend {
     Local { manager: Arc<LspManager> },
     Bridge { client: Arc<LspBridgeClient> },
+}
+
+/// Diagnostics the server published against one document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiagnostics {
+    /// Document URI as the server reported it. Render with
+    /// [`LspBackend::uri_to_display`].
+    pub uri: String,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Result of [`LspBackend::check`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CheckReport {
+    pub files: Vec<FileDiagnostics>,
+    /// True when a `cargo check` actually ran to completion for this report.
+    /// False means the numbers come from the server's own analysis only —
+    /// either the language has no check layer, or the check timed out.
+    pub checked: bool,
+}
+
+/// Trigger the check layer and wait for it. Rust only: `runFlycheck` is a
+/// rust-analyzer extension, and waiting on a server that will never start one
+/// would just burn the grace period on every call.
+async fn run_check(client: &Arc<LspClient>, file: Option<&Path>, is_rust: bool) -> bool {
+    if !is_rust {
+        return false;
+    }
+    match client.run_check_and_wait(file).await {
+        Ok(ran) => ran,
+        Err(e) => {
+            tracing::debug!(error = %e, "lsp: flycheck did not settle");
+            false
+        }
+    }
+}
+
+async fn collect(
+    client: &Arc<LspClient>,
+    file: Option<&Path>,
+) -> Result<Vec<FileDiagnostics>, String> {
+    match file {
+        Some(f) => {
+            let diagnostics = client
+                .diagnostics_for(f)
+                .await
+                .map_err(|e| format!("lsp: {e}"))?;
+            Ok(vec![FileDiagnostics {
+                uri: f.to_string_lossy().into_owned(),
+                diagnostics,
+            }])
+        }
+        None => Ok(client
+            .all_diagnostics()
+            .await
+            .into_iter()
+            .map(|(uri, diagnostics)| FileDiagnostics {
+                uri: uri.to_string(),
+                diagnostics,
+            })
+            .collect()),
+    }
 }
 
 impl LspBackend {
@@ -88,23 +152,39 @@ impl LspBackend {
         }
     }
 
-    pub async fn diagnostics(&self, file: &Path) -> Result<Vec<Diagnostic>, String> {
+    /// Run the check layer and return everything it reported.
+    ///
+    /// `file: Some` scopes the report to one file; `None` covers the whole
+    /// workspace. Either way the sequence is: reconcile open documents with
+    /// disk (our agent edits files behind the server's back), trigger
+    /// `cargo check`, wait for it to finish, then read. That ordering is what
+    /// makes this a substitute for the agent shelling out to `cargo check`
+    /// itself instead of a stale cache read.
+    pub async fn check(&self, file: Option<&Path>) -> Result<CheckReport, String> {
         match self {
             LspBackend::Local { manager } => {
-                let lang = manager
-                    .language_for(file)
-                    .ok_or_else(|| format!("no LSP server is enabled for {}", file.display()))?;
+                let lang = match file {
+                    Some(f) => manager
+                        .language_for(f)
+                        .ok_or_else(|| format!("no LSP server is enabled for {}", f.display()))?,
+                    None => *manager.detected().first().ok_or_else(|| {
+                        "no supported language detected in this workspace".to_string()
+                    })?,
+                };
                 let client = manager.get(lang).await?;
-                client
-                    .ensure_open(file)
-                    .await
-                    .map_err(|e| format!("lsp: {e}"))?;
-                client
-                    .diagnostics_for(file)
-                    .await
-                    .map_err(|e| format!("lsp: {e}"))
+                if let Some(f) = file {
+                    client
+                        .sync_from_disk(f)
+                        .await
+                        .map_err(|e| format!("lsp: {e}"))?;
+                } else {
+                    client.sync_open_from_disk().await;
+                }
+                let checked = run_check(&client, file, lang == LspLanguage::Rust).await;
+                let files = collect(&client, file).await?;
+                Ok(CheckReport { files, checked })
             }
-            LspBackend::Bridge { client } => client.diagnostics(file).await,
+            LspBackend::Bridge { client } => client.check(file).await,
         }
     }
 

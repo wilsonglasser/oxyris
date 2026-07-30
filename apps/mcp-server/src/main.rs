@@ -360,13 +360,12 @@ fn tools_list_response(
             }),
             json!({
                 "name": "oxyris_lsp_diagnostics",
-                "description": "Return the language server's current diagnostics (compiler errors, warnings, lints) for a file — what an IDE shows in the Problems panel. Empty when no issues are open. Use after editing to verify your changes parse and type-check.",
+                "description": "Compiler errors, warnings and lints for this workspace — an IDE Problems panel, and for Rust a substitute for running `cargo check` yourself. Reconciles the language server with what is on disk (so it sees edits you just made), runs the check, waits for it to finish, then reports. Omit `file` for the whole workspace: that is the call to make after an edit, because a change in one file usually breaks a different one. Prefer this over shelling out to `cargo check`/`tsc` — the check is incremental against an already-warm target dir, so it is far cheaper and does not fight your own builds for the `target/` lock.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "file": { "type": "string", "description": "Path relative to the workspace root." }
-                    },
-                    "required": ["file"]
+                        "file": { "type": "string", "description": "Optional path relative to the workspace root. Omit for workspace-wide diagnostics (recommended after editing)." }
+                    }
                 }
             }),
         ]);

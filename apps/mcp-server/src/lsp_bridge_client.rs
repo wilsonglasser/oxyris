@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use oxyris_lsp::lsp_types::{Diagnostic, Location};
 use serde_json::{Value, json};
+
+use crate::lsp_backend::{CheckReport, FileDiagnostics};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
@@ -91,6 +93,41 @@ impl LspBridgeClient {
             )
             .await?;
         serde_json::from_value::<Vec<Diagnostic>>(result).map_err(|e| e.to_string())
+    }
+
+    /// `lsp.check` — sync-from-disk, run `cargo check`, wait, report. `file`
+    /// omitted means the whole workspace.
+    ///
+    /// Falls back to the older cached-per-file `lsp.diagnostics` when the
+    /// desktop on the other end predates this method. The two ship together in
+    /// a release, so this only covers a stale desktop left running across an
+    /// upgrade — cheap insurance against the tool hard-failing there.
+    pub async fn check(&self, file: Option<&Path>) -> Result<CheckReport, String> {
+        let mut params = json!({ "workspace": self.workspace.to_string_lossy() });
+        if let Some(f) = file {
+            params["file"] = json!(f.to_string_lossy());
+        }
+        match self.call("lsp.check", params).await {
+            Ok(result) => serde_json::from_value::<CheckReport>(result).map_err(|e| e.to_string()),
+            Err(e) if e.contains("unknown method") => {
+                let Some(f) = file else {
+                    return Err(
+                        "this Oxyris desktop is too old for workspace-wide diagnostics; \
+                         restart it or pass a specific `file`"
+                            .into(),
+                    );
+                };
+                let diagnostics = self.diagnostics(f).await?;
+                Ok(CheckReport {
+                    files: vec![FileDiagnostics {
+                        uri: f.to_string_lossy().into_owned(),
+                        diagnostics,
+                    }],
+                    checked: false,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {

@@ -5,10 +5,14 @@
 //! of the protocol we need for the MCP bridge:
 //!
 //! - `initialize` / `initialized` handshake
-//! - `textDocument/didOpen` notification
+//! - `textDocument/didOpen` / `didChange` / `didSave` notifications
 //! - `textDocument/references` request
 //! - `textDocument/hover` request
-//! - cache of `textDocument/publishDiagnostics` notifications, queryable by file
+//! - cache of `textDocument/publishDiagnostics` notifications, queryable by
+//!   file or workspace-wide
+//! - `$/progress` tracking, so a caller can wait for rust-analyzer's flycheck
+//!   (`cargo check`) to settle before reading diagnostics
+//! - `rust-analyzer/runFlycheck` to trigger that check on demand
 //! - `shutdown` / `exit` for clean teardown
 //!
 //! The client is intentionally narrow — anything else, layer on top.
@@ -26,11 +30,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use lsp_types::{
-    ClientCapabilities, Diagnostic, DidChangeConfigurationParams, DidChangeWorkspaceFoldersParams,
-    DidOpenTextDocumentParams, Hover, HoverContents, HoverParams, InitializeParams,
-    InitializeResult, InitializedParams, Location, MarkedString, MarkupContent,
-    PartialResultParams, Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, Uri, WindowClientCapabilities,
+    ClientCapabilities, Diagnostic, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidChangeWorkspaceFoldersParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams, Hover,
+    HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams, Location,
+    MarkedString, MarkupContent, PartialResultParams, Position, ReferenceContext, ReferenceParams,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier, WindowClientCapabilities,
     WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
     WorkspaceFoldersChangeEvent,
 };
@@ -41,11 +46,11 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 pub use language::{LspLanguage, detect_languages, resolve_server};
 pub use lsp_types;
-pub use transport::OutboundFrame;
+pub use transport::{OutboundFrame, ProgressSnapshot};
 
 #[derive(Debug, Error)]
 pub enum LspError {
@@ -75,8 +80,38 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(90);
 
 type Result<T> = std::result::Result<T, LspError>;
 
+/// How long we wait for a triggered flycheck to *start* before concluding the
+/// server isn't going to run one (not a Cargo project, check disabled, …).
+const FLYCHECK_START_GRACE: Duration = Duration::from_secs(3);
+/// Ceiling on a single `cargo check` we're blocking a tool call on. A cold
+/// workspace can exceed this; the caller reports what it has and says so
+/// rather than hanging the agent.
+const FLYCHECK_TIMEOUT: Duration = Duration::from_secs(120);
+/// Pause before re-asking a server that ignored our first check request because
+/// it was still loading the project.
+const COLD_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 pub(crate) type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value>>>>>;
 pub(crate) type DiagnosticsMap = Arc<Mutex<HashMap<Uri, Vec<Diagnostic>>>>;
+
+/// A document we've told the server about. LSP says the client's in-memory
+/// buffer wins over disk for any open document, so once we `didOpen` a file the
+/// server ignores external edits to it until we push a `didChange` — hence the
+/// version counter and content hash we diff against.
+struct OpenDoc {
+    version: i32,
+    hash: u64,
+}
+
+/// Cheap content fingerprint for "did this file change since we last synced".
+/// Not cryptographic — collisions here only cost a skipped re-sync, and any
+/// real edit changes the length or bytes enough for `DefaultHasher` to notice.
+fn content_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
 
 /// Handle to one running language server. Drop the client to send `shutdown`
 /// + `exit` and reap the child.
@@ -97,9 +132,13 @@ pub struct LspClient {
     /// dependency analysis (same registry source paths → one crate in RA's
     /// global graph), which is the whole point of the multi-root move.
     roots: std::sync::Mutex<Vec<PathBuf>>,
-    /// Files we've already sent `didOpen` for — keeps us idempotent so the
-    /// caller can be lazy.
-    opened: Arc<Mutex<HashMap<PathBuf, ()>>>,
+    /// Files we've already sent `didOpen` for, with the version and content
+    /// hash of what the server currently believes. Keeps `ensure_open`
+    /// idempotent and lets [`LspClient::sync_from_disk`] push only real edits.
+    opened: Arc<Mutex<HashMap<PathBuf, OpenDoc>>>,
+    /// Latest `$/progress` state. Written by the reader task, watched by
+    /// [`LspClient::wait_for_flycheck`].
+    progress: watch::Sender<ProgressSnapshot>,
     /// `initializationOptions` sent on the `initialize` handshake. `None`
     /// leaves the server on its defaults. For rust-analyzer this carries the
     /// lean, memory-bounded config (see `LspLanguage::initialization_options`).
@@ -201,11 +240,15 @@ impl LspClient {
         let diagnostics: DiagnosticsMap = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = mpsc::unbounded_channel::<OutboundFrame>();
 
+        let (progress, _) = watch::channel(ProgressSnapshot::default());
+
         tokio::spawn(transport::writer_loop(stdin, rx));
         tokio::spawn(transport::reader_loop(
             stdout,
             pending.clone(),
             diagnostics.clone(),
+            progress.clone(),
+            tx.clone(),
         ));
 
         let client = Arc::new(Self {
@@ -216,6 +259,7 @@ impl LspClient {
             roots: std::sync::Mutex::new(vec![workspace_root.clone()]),
             root: workspace_root,
             opened: Arc::new(Mutex::new(HashMap::new())),
+            progress,
             init_options,
             last_activity: std::sync::Mutex::new(Instant::now()),
         });
@@ -238,7 +282,15 @@ impl LspClient {
             workspace_folders: Some(workspace_folders),
             initialization_options: self.init_options.clone(),
             capabilities: ClientCapabilities {
-                window: Some(WindowClientCapabilities::default()),
+                window: Some(WindowClientCapabilities {
+                    // Not optional for us: rust-analyzer suppresses **all**
+                    // `$/progress` unless the client opts in here, and without
+                    // progress there is no way to know when its `cargo check`
+                    // finished — [`LspClient::wait_for_flycheck`] would always
+                    // conclude "no check ran".
+                    work_done_progress: Some(true),
+                    ..Default::default()
+                }),
                 // Advertise workspace-folder support so the server honours the
                 // runtime `didChangeWorkspaceFolders` we send when a sibling
                 // worktree opens/closes, and configuration pushes for updated
@@ -265,6 +317,8 @@ impl LspClient {
 
     /// Send `textDocument/didOpen` for a file once. Subsequent calls for
     /// the same path are no-ops — saves the caller from threading state.
+    /// Does **not** refresh a document that changed on disk since it was
+    /// opened; use [`LspClient::sync_from_disk`] for that.
     pub async fn ensure_open(&self, path: &Path) -> Result<()> {
         {
             let opened = self.opened.lock().await;
@@ -273,6 +327,7 @@ impl LspClient {
             }
         }
         let text = tokio::fs::read_to_string(path).await?;
+        let hash = content_hash(&text);
         let uri = path_to_uri(path)?;
         let language_id = language::language_id_for(path).unwrap_or("plaintext");
         let params = DidOpenTextDocumentParams {
@@ -284,8 +339,188 @@ impl LspClient {
             },
         };
         self.notify("textDocument/didOpen", params)?;
-        self.opened.lock().await.insert(path.to_owned(), ());
+        self.opened
+            .lock()
+            .await
+            .insert(path.to_owned(), OpenDoc { version: 1, hash });
         Ok(())
+    }
+
+    /// Reconcile the server's view of `path` with what is on disk right now.
+    ///
+    /// This is the fix for a specific staleness trap: our own agent edits files
+    /// through its file tools, not through this client, and LSP gives the
+    /// client's buffer precedence for any document it has opened. Without this
+    /// the server keeps answering about the text we opened minutes ago.
+    ///
+    /// Opens the file if new; otherwise pushes a full-text `didChange` plus a
+    /// `didSave` when the content differs. The `didSave` matters as much as the
+    /// change: rust-analyzer's flycheck (`cargo check`) is save-triggered.
+    ///
+    /// Returns `true` when something was actually sent.
+    pub async fn sync_from_disk(&self, path: &Path) -> Result<bool> {
+        let text = tokio::fs::read_to_string(path).await?;
+        let hash = content_hash(&text);
+        let uri = path_to_uri(path)?;
+
+        let version = {
+            let mut opened = self.opened.lock().await;
+            match opened.get_mut(path) {
+                Some(doc) if doc.hash == hash => return Ok(false),
+                Some(doc) => {
+                    doc.version += 1;
+                    doc.hash = hash;
+                    doc.version
+                }
+                None => {
+                    // Not open yet — a plain didOpen carries the fresh text.
+                    let language_id = language::language_id_for(path).unwrap_or("plaintext");
+                    self.notify(
+                        "textDocument/didOpen",
+                        DidOpenTextDocumentParams {
+                            text_document: TextDocumentItem {
+                                uri,
+                                language_id: language_id.into(),
+                                version: 1,
+                                text,
+                            },
+                        },
+                    )?;
+                    opened.insert(path.to_owned(), OpenDoc { version: 1, hash });
+                    return Ok(true);
+                }
+            }
+        };
+
+        self.notify(
+            "textDocument/didChange",
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version,
+                },
+                // Full-document sync. Ranged edits would be cheaper, but we
+                // only ever see before/after snapshots of someone else's edit.
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text,
+                }],
+            },
+        )?;
+        self.notify(
+            "textDocument/didSave",
+            DidSaveTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri },
+                text: None,
+            },
+        )?;
+        Ok(true)
+    }
+
+    /// [`LspClient::sync_from_disk`] for every document we have open. Files
+    /// that vanished are dropped from the open set (the server learns of the
+    /// deletion from its own file watching). Returns how many were re-synced.
+    pub async fn sync_open_from_disk(&self) -> usize {
+        let paths: Vec<PathBuf> = self.opened.lock().await.keys().cloned().collect();
+        let mut changed = 0;
+        for path in paths {
+            match self.sync_from_disk(&path).await {
+                Ok(true) => changed += 1,
+                Ok(false) => {}
+                Err(LspError::Io(_)) => {
+                    self.opened.lock().await.remove(&path);
+                }
+                Err(e) => {
+                    tracing::debug!(path = %path.display(), error = %e, "lsp: sync failed");
+                }
+            }
+        }
+        changed
+    }
+
+    /// Ask rust-analyzer to run `cargo check` now — `None` for the whole
+    /// workspace, `Some(path)` for the package owning that file. This is the
+    /// `rust-analyzer/runFlycheck` extension, so it is a no-op notification on
+    /// any other server.
+    ///
+    /// Cargo reads the files from disk, so the check reflects on-disk truth
+    /// regardless of what documents we have open.
+    pub fn run_flycheck(&self, path: Option<&Path>) -> Result<()> {
+        self.notify("rust-analyzer/runFlycheck", flycheck_params(path)?)
+    }
+
+    /// Trigger the check layer and block until it settles — the one call a
+    /// caller needs to make diagnostics trustworthy.
+    ///
+    /// Retries once because a cold server drops the request: rust-analyzer has
+    /// nothing to check until it has loaded the Cargo workspace, and our first
+    /// `runFlycheck` can easily land before that. Returns whether a check
+    /// actually completed.
+    pub async fn run_check_and_wait(&self, path: Option<&Path>) -> Result<bool> {
+        for attempt in 0..2 {
+            if attempt > 0 {
+                tokio::time::sleep(COLD_RETRY_DELAY).await;
+            }
+            self.run_flycheck(path)?;
+            if self.wait_for_flycheck().await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Block until the server's flycheck is idle, so a diagnostics read that
+    /// follows sees the finished `cargo check` rather than the previous run's
+    /// leftovers.
+    ///
+    /// Returns `Ok(true)` when a check ran to completion, `Ok(false)` when none
+    /// started within [`FLYCHECK_START_GRACE`] (nothing to wait for — the
+    /// server has no check layer, or it is disabled), and
+    /// [`LspError::Timeout`] when one started but outlived
+    /// [`FLYCHECK_TIMEOUT`].
+    pub async fn wait_for_flycheck(&self) -> Result<bool> {
+        let mut rx = self.progress.subscribe();
+        let baseline = rx.borrow_and_update().flycheck_completions;
+        let start = Instant::now();
+
+        // Phase 1 — wait for a check to be in flight. It may already be, or it
+        // may have begun *and* ended before we first looked (fast incremental
+        // check), which the completion counter catches.
+        loop {
+            let (running, completed) = {
+                let snap = rx.borrow_and_update();
+                (
+                    snap.flycheck_running(),
+                    snap.flycheck_completions != baseline,
+                )
+            };
+            if running {
+                break;
+            }
+            if completed {
+                return Ok(true);
+            }
+            let Some(remaining) = FLYCHECK_START_GRACE.checked_sub(start.elapsed()) else {
+                return Ok(false);
+            };
+            if tokio::time::timeout(remaining, rx.changed()).await.is_err() {
+                return Ok(false);
+            }
+        }
+
+        // Phase 2 — wait for it to finish.
+        loop {
+            if !rx.borrow_and_update().flycheck_running() {
+                return Ok(true);
+            }
+            let Some(remaining) = FLYCHECK_TIMEOUT.checked_sub(start.elapsed()) else {
+                return Err(LspError::Timeout(FLYCHECK_TIMEOUT, "flycheck"));
+            };
+            if tokio::time::timeout(remaining, rx.changed()).await.is_err() {
+                return Err(LspError::Timeout(FLYCHECK_TIMEOUT, "flycheck"));
+            }
+        }
     }
 
     pub async fn find_references(
@@ -343,6 +578,19 @@ impl LspClient {
         let uri = path_to_uri(path)?;
         let cache = self.diagnostics.lock().await;
         Ok(cache.get(&uri).cloned().unwrap_or_default())
+    }
+
+    /// Every diagnostic the server has published, keyed by document URI. This
+    /// is the workspace-wide view: an edit in one crate surfaces errors the
+    /// server publishes against *other* files, which a per-file query can never
+    /// find. Pair with [`LspClient::wait_for_flycheck`] and it is the
+    /// equivalent of reading a finished `cargo check --workspace`.
+    pub async fn all_diagnostics(&self) -> Vec<(Uri, Vec<Diagnostic>)> {
+        let cache = self.diagnostics.lock().await;
+        let mut out: Vec<(Uri, Vec<Diagnostic>)> =
+            cache.iter().map(|(u, d)| (u.clone(), d.clone())).collect();
+        out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        out
     }
 
     /// How long since we last sent this server a request or notification.
@@ -541,6 +789,16 @@ fn has_windows_drive_prefix(s: &str) -> bool {
         && chars.next() == Some('/')
 }
 
+/// Params for `rust-analyzer/runFlycheck`. `None` → `{"textDocument": null}`,
+/// which rust-analyzer reads as "check the whole workspace".
+fn flycheck_params(path: Option<&Path>) -> Result<Value> {
+    let text_document = match path {
+        Some(p) => serde_json::json!({ "uri": path_to_uri(p)?.to_string() }),
+        None => Value::Null,
+    };
+    Ok(serde_json::json!({ "textDocument": text_document }))
+}
+
 fn path_to_uri(path: &Path) -> Result<Uri> {
     let normalized = path.to_string_lossy().replace('\\', "/");
     let absolute = if normalized.starts_with('/') || has_windows_drive_prefix(&normalized) {
@@ -675,6 +933,44 @@ mod tests {
         let f = workspace_folder(Path::new("/home/w/repo/wt-feature")).expect("folder");
         assert_eq!(f.name, "wt-feature");
         assert!(f.uri.to_string().ends_with("wt-feature"));
+    }
+
+    #[test]
+    fn content_hash_tracks_edits() {
+        let before = content_hash("fn main() {}\n");
+        assert_eq!(before, content_hash("fn main() {}\n"));
+        assert_ne!(before, content_hash("fn main() { todo!() }\n"));
+        // Whitespace-only change still counts — it can move every diagnostic
+        // range in the file.
+        assert_ne!(before, content_hash("fn main() {}\n\n"));
+    }
+
+    #[test]
+    fn flycheck_params_null_means_whole_workspace() {
+        let p = flycheck_params(None).expect("params");
+        assert!(p["textDocument"].is_null());
+    }
+
+    #[test]
+    fn flycheck_params_scoped_to_file_carries_uri() {
+        let p = flycheck_params(Some(Path::new("/home/w/repo/src/lib.rs"))).expect("params");
+        let uri = p["textDocument"]["uri"].as_str().expect("uri string");
+        assert!(uri.starts_with("file:///home/w/repo/"), "got {uri}");
+        assert!(uri.ends_with("src/lib.rs"), "got {uri}");
+    }
+
+    #[test]
+    fn progress_snapshot_recognises_flycheck_tokens() {
+        let mut snap = ProgressSnapshot::default();
+        assert!(!snap.flycheck_running());
+        // Indexing/cache-priming must not be mistaken for a check — waiting on
+        // those would block a diagnostics read for the whole cold start.
+        snap.active.insert("rustAnalyzer/Indexing".into());
+        assert!(!snap.flycheck_running());
+        snap.active.insert("rustAnalyzer/Flycheck".into());
+        assert!(snap.flycheck_running());
+        snap.active.remove("rustAnalyzer/Flycheck");
+        assert!(!snap.flycheck_running());
     }
 
     #[test]
