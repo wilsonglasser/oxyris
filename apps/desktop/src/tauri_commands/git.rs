@@ -11,8 +11,8 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::infra::fs::{self as fs_infra, FsError};
 use crate::infra::git::{
-    self, CommitInfo, CommitResult, ConflictContents, DiffMode, FileDiff, GitError, RemoteOpResult,
-    StashEntry, StatusReport, TagInfo,
+    self, BranchDetail, CommitInfo, CommitResult, ConflictContents, DiffMode, FileDiff, GitError,
+    MergeOutcome, RebaseOutcome, RemoteOpResult, StashEntry, StatusReport, TagInfo,
 };
 
 #[derive(Debug, Serialize, thiserror::Error)]
@@ -262,6 +262,178 @@ pub async fn git_branch_delete(
 ) -> Result<(), TauriGitError> {
     let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
     git::branch_delete(&env, &state.agent_pool, &root, input.name).await?;
+    Ok(())
+}
+
+/// Branch rows for the branch manager popup — worktree-scoped so `is_current`
+/// and `checked_out_in` reflect the tree the panel is actually looking at.
+#[tauri::command]
+pub async fn git_branch_list(
+    input: GitScopeInput,
+    state: State<'_, AppState>,
+) -> Result<Vec<BranchDetail>, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::branch_list_detailed(&env, &state.agent_pool, &root).await?)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitBranchRenameInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub old: String,
+    pub new: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[tauri::command]
+pub async fn git_branch_rename(
+    input: GitBranchRenameInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::branch_rename(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.old,
+        input.new,
+        input.force,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Drop a remote-tracking ref locally (`origin/x`). The branch on the remote
+/// is untouched — that is `git_push_delete`.
+#[tauri::command]
+pub async fn git_branch_delete_remote(
+    input: GitBranchDeleteInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::branch_delete_remote_tracking(&env, &state.agent_pool, &root, input.name).await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitCheckoutRemoteInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    pub remote_ref: String,
+    #[serde(default)]
+    pub local: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitCheckoutRemoteOutput {
+    /// Local branch that ended up checked out.
+    pub local: String,
+}
+
+#[tauri::command]
+pub async fn git_checkout_remote(
+    input: GitCheckoutRemoteInput,
+    state: State<'_, AppState>,
+) -> Result<GitCheckoutRemoteOutput, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let local = git::checkout_remote(
+        &env,
+        &state.agent_pool,
+        &root,
+        input.remote_ref,
+        input.local,
+    )
+    .await?;
+    Ok(GitCheckoutRemoteOutput { local })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitPushDeleteInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    #[serde(default = "default_origin")]
+    pub remote: String,
+    pub branch: String,
+}
+
+fn default_origin() -> String {
+    "origin".to_owned()
+}
+
+#[tauri::command]
+pub async fn git_push_delete(
+    input: GitPushDeleteInput,
+    state: State<'_, AppState>,
+) -> Result<RemoteOpResult, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::push_delete(&env, &state.agent_pool, &root, input.remote, input.branch).await?)
+}
+
+// ────── merge / rebase ─────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct GitMergeInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    /// Branch / tag / commit-ish merged into the current HEAD.
+    pub name: String,
+    #[serde(default)]
+    pub no_ff: bool,
+}
+
+#[tauri::command]
+pub async fn git_merge(
+    input: GitMergeInput,
+    state: State<'_, AppState>,
+) -> Result<MergeOutcome, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::merge(&env, &state.agent_pool, &root, input.name, input.no_ff).await?)
+}
+
+#[tauri::command]
+pub async fn git_merge_abort(
+    input: GitScopeInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::merge_abort(&env, &state.agent_pool, &root).await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitRebaseInput {
+    pub project_id: AggregateId,
+    pub worktree_id: AggregateId,
+    /// Branch the current HEAD's commits are replayed onto.
+    pub upstream: String,
+}
+
+#[tauri::command]
+pub async fn git_rebase(
+    input: GitRebaseInput,
+    state: State<'_, AppState>,
+) -> Result<RebaseOutcome, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::rebase(&env, &state.agent_pool, &root, input.upstream).await?)
+}
+
+#[tauri::command]
+pub async fn git_rebase_continue(
+    input: GitScopeInput,
+    state: State<'_, AppState>,
+) -> Result<RebaseOutcome, TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    Ok(git::rebase_continue(&env, &state.agent_pool, &root).await?)
+}
+
+#[tauri::command]
+pub async fn git_rebase_abort(
+    input: GitScopeInput,
+    state: State<'_, AppState>,
+) -> Result<(), TauriGitError> {
+    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    git::rebase_abort(&env, &state.agent_pool, &root).await?;
     Ok(())
 }
 

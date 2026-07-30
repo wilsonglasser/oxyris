@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  AlertTriangle,
   ArrowDownToLine,
   ArrowUpToLine,
   Check,
@@ -19,6 +20,7 @@ import {
   Sparkles,
   Tag,
   Undo2,
+  X,
 } from "lucide-react";
 import {
   PRIMARY_WORKTREE_ID,
@@ -30,10 +32,11 @@ import {
   partitionByBucket,
   useGitStore,
 } from "~/stores/gitStore.ts";
-import type { DiffMode, StatusEntry } from "~/ipc/git.ts";
+import type { BranchDetail, DiffMode, StatusEntry } from "~/ipc/git.ts";
 import { MonacoDiffViewer } from "~/components/MonacoDiffViewer.tsx";
 import { RevDiffModal } from "~/components/RevDiffModal.tsx";
 import { MergeEditor } from "~/components/MergeEditor.tsx";
+import { BranchMenu } from "~/components/BranchMenu.tsx";
 import { useDragResize } from "~/lib/useDragResize.ts";
 import {
   buildSingleHunkPatch,
@@ -47,7 +50,7 @@ interface Props {
 
 // Stable empty references — selectors that synthesize a new `[]` / `{}`
 // per call trigger a zustand re-render storm under React 19 strict checks.
-const EMPTY_BRANCHES: { name: string; is_current: boolean; is_remote: boolean }[] = [];
+const EMPTY_BRANCH_DETAILS: BranchDetail[] = [];
 const EMPTY_LOG: never[] = [];
 const EMPTY_DIFFS: Record<string, never> = {};
 const EMPTY_DIFF_LOADING: Record<string, boolean> = {};
@@ -70,6 +73,11 @@ export function GitPanel({ projectId }: Props) {
   );
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+  // Owned here (not in the branch menu / log) so the modal survives the popup
+  // closing when an action inside it opens a comparison.
+  const [revDiff, setRevDiff] = useState<
+    { from: string; to: string; title: string } | null
+  >(null);
   const sideResize = useDragResize({
     storageKey: "oxyris.gitPanel.sideWidth",
     defaultSize: 320,
@@ -127,9 +135,18 @@ export function GitPanel({ projectId }: Props) {
             ))}
           </select>
         </div>
-        <BranchToolbar projectId={projectId} worktreeId={worktreeId} />
+        <BranchToolbar
+          projectId={projectId}
+          worktreeId={worktreeId}
+          onCompare={(from, to, title) => setRevDiff({ from, to, title })}
+        />
+        <SequencerBanner projectId={projectId} worktreeId={worktreeId} />
         <GitChangesList projectId={projectId} worktreeId={worktreeId} />
-        <LogSection projectId={projectId} worktreeId={worktreeId} />
+        <LogSection
+          projectId={projectId}
+          worktreeId={worktreeId}
+          onCompare={(from, to, title) => setRevDiff({ from, to, title })}
+        />
         <CommitBar projectId={projectId} worktreeId={worktreeId} />
         <div
           onMouseDown={sideResize.onResizeStart}
@@ -141,11 +158,27 @@ export function GitPanel({ projectId }: Props) {
         </div>
       </div>
       <GitDiffPane projectId={projectId} worktreeId={worktreeId} />
+      {revDiff && (
+        <RevDiffModal
+          projectId={projectId}
+          worktreeId={worktreeId}
+          from={revDiff.from}
+          to={revDiff.to}
+          title={revDiff.title}
+          open
+          onClose={() => setRevDiff(null)}
+        />
+      )}
     </div>
   );
 }
 
-function BranchToolbar({
+/**
+ * Banner for a merge / rebase / cherry-pick left mid-flight, with the same
+ * escape hatches the CLI gives: continue once the conflicts are resolved, or
+ * abort and go back to where HEAD was.
+ */
+function SequencerBanner({
   projectId,
   worktreeId,
 }: {
@@ -153,23 +186,103 @@ function BranchToolbar({
   worktreeId: string;
 }) {
   const { t } = useTranslation("git");
-  const branches = useGitStore(
-    (s) => s.branches[worktreeId] ?? EMPTY_BRANCHES,
+  const status = useGitStore((s) => s.status[worktreeId] ?? null);
+  const continueRebase = useGitStore((s) => s.continueRebase);
+  const abortRebase = useGitStore((s) => s.abortRebase);
+  const abortMerge = useGitStore((s) => s.abortMerge);
+  const [busy, setBusy] = useState(false);
+
+  const state = status?.state ?? "clean";
+  if (state === "clean") return null;
+
+  const conflicts =
+    status?.entries.filter((e) => e.bucket === "conflicted").length ?? 0;
+  const isRebase = state === "rebase";
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2 border-b border-amber-900/50 bg-amber-900/20 px-2 py-1 text-[11px] text-amber-200">
+      <AlertTriangle size={12} className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">
+        {t(`sequencer.${state}`)}
+        {conflicts > 0 && ` · ${t("conflict_count", { count: conflicts })}`}
+      </span>
+      {isRebase && (
+        <button
+          type="button"
+          disabled={busy || conflicts > 0}
+          onClick={() =>
+            void run(async () => {
+              const outcome = await continueRebase(projectId, worktreeId);
+              if (outcome.kind === "conflicts") {
+                window.alert(
+                  t("rebase_conflicts", { count: outcome.paths.length }),
+                );
+              }
+            })
+          }
+          title={conflicts > 0 ? t("resolve_first") : t("continue")}
+          className="shrink-0 rounded bg-amber-800/60 px-1.5 py-0.5 enabled:hover:bg-amber-800 disabled:opacity-40"
+        >
+          {t("continue")}
+        </button>
+      )}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() =>
+          void run(() =>
+            isRebase
+              ? abortRebase(projectId, worktreeId)
+              : abortMerge(projectId, worktreeId),
+          )
+        }
+        className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-amber-200/80 enabled:hover:bg-amber-800/50 enabled:hover:text-amber-100 disabled:opacity-40"
+      >
+        <X size={10} />
+        {t("abort")}
+      </button>
+    </div>
   );
-  const refreshBranches = useGitStore((s) => s.refreshBranches);
-  const checkout = useGitStore((s) => s.checkout);
-  const createBranch = useGitStore((s) => s.createBranch);
+}
+
+function BranchToolbar({
+  projectId,
+  worktreeId,
+  onCompare,
+}: {
+  projectId: string;
+  worktreeId: string;
+  onCompare: (from: string, to: string, title: string) => void;
+}) {
+  const { t } = useTranslation("git");
+  const branches = useGitStore(
+    (s) => s.branchDetails[worktreeId] ?? EMPTY_BRANCH_DETAILS,
+  );
+  const refreshBranchDetails = useGitStore((s) => s.refreshBranchDetails);
   const fetch = useGitStore((s) => s.fetch);
   const pull = useGitStore((s) => s.pull);
   const push = useGitStore((s) => s.push);
   const remote = useGitStore((s) => s.remote[worktreeId]);
   const status = useGitStore((s) => s.status[worktreeId]);
-  const [picker, setPicker] = useState(false);
+  const [menu, setMenu] = useState(false);
   const current = branches.find((b) => b.is_current);
+  const ahead = status?.ahead_behind?.ahead ?? 0;
+  const behind = status?.ahead_behind?.behind ?? 0;
 
   useEffect(() => {
-    void refreshBranches(projectId, worktreeId);
-  }, [projectId, worktreeId, refreshBranches]);
+    void refreshBranchDetails(projectId, worktreeId);
+  }, [projectId, worktreeId, refreshBranchDetails]);
 
   return (
     <div className="border-b border-neutral-800 bg-neutral-900/40">
@@ -177,27 +290,28 @@ function BranchToolbar({
         <div className="relative min-w-0 flex-1">
           <button
             type="button"
-            onClick={() => setPicker((v) => !v)}
+            onClick={() => setMenu((v) => !v)}
+            title={t("branch_menu_title")}
             className="flex w-full items-center gap-1 truncate rounded bg-neutral-900 px-2 py-0.5 text-neutral-200 hover:bg-neutral-800"
           >
             <GitBranch size={11} className="shrink-0 text-neutral-500" />
             <span className="truncate">
               {current?.name ?? status?.branch ?? t("no_branch")}
             </span>
+            {(ahead > 0 || behind > 0) && (
+              <span className="shrink-0 text-[9px] text-neutral-500">
+                {ahead > 0 && `↑${ahead}`}
+                {behind > 0 && `↓${behind}`}
+              </span>
+            )}
             <ChevronDown size={11} className="ml-auto shrink-0 text-neutral-500" />
           </button>
-          {picker && (
-            <BranchPicker
-              branches={branches}
-              onPick={async (name) => {
-                setPicker(false);
-                await checkout(projectId, worktreeId, name);
-              }}
-              onCreate={async (name) => {
-                setPicker(false);
-                await createBranch(projectId, worktreeId, name, true);
-              }}
-              onClose={() => setPicker(false)}
+          {menu && (
+            <BranchMenu
+              projectId={projectId}
+              worktreeId={worktreeId}
+              onCompare={onCompare}
+              onClose={() => setMenu(false)}
             />
           )}
         </div>
@@ -360,94 +474,14 @@ function StashButton({
   );
 }
 
-function BranchPicker({
-  branches,
-  onPick,
-  onCreate,
-  onClose,
-}: {
-  branches: { name: string; is_current: boolean; is_remote: boolean }[];
-  onPick: (name: string) => void;
-  onCreate: (name: string) => void;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation("git");
-  const [filter, setFilter] = useState("");
-  const [creating, setCreating] = useState(false);
-  const filtered = useMemo(
-    () =>
-      branches.filter((b) =>
-        b.name.toLowerCase().includes(filter.toLowerCase()),
-      ),
-    [branches, filter],
-  );
-  return (
-    <div
-      onMouseLeave={onClose}
-      className="absolute left-0 top-full z-20 mt-1 max-h-72 w-72 overflow-auto rounded border border-neutral-800 bg-neutral-950 p-1 shadow-lg"
-    >
-      <input
-        type="text"
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        placeholder={t("branch_search")}
-        className="mb-1 w-full rounded bg-neutral-900 px-2 py-0.5 text-[11px] text-neutral-200 outline-none focus:ring-1 focus:ring-neutral-700"
-      />
-      {filtered.map((b) => (
-        <button
-          key={`${b.is_remote ? "r" : "l"}-${b.name}`}
-          type="button"
-          onClick={() => onPick(b.name)}
-          className="flex w-full items-center gap-1 rounded px-2 py-0.5 text-left text-[11px] text-neutral-200 hover:bg-neutral-900"
-        >
-          {b.is_current ? (
-            <Check size={10} className="text-emerald-400" />
-          ) : (
-            <span className="w-[10px]" />
-          )}
-          <span className="truncate">{b.name}</span>
-          {b.is_remote && (
-            <span className="ml-auto text-[9px] text-neutral-500">remote</span>
-          )}
-        </button>
-      ))}
-      <div className="mt-1 border-t border-neutral-800 pt-1">
-        {creating ? (
-          <input
-            type="text"
-            autoFocus
-            placeholder={t("new_branch_placeholder")}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                const v = (e.target as HTMLInputElement).value.trim();
-                if (v) onCreate(v);
-              } else if (e.key === "Escape") {
-                setCreating(false);
-              }
-            }}
-            className="w-full rounded bg-neutral-900 px-2 py-0.5 text-[11px] text-neutral-200 outline-none focus:ring-1 focus:ring-neutral-700"
-          />
-        ) : (
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            className="flex w-full items-center gap-1 rounded px-2 py-0.5 text-left text-[11px] text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
-          >
-            <Plus size={10} />
-            {t("new_branch")}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function LogSection({
   projectId,
   worktreeId,
+  onCompare,
 }: {
   projectId: string;
   worktreeId: string;
+  onCompare: (from: string, to: string, title: string) => void;
 }) {
   const { t, i18n } = useTranslation("git");
   const log = useGitStore((s) => s.log[worktreeId] ?? EMPTY_LOG);
@@ -461,9 +495,12 @@ function LogSection({
   const [menu, setMenu] = useState<
     { x: number; y: number; oid: string; short: string } | null
   >(null);
-  const [revDiff, setRevDiff] = useState<
-    { from: string; to: string; title: string } | null
-  >(null);
+  // Tag creation asks for a name inline — `window.prompt` is a no-op in
+  // WebView2, so it silently did nothing before.
+  const [tagging, setTagging] = useState<{ oid: string; short: string } | null>(
+    null,
+  );
+  const [tagName, setTagName] = useState("");
 
   useEffect(() => {
     if (open) {
@@ -548,11 +585,11 @@ function LogSection({
           <button
             type="button"
             onClick={() => {
-              setRevDiff({
-                from: `${menu.oid}^`,
-                to: menu.oid,
-                title: t("rev_show_changes_in", { id: menu.short }),
-              });
+              onCompare(
+                `${menu.oid}^`,
+                menu.oid,
+                t("rev_show_changes_in", { id: menu.short }),
+              );
               setMenu(null);
             }}
             className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
@@ -563,11 +600,11 @@ function LogSection({
           <button
             type="button"
             onClick={() => {
-              setRevDiff({
-                from: menu.oid,
-                to: "HEAD",
-                title: t("rev_compare_with_head", { id: menu.short }),
-              });
+              onCompare(
+                menu.oid,
+                "HEAD",
+                t("rev_compare_with_head", { id: menu.short }),
+              );
               setMenu(null);
             }}
             className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
@@ -578,11 +615,11 @@ function LogSection({
           <button
             type="button"
             onClick={() => {
-              setRevDiff({
-                from: menu.oid,
-                to: "WORKTREE",
-                title: t("rev_compare_with_worktree", { id: menu.short }),
-              });
+              onCompare(
+                menu.oid,
+                "WORKTREE",
+                t("rev_compare_with_worktree", { id: menu.short }),
+              );
               setMenu(null);
             }}
             className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
@@ -623,12 +660,9 @@ function LogSection({
           <button
             type="button"
             onClick={() => {
-              const oid = menu.oid;
+              setTagging({ oid: menu.oid, short: menu.short });
+              setTagName("");
               setMenu(null);
-              const name = window.prompt(t("tag_name_prompt"));
-              if (!name) return;
-              const message = window.prompt(t("tag_message_prompt")) ?? undefined;
-              void createTag(projectId, worktreeId, name, oid, message);
             }}
             className="flex w-full items-center gap-2 px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
           >
@@ -637,16 +671,29 @@ function LogSection({
           </button>
         </div>
       )}
-      {revDiff && (
-        <RevDiffModal
-          projectId={projectId}
-          worktreeId={worktreeId}
-          from={revDiff.from}
-          to={revDiff.to}
-          title={revDiff.title}
-          open
-          onClose={() => setRevDiff(null)}
-        />
+      {tagging && (
+        <div className="border-t border-neutral-800 bg-neutral-900/60 px-2 py-1.5">
+          <div className="mb-1 text-[10px] text-neutral-400">
+            {t("tag_name_for", { id: tagging.short })}
+          </div>
+          <input
+            type="text"
+            autoFocus
+            value={tagName}
+            onChange={(e) => setTagName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const name = tagName.trim();
+                const oid = tagging.oid;
+                setTagging(null);
+                if (name) void createTag(projectId, worktreeId, name, oid);
+              } else if (e.key === "Escape") {
+                setTagging(null);
+              }
+            }}
+            className="w-full rounded bg-neutral-950 px-2 py-1 text-[11px] text-neutral-100 outline-none ring-1 ring-neutral-700 focus:ring-emerald-700"
+          />
+        </div>
       )}
     </div>
   );
@@ -694,15 +741,9 @@ function GitChangesList({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between border-b border-neutral-800/60 bg-neutral-900/30 px-2 py-1 text-[11px] text-neutral-300">
-        <span className="flex items-center gap-1">
-          <GitBranch size={12} className="text-neutral-500" />
-          {status?.branch ?? t("no_branch")}
-          {status?.ahead_behind && (
-            <span className="ml-1 text-neutral-500">
-              ↑{status.ahead_behind.ahead} ↓{status.ahead_behind.behind}
-            </span>
-          )}
+      <div className="flex items-center justify-between border-b border-neutral-800/60 bg-neutral-900/30 px-2 py-1 text-[10px] uppercase tracking-wide text-neutral-500">
+        <span>
+          {t("changes_header", { count: status?.entries.length ?? 0 })}
         </span>
         <button
           type="button"

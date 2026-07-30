@@ -7,20 +7,21 @@
 
 use oxyris_core::Environment;
 pub use oxyris_git::{
-    BranchInfo, CommitInfo, CommitResult, ConflictContents, DiffMode, FileDiff, RemoteOpResult,
-    StashEntry, StatusReport, TagInfo, WorktreeRef,
+    BranchDetail, BranchInfo, CommitInfo, CommitResult, ConflictContents, DiffMode, FileDiff,
+    MergeOutcome, RebaseOutcome, RemoteOpResult, StashEntry, StatusReport, TagInfo, WorktreeRef,
 };
 use oxyris_git::{
     GitError as InnerGitError, branch as git_branch, cherry as git_cherry,
-    conflict as git_conflict, log as git_log, remote as git_remote, stash as git_stash,
-    status as git_status, tag as git_tag, worktree as wt,
+    conflict as git_conflict, log as git_log, merge as git_merge, remote as git_remote,
+    stash as git_stash, status as git_status, tag as git_tag, worktree as wt,
 };
 use oxyris_ipc::ops::{
-    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs, GitCloneArgs,
-    GitCommitArgs, GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs,
-    GitDiffRevsArgs, GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs,
-    GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs,
-    GitStashSaveArgs, GitTagCreateArgs, GitTagNameArgs, op_name,
+    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitBranchRenameArgs,
+    GitCheckoutArgs, GitCheckoutRemoteArgs, GitCloneArgs, GitCommitArgs, GitCommitOidArgs,
+    GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs, GitDiffRevsArgs, GitFetchArgs,
+    GitLogArgs, GitMergeArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitPushDeleteArgs,
+    GitRebaseArgs, GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs,
+    GitStashIndexArgs, GitStashSaveArgs, GitTagCreateArgs, GitTagNameArgs, op_name,
 };
 use thiserror::Error;
 
@@ -566,6 +567,316 @@ pub async fn branch_delete(
             Ok(())
         }
     }
+}
+
+pub async fn branch_list_detailed(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+) -> Result<Vec<BranchDetail>, GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_branch::list_detailed(&repo))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_BRANCH_LIST_DETAILED,
+                    to_value(GitRepoPathArgs {
+                        repo_path: repo_path.to_owned(),
+                    })?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn branch_rename(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    old: String,
+    new: String,
+    force: bool,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_branch::rename_branch(&repo, &old, &new, force))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_BRANCH_RENAME,
+                    to_value(GitBranchRenameArgs {
+                        repo_path: repo_path.to_owned(),
+                        old,
+                        new,
+                        force,
+                    })?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn branch_delete_remote_tracking(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    name: String,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_branch::delete_remote_tracking(&repo, &name))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_BRANCH_DELETE_REMOTE,
+                    to_value(GitBranchDeleteArgs {
+                        repo_path: repo_path.to_owned(),
+                        name,
+                    })?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn checkout_remote(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    remote_ref: String,
+    local: Option<String>,
+) -> Result<String, GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || {
+                git_branch::checkout_remote(&repo, &remote_ref, local.as_deref())
+            })
+            .await
+            .map_err(|e| GitError::Git(format!("join: {e}")))?
+            .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_CHECKOUT_REMOTE,
+                    to_value(GitCheckoutRemoteArgs {
+                        repo_path: repo_path.to_owned(),
+                        remote_ref,
+                        local,
+                    })?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn push_delete(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    remote: String,
+    branch: String,
+) -> Result<RemoteOpResult, GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_remote::push_delete(&repo, &remote, &branch))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_PUSH_DELETE,
+                    to_value(GitPushDeleteArgs {
+                        repo_path: repo_path.to_owned(),
+                        remote,
+                        branch,
+                    })?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn merge(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    name: String,
+    no_ff: bool,
+) -> Result<MergeOutcome, GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_merge::merge(&repo, &name, no_ff))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_MERGE,
+                    to_value(GitMergeArgs {
+                        repo_path: repo_path.to_owned(),
+                        name,
+                        no_ff,
+                    })?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn merge_abort(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_merge::merge_abort(&repo))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_MERGE_ABORT,
+                    to_value(GitRepoPathArgs {
+                        repo_path: repo_path.to_owned(),
+                    })?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn rebase(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+    upstream: String,
+) -> Result<RebaseOutcome, GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_merge::rebase(&repo, &upstream))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_REBASE,
+                    to_value(GitRebaseArgs {
+                        repo_path: repo_path.to_owned(),
+                        upstream,
+                    })?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn rebase_continue(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+) -> Result<RebaseOutcome, GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_merge::rebase_continue(&repo))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            let value = agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_REBASE_CONTINUE,
+                    to_value(GitRepoPathArgs {
+                        repo_path: repo_path.to_owned(),
+                    })?,
+                )
+                .await?;
+            serde_json::from_value(value).map_err(|e| GitError::Agent(e.to_string()))
+        }
+    }
+}
+
+pub async fn rebase_abort(
+    env: &Environment,
+    agent_pool: &AgentPool,
+    repo_path: &str,
+) -> Result<(), GitError> {
+    match env {
+        Environment::Local => {
+            let repo = repo_path.to_owned();
+            tokio::task::spawn_blocking(move || git_merge::rebase_abort(&repo))
+                .await
+                .map_err(|e| GitError::Git(format!("join: {e}")))?
+                .map_err(Into::into)
+        }
+        Environment::Wsl { distro } => {
+            agent_pool
+                .call(
+                    distro,
+                    op_name::GIT_REBASE_ABORT,
+                    to_value(GitRepoPathArgs {
+                        repo_path: repo_path.to_owned(),
+                    })?,
+                )
+                .await?;
+            Ok(())
+        }
+    }
+}
+
+/// Serialize agent op args, mapping the (impossible in practice) failure onto
+/// `GitError::Agent` so call sites stay one-liners.
+fn to_value<T: serde::Serialize>(args: T) -> Result<serde_json::Value, GitError> {
+    serde_json::to_value(args).map_err(|e| GitError::Agent(e.to_string()))
 }
 
 pub async fn log(

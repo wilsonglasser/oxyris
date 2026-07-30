@@ -8,8 +8,8 @@ use std::path::Path;
 
 use crate::error::GitError;
 use crate::types::{
-    AheadBehind, CommitResult, DiffMode, FileDiff, FileStatus, StatusBucket, StatusEntry,
-    StatusReport,
+    AheadBehind, CommitResult, DiffMode, FileDiff, FileStatus, RepoState, StatusBucket,
+    StatusEntry, StatusReport,
 };
 
 pub fn status(repo_path: &str) -> Result<StatusReport, GitError> {
@@ -91,6 +91,7 @@ pub fn status(repo_path: &str) -> Result<StatusReport, GitError> {
         entries,
         branch,
         ahead_behind,
+        state: RepoState::from(repo.state()),
     })
 }
 
@@ -122,6 +123,24 @@ fn bucket_for_workdir(s: git2::Status) -> Option<FileStatus> {
     } else {
         None
     }
+}
+
+/// OIDs recorded in `.git/MERGE_HEAD` — the "theirs" side(s) of an in-progress
+/// merge. Empty when no merge is pending. Read from the file rather than
+/// `mergehead_foreach`, which needs `&mut Repository` and would collide with
+/// the index/tree borrows the caller is already holding.
+fn merge_heads(repo: &git2::Repository) -> Result<Vec<git2::Oid>, GitError> {
+    if repo.state() != git2::RepositoryState::Merge {
+        return Ok(Vec::new());
+    }
+    let raw = match std::fs::read_to_string(repo.path().join("MERGE_HEAD")) {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(raw
+        .lines()
+        .filter_map(|line| git2::Oid::from_str(line.trim()).ok())
+        .collect())
 }
 
 fn ahead_behind(repo: &git2::Repository) -> Result<Option<AheadBehind>, GitError> {
@@ -306,7 +325,7 @@ pub fn commit(repo_path: &str, message: &str, amend: bool) -> Result<CommitResul
     let tree = repo.find_tree(tree_oid)?;
 
     let head = repo.head().ok();
-    let parents: Vec<git2::Commit> = match (&head, amend) {
+    let mut parents: Vec<git2::Commit> = match (&head, amend) {
         (Some(h), true) => {
             // Amend: replace HEAD's commit, keep its parents.
             let head_commit = h.peel_to_commit()?;
@@ -315,6 +334,14 @@ pub fn commit(repo_path: &str, message: &str, amend: bool) -> Result<CommitResul
         (Some(h), false) => vec![h.peel_to_commit()?],
         (None, _) => Vec::new(),
     };
+    // A commit that finishes a conflicted merge must keep the second parent,
+    // otherwise the merge is recorded as a plain commit and MERGE_HEAD is left
+    // dangling. `merge_heads` is empty for every non-merge commit.
+    if !amend {
+        for oid in merge_heads(&repo)? {
+            parents.push(repo.find_commit(oid)?);
+        }
+    }
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
 
     let oid = repo.commit(
@@ -325,6 +352,10 @@ pub fn commit(repo_path: &str, message: &str, amend: bool) -> Result<CommitResul
         &tree,
         &parent_refs,
     )?;
+    // Clears MERGE_HEAD / CHERRY_PICK_HEAD and friends once the commit lands.
+    if repo.state() != git2::RepositoryState::Clean {
+        repo.cleanup_state()?;
+    }
 
     let branch = repo
         .head()

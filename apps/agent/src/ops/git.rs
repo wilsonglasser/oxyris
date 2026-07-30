@@ -5,6 +5,7 @@ use oxyris_git::checkpoint;
 use oxyris_git::cherry as git_cherry;
 use oxyris_git::conflict as git_conflict;
 use oxyris_git::log as git_log;
+use oxyris_git::merge as git_merge;
 use oxyris_git::remote;
 use oxyris_git::stash as git_stash;
 use oxyris_git::status as git_status;
@@ -12,10 +13,11 @@ use oxyris_git::tag as git_tag;
 use oxyris_git::types::{CheckpointPhase, DiffMode};
 use oxyris_git::worktree;
 use oxyris_ipc::ops::{
-    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitCheckoutArgs,
-    GitCheckpointCaptureArgs, GitCheckpointCaptureResult, GitCheckpointTurnArgs, GitCloneArgs,
-    GitCommitArgs, GitCommitOidArgs, GitConflictPathArgs, GitCreateWorktreeArgs, GitDiffFileArgs,
-    GitDiffRevsArgs, GitFetchArgs, GitLogArgs, GitPathsArgs, GitPullArgs, GitPushArgs,
+    GitApplyPatchArgs, GitBranchCreateArgs, GitBranchDeleteArgs, GitBranchRenameArgs,
+    GitCheckoutArgs, GitCheckoutRemoteArgs, GitCheckpointCaptureArgs, GitCheckpointCaptureResult,
+    GitCheckpointTurnArgs, GitCloneArgs, GitCommitArgs, GitCommitOidArgs, GitConflictPathArgs,
+    GitCreateWorktreeArgs, GitDiffFileArgs, GitDiffRevsArgs, GitFetchArgs, GitLogArgs,
+    GitMergeArgs, GitPathsArgs, GitPullArgs, GitPushArgs, GitPushDeleteArgs, GitRebaseArgs,
     GitRemoveWorktreeArgs, GitRepoPathArgs, GitResolveArgs, GitStashApplyArgs, GitStashIndexArgs,
     GitStashSaveArgs, GitTagCreateArgs, GitTagNameArgs,
 };
@@ -148,6 +150,57 @@ pub fn branch_create(args: GitBranchCreateArgs) -> Result<serde_json::Value, OpE
 
 pub fn branch_delete(args: GitBranchDeleteArgs) -> Result<serde_json::Value, OpError> {
     git_branch::delete_branch(&args.repo_path, &args.name)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn branch_list_detailed(args: GitRepoPathArgs) -> Result<serde_json::Value, OpError> {
+    let rows = git_branch::list_detailed(&args.repo_path)?;
+    Ok(serde_json::to_value(rows)?)
+}
+
+pub fn branch_rename(args: GitBranchRenameArgs) -> Result<serde_json::Value, OpError> {
+    git_branch::rename_branch(&args.repo_path, &args.old, &args.new, args.force)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn branch_delete_remote(args: GitBranchDeleteArgs) -> Result<serde_json::Value, OpError> {
+    git_branch::delete_remote_tracking(&args.repo_path, &args.name)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn checkout_remote(args: GitCheckoutRemoteArgs) -> Result<serde_json::Value, OpError> {
+    let local =
+        git_branch::checkout_remote(&args.repo_path, &args.remote_ref, args.local.as_deref())?;
+    Ok(serde_json::Value::String(local))
+}
+
+pub fn push_delete(args: GitPushDeleteArgs) -> Result<serde_json::Value, OpError> {
+    let result = remote::push_delete(&args.repo_path, &args.remote, &args.branch)?;
+    Ok(serde_json::to_value(result)?)
+}
+
+pub fn merge(args: GitMergeArgs) -> Result<serde_json::Value, OpError> {
+    let outcome = git_merge::merge(&args.repo_path, &args.name, args.no_ff)?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
+pub fn merge_abort(args: GitRepoPathArgs) -> Result<serde_json::Value, OpError> {
+    git_merge::merge_abort(&args.repo_path)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub fn rebase(args: GitRebaseArgs) -> Result<serde_json::Value, OpError> {
+    let outcome = git_merge::rebase(&args.repo_path, &args.upstream)?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
+pub fn rebase_continue(args: GitRepoPathArgs) -> Result<serde_json::Value, OpError> {
+    let outcome = git_merge::rebase_continue(&args.repo_path)?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
+pub fn rebase_abort(args: GitRepoPathArgs) -> Result<serde_json::Value, OpError> {
+    git_merge::rebase_abort(&args.repo_path)?;
     Ok(serde_json::Value::Null)
 }
 

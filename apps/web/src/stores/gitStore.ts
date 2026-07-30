@@ -3,15 +3,25 @@ import {
   gitApplyPatch,
   gitBranchCreate,
   gitBranchDelete,
+  gitBranchDeleteRemote,
+  gitBranchList,
+  gitBranchRename,
   gitCheckout,
+  gitCheckoutRemote,
   gitCherryPick,
   gitCommit,
   gitDiffFile,
   gitFetch,
   gitGenerateCommitMessage,
   gitLog,
+  gitMerge,
+  gitMergeAbort,
   gitPull,
   gitPush,
+  gitPushDelete,
+  gitRebase,
+  gitRebaseAbort,
+  gitRebaseContinue,
   gitRevert,
   gitStage,
   gitStashApply,
@@ -23,9 +33,12 @@ import {
   gitTagDelete,
   gitTagList,
   gitUnstage,
+  type BranchDetail,
   type CommitInfo,
   type DiffMode,
   type FileDiff,
+  type MergeOutcome,
+  type RebaseOutcome,
   type StashEntry,
   type StatusEntry,
   type StatusReport,
@@ -99,6 +112,13 @@ interface GitState {
   ) => Promise<void>;
 
   refreshBranches: (projectId: string, worktreeId: string) => Promise<void>;
+  /** Rich rows for the branch manager (tracking, divergence, tip metadata). */
+  branchDetails: Record<string, BranchDetail[]>;
+  branchesLoading: Record<string, boolean>;
+  refreshBranchDetails: (
+    projectId: string,
+    worktreeId: string,
+  ) => Promise<void>;
   refreshLog: (
     projectId: string,
     worktreeId: string,
@@ -125,11 +145,59 @@ interface GitState {
     worktreeId: string,
     name: string,
     checkout?: boolean,
+    from?: string,
   ) => Promise<void>;
   deleteBranch: (
     projectId: string,
     worktreeId: string,
     name: string,
+  ) => Promise<void>;
+
+  // ── branch management (JetBrains-style popup) ───────────────────────────
+  /** Checks out a remote-tracking ref as a local branch that tracks it. */
+  checkoutRemoteBranch: (
+    projectId: string,
+    worktreeId: string,
+    remoteRef: string,
+    local?: string,
+  ) => Promise<void>;
+  renameBranch: (
+    projectId: string,
+    worktreeId: string,
+    from: string,
+    to: string,
+  ) => Promise<void>;
+  /** Drops the local `origin/x` ref; `onRemote` also pushes the deletion. */
+  deleteRemoteBranch: (
+    projectId: string,
+    worktreeId: string,
+    remoteRef: string,
+    onRemote: boolean,
+  ) => Promise<void>;
+  /** Merge `name` into the current branch. Throws on git failure. */
+  mergeBranch: (
+    projectId: string,
+    worktreeId: string,
+    name: string,
+    noFf?: boolean,
+  ) => Promise<MergeOutcome>;
+  abortMerge: (projectId: string, worktreeId: string) => Promise<void>;
+  /** Replay the current branch onto `upstream`. */
+  rebaseOnto: (
+    projectId: string,
+    worktreeId: string,
+    upstream: string,
+  ) => Promise<RebaseOutcome>;
+  continueRebase: (
+    projectId: string,
+    worktreeId: string,
+  ) => Promise<RebaseOutcome>;
+  abortRebase: (projectId: string, worktreeId: string) => Promise<void>;
+  /** JetBrains "Update Project": fetch, then pull the tracking branch. */
+  updateProject: (
+    projectId: string,
+    worktreeId: string,
+    rebase?: boolean,
   ) => Promise<void>;
   generatingCommitMsg: Record<string, boolean>;
   generateCommitMessage: (
@@ -193,6 +261,8 @@ export const useGitStore = create<GitState>((set, get) => ({
   committing: {},
   commitError: {},
   branches: {},
+  branchDetails: {},
+  branchesLoading: {},
   log: {},
   remote: {},
   generatingCommitMsg: {},
@@ -344,6 +414,28 @@ export const useGitStore = create<GitState>((set, get) => ({
     }));
   },
 
+  refreshBranchDetails: async (projectId, worktreeId) => {
+    set((state) => ({
+      branchesLoading: { ...state.branchesLoading, [worktreeId]: true },
+    }));
+    try {
+      const list = await gitBranchList({ projectId, worktreeId });
+      set((state) => ({
+        branchDetails: { ...state.branchDetails, [worktreeId]: list },
+        branchesLoading: { ...state.branchesLoading, [worktreeId]: false },
+      }));
+    } catch (e) {
+      set((state) => ({
+        branchesLoading: { ...state.branchesLoading, [worktreeId]: false },
+      }));
+      setRemote(set, worktreeId, {
+        running: false,
+        lastOutput: null,
+        error: errMsg(e),
+      });
+    }
+  },
+
   refreshLog: async (projectId, worktreeId, limit = 50) => {
     const entries = await gitLog({ projectId, worktreeId, limit });
     set((state) => ({ log: { ...state.log, [worktreeId]: entries } }));
@@ -409,19 +501,155 @@ export const useGitStore = create<GitState>((set, get) => ({
 
   checkout: async (projectId, worktreeId, name) => {
     await gitCheckout({ projectId, worktreeId, name });
-    await get().refreshStatus(projectId, worktreeId);
-    await get().refreshBranches(projectId, worktreeId);
+    await refreshRefs(get, projectId, worktreeId);
   },
 
-  createBranch: async (projectId, worktreeId, name, checkout = true) => {
-    await gitBranchCreate({ projectId, worktreeId, name, checkout });
-    await get().refreshStatus(projectId, worktreeId);
-    await get().refreshBranches(projectId, worktreeId);
+  createBranch: async (projectId, worktreeId, name, checkout = true, from) => {
+    await gitBranchCreate({
+      projectId,
+      worktreeId,
+      name,
+      checkout,
+      ...(from !== undefined ? { from } : {}),
+    });
+    await refreshRefs(get, projectId, worktreeId);
   },
 
   deleteBranch: async (projectId, worktreeId, name) => {
     await gitBranchDelete({ projectId, worktreeId, name });
-    await get().refreshBranches(projectId, worktreeId);
+    await refreshRefs(get, projectId, worktreeId);
+  },
+
+  checkoutRemoteBranch: async (projectId, worktreeId, remoteRef, local) => {
+    await gitCheckoutRemote({
+      projectId,
+      worktreeId,
+      remoteRef,
+      ...(local !== undefined ? { local } : {}),
+    });
+    await refreshRefs(get, projectId, worktreeId);
+  },
+
+  renameBranch: async (projectId, worktreeId, from, to) => {
+    await gitBranchRename({ projectId, worktreeId, old: from, new: to });
+    await refreshRefs(get, projectId, worktreeId);
+  },
+
+  deleteRemoteBranch: async (projectId, worktreeId, remoteRef, onRemote) => {
+    if (onRemote) {
+      // `origin/feature/x` → remote `origin`, branch `feature/x`.
+      const slash = remoteRef.indexOf("/");
+      const remote = slash > 0 ? remoteRef.slice(0, slash) : "origin";
+      const branch = slash > 0 ? remoteRef.slice(slash + 1) : remoteRef;
+      setRemote(set, worktreeId, {
+        running: true,
+        lastOutput: null,
+        error: null,
+      });
+      try {
+        const r = await gitPushDelete({
+          projectId,
+          worktreeId,
+          remote,
+          branch,
+        });
+        setRemote(set, worktreeId, {
+          running: false,
+          lastOutput: r.stderr || r.stdout,
+          error: null,
+        });
+      } catch (e) {
+        setRemote(set, worktreeId, {
+          running: false,
+          lastOutput: null,
+          error: errMsg(e),
+        });
+        return;
+      }
+    }
+    await gitBranchDeleteRemote({ projectId, worktreeId, name: remoteRef });
+    await refreshRefs(get, projectId, worktreeId);
+  },
+
+  mergeBranch: async (projectId, worktreeId, name, noFf = false) => {
+    setRemote(set, worktreeId, { running: true, lastOutput: null, error: null });
+    try {
+      const outcome = await gitMerge({ projectId, worktreeId, name, noFf });
+      setRemote(set, worktreeId, {
+        running: false,
+        lastOutput: null,
+        error: null,
+      });
+      await refreshRefs(get, projectId, worktreeId);
+      return outcome;
+    } catch (e) {
+      setRemote(set, worktreeId, {
+        running: false,
+        lastOutput: null,
+        error: errMsg(e),
+      });
+      throw e;
+    }
+  },
+
+  abortMerge: async (projectId, worktreeId) => {
+    await gitMergeAbort({ projectId, worktreeId });
+    await refreshRefs(get, projectId, worktreeId);
+  },
+
+  rebaseOnto: async (projectId, worktreeId, upstream) => {
+    setRemote(set, worktreeId, { running: true, lastOutput: null, error: null });
+    try {
+      const outcome = await gitRebase({ projectId, worktreeId, upstream });
+      setRemote(set, worktreeId, {
+        running: false,
+        lastOutput: null,
+        error: null,
+      });
+      await refreshRefs(get, projectId, worktreeId);
+      return outcome;
+    } catch (e) {
+      setRemote(set, worktreeId, {
+        running: false,
+        lastOutput: null,
+        error: errMsg(e),
+      });
+      throw e;
+    }
+  },
+
+  continueRebase: async (projectId, worktreeId) => {
+    const outcome = await gitRebaseContinue({ projectId, worktreeId });
+    await refreshRefs(get, projectId, worktreeId);
+    return outcome;
+  },
+
+  abortRebase: async (projectId, worktreeId) => {
+    await gitRebaseAbort({ projectId, worktreeId });
+    await refreshRefs(get, projectId, worktreeId);
+  },
+
+  updateProject: async (projectId, worktreeId, rebase = false) => {
+    setRemote(set, worktreeId, { running: true, lastOutput: null, error: null });
+    try {
+      const fetched = await gitFetch({ projectId, worktreeId });
+      const pulled = await gitPull({ projectId, worktreeId, rebase });
+      setRemote(set, worktreeId, {
+        running: false,
+        lastOutput:
+          [fetched.stderr || fetched.stdout, pulled.stderr || pulled.stdout]
+            .filter((s) => s.trim().length > 0)
+            .join("\n") || null,
+        error: null,
+      });
+    } catch (e) {
+      setRemote(set, worktreeId, {
+        running: false,
+        lastOutput: null,
+        error: errMsg(e),
+      });
+    }
+    await refreshRefs(get, projectId, worktreeId);
   },
 
   refreshStashes: async (projectId, worktreeId) => {
@@ -558,6 +786,27 @@ function setRemote(
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Re-read everything a ref-mutating op (checkout, merge, rebase, branch
+ * create/delete) can invalidate: the working-tree status, both branch lists,
+ * and the commit log. Failures are swallowed — the op itself already
+ * succeeded, and a refresh error shouldn't be reported as an op error.
+ */
+async function refreshRefs(
+  get: () => GitState,
+  projectId: string,
+  worktreeId: string,
+): Promise<void> {
+  await get().refreshStatus(projectId, worktreeId);
+  await get().refreshBranchDetails(projectId, worktreeId);
+  await get()
+    .refreshBranches(projectId, worktreeId)
+    .catch((e: unknown) => console.warn(e));
+  await get()
+    .refreshLog(projectId, worktreeId, 50)
+    .catch((e: unknown) => console.warn(e));
 }
 
 /**

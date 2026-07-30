@@ -107,9 +107,43 @@ pub struct StatusReport {
     /// Commits ahead/behind the upstream of `branch`. `None` when there is
     /// no upstream tracking branch.
     pub ahead_behind: Option<AheadBehind>,
+    /// Sequencer state (merge / rebase / cherry-pick in progress). Drives the
+    /// "you are mid-merge" banner and its continue/abort actions.
+    #[serde(default)]
+    pub state: RepoState,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// What multi-step operation the repository is in the middle of. Mirrors
+/// `git2::RepositoryState`, collapsed to the cases the UI reacts to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoState {
+    #[default]
+    Clean,
+    Merge,
+    Revert,
+    CherryPick,
+    Rebase,
+    Bisect,
+    Other,
+}
+
+impl From<git2::RepositoryState> for RepoState {
+    fn from(s: git2::RepositoryState) -> Self {
+        use git2::RepositoryState as S;
+        match s {
+            S::Clean => RepoState::Clean,
+            S::Merge => RepoState::Merge,
+            S::Revert | S::RevertSequence => RepoState::Revert,
+            S::CherryPick | S::CherryPickSequence => RepoState::CherryPick,
+            S::Rebase | S::RebaseInteractive | S::RebaseMerge => RepoState::Rebase,
+            S::Bisect => RepoState::Bisect,
+            _ => RepoState::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AheadBehind {
     pub ahead: u32,
     pub behind: u32,

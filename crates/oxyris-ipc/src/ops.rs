@@ -42,6 +42,16 @@ pub mod op_name {
     pub const GIT_CHECKOUT: &str = "git.checkout";
     pub const GIT_BRANCH_CREATE: &str = "git.branch_create";
     pub const GIT_BRANCH_DELETE: &str = "git.branch_delete";
+    pub const GIT_BRANCH_LIST_DETAILED: &str = "git.branch_list_detailed";
+    pub const GIT_BRANCH_RENAME: &str = "git.branch_rename";
+    pub const GIT_BRANCH_DELETE_REMOTE: &str = "git.branch_delete_remote";
+    pub const GIT_CHECKOUT_REMOTE: &str = "git.checkout_remote";
+    pub const GIT_PUSH_DELETE: &str = "git.push_delete";
+    pub const GIT_MERGE: &str = "git.merge";
+    pub const GIT_MERGE_ABORT: &str = "git.merge_abort";
+    pub const GIT_REBASE: &str = "git.rebase";
+    pub const GIT_REBASE_CONTINUE: &str = "git.rebase_continue";
+    pub const GIT_REBASE_ABORT: &str = "git.rebase_abort";
     pub const GIT_LOG: &str = "git.log";
     pub const GIT_GET_CONFLICT: &str = "git.get_conflict";
     pub const GIT_RESOLVE: &str = "git.resolve";
@@ -565,6 +575,50 @@ pub struct GitBranchCreateArgs {
 pub struct GitBranchDeleteArgs {
     pub repo_path: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchRenameArgs {
+    pub repo_path: String,
+    pub old: String,
+    pub new: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCheckoutRemoteArgs {
+    pub repo_path: String,
+    /// Remote-tracking shorthand, e.g. `origin/feature/x`.
+    pub remote_ref: String,
+    /// Local branch name to create; defaults to the ref minus its remote.
+    #[serde(default)]
+    pub local: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitPushDeleteArgs {
+    pub repo_path: String,
+    pub remote: String,
+    pub branch: String,
+}
+
+// ────── git.merge / git.rebase ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitMergeArgs {
+    pub repo_path: String,
+    /// Branch / tag / commit-ish to merge into HEAD.
+    pub name: String,
+    #[serde(default)]
+    pub no_ff: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRebaseArgs {
+    pub repo_path: String,
+    /// The branch HEAD's commits are replayed onto.
+    pub upstream: String,
 }
 
 // ────── git.log ────────────────────────────────────────────────────────────

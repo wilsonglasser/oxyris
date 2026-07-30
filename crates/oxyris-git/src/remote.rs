@@ -100,6 +100,18 @@ pub fn push(
     run(&args)
 }
 
+/// `git push <remote> --delete <branch>` — removes the branch on the remote.
+/// Shelled out for the same credential-helper reason as the other remote ops.
+pub fn push_delete(
+    repo_path: &str,
+    remote: &str,
+    branch: &str,
+) -> Result<RemoteOpResult, GitError> {
+    deny_option_like(remote)?;
+    deny_option_like(branch)?;
+    run(&["-C", repo_path, "push", "--delete", "--", remote, branch])
+}
+
 fn run(args: &[&str]) -> Result<RemoteOpResult, GitError> {
     let out = Command::new("git").args(args).hide_console().output()?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

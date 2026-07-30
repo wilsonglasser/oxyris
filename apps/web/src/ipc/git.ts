@@ -61,11 +61,48 @@ export type AheadBehind = {
   behind: number;
 };
 
+/** Sequencer state — a merge/rebase/cherry-pick left mid-flight. */
+export type RepoState =
+  | "clean"
+  | "merge"
+  | "revert"
+  | "cherry_pick"
+  | "rebase"
+  | "bisect"
+  | "other";
+
 export type StatusReport = {
   entries: StatusEntry[];
   branch: string | null;
   ahead_behind: AheadBehind | null;
+  state: RepoState;
 };
+
+/** A row in the branch manager. */
+export type BranchDetail = {
+  name: string;
+  is_current: boolean;
+  is_remote: boolean;
+  upstream: string | null;
+  ahead_behind: AheadBehind | null;
+  tip_oid: string;
+  tip_short: string;
+  tip_summary: string;
+  tip_time: number;
+  /** Linked worktree already holding this branch — git blocks a 2nd checkout. */
+  checked_out_in: string | null;
+};
+
+export type MergeOutcome =
+  | { kind: "up_to_date" }
+  | { kind: "fast_forward"; oid: string }
+  | { kind: "merged"; oid: string }
+  | { kind: "conflicts"; paths: string[] };
+
+export type RebaseOutcome =
+  | { kind: "up_to_date" }
+  | { kind: "done"; commits: number }
+  | { kind: "conflicts"; paths: string[] };
 
 export type FileDiff = {
   path: string;
@@ -262,6 +299,129 @@ export function gitBranchDelete(args: {
       worktree_id: args.worktreeId,
       name: args.name,
     },
+  });
+}
+
+export function gitBranchList(args: {
+  projectId: string;
+  worktreeId: string;
+}): Promise<BranchDetail[]> {
+  return invokeGit<BranchDetail[]>("git_branch_list", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+  });
+}
+
+export function gitBranchRename(args: {
+  projectId: string;
+  worktreeId: string;
+  old: string;
+  new: string;
+  force?: boolean;
+}): Promise<void> {
+  return invokeGit<void>("git_branch_rename", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    old: args.old,
+    new: args.new,
+    force: args.force ?? false,
+  });
+}
+
+/** Drops the local `origin/x` ref only — see `gitPushDelete` for the remote. */
+export function gitBranchDeleteRemote(args: {
+  projectId: string;
+  worktreeId: string;
+  name: string;
+}): Promise<void> {
+  return invokeGit<void>("git_branch_delete_remote", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    name: args.name,
+  });
+}
+
+export function gitCheckoutRemote(args: {
+  projectId: string;
+  worktreeId: string;
+  remoteRef: string;
+  local?: string;
+}): Promise<{ local: string }> {
+  return invokeGit<{ local: string }>("git_checkout_remote", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    remote_ref: args.remoteRef,
+    local: args.local,
+  });
+}
+
+export function gitPushDelete(args: {
+  projectId: string;
+  worktreeId: string;
+  remote?: string;
+  branch: string;
+}): Promise<RemoteOpResult> {
+  return invokeGit<RemoteOpResult>("git_push_delete", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    remote: args.remote ?? "origin",
+    branch: args.branch,
+  });
+}
+
+export function gitMerge(args: {
+  projectId: string;
+  worktreeId: string;
+  name: string;
+  noFf?: boolean;
+}): Promise<MergeOutcome> {
+  return invokeGit<MergeOutcome>("git_merge", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    name: args.name,
+    no_ff: args.noFf ?? false,
+  });
+}
+
+export function gitMergeAbort(args: {
+  projectId: string;
+  worktreeId: string;
+}): Promise<void> {
+  return invokeGit<void>("git_merge_abort", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+  });
+}
+
+export function gitRebase(args: {
+  projectId: string;
+  worktreeId: string;
+  upstream: string;
+}): Promise<RebaseOutcome> {
+  return invokeGit<RebaseOutcome>("git_rebase", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+    upstream: args.upstream,
+  });
+}
+
+export function gitRebaseContinue(args: {
+  projectId: string;
+  worktreeId: string;
+}): Promise<RebaseOutcome> {
+  return invokeGit<RebaseOutcome>("git_rebase_continue", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
+  });
+}
+
+export function gitRebaseAbort(args: {
+  projectId: string;
+  worktreeId: string;
+}): Promise<void> {
+  return invokeGit<void>("git_rebase_abort", {
+    project_id: args.projectId,
+    worktree_id: args.worktreeId,
   });
 }
 
