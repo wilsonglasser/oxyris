@@ -12,6 +12,7 @@ import { islandDark } from "~/lib/codemirror-theme.ts";
 import { languageForPath } from "~/lib/codemirror-language.ts";
 import { Eye, FileText } from "lucide-react";
 import { fsExternalEditors, fsOpenExternal } from "~/ipc/fs.ts";
+import { MenuSurface } from "~/components/MenuSurface.tsx";
 import {
   scopeKey,
   useFileEditorStore,
@@ -198,11 +199,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
       </div>
 
       {menu && (
-        <div
-          style={{ left: menu.x, top: menu.y }}
-          className="fixed z-50 min-w-[140px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-lg"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
+        <MenuSurface x={menu.x} y={menu.y} className="min-w-[140px]">
           <button
             type="button"
             onClick={() => {
@@ -233,7 +230,7 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           >
             {t("ctx_close_all")}
           </button>
-        </div>
+        </MenuSurface>
       )}
 
       {activeTab && (

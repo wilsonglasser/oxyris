@@ -42,6 +42,7 @@ import {
   CompareRefModal,
   FileHistoryModal,
 } from "~/components/FileGitCompare.tsx";
+import { MenuSurface } from "~/components/MenuSurface.tsx";
 
 interface Props {
   projectId: string;
@@ -441,11 +442,7 @@ export function FileTreePanel({
       </div>
 
       {menu && (
-        <div
-          style={{ left: menu.x, top: menu.y }}
-          className="fixed z-50 min-w-[200px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-lg"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
+        <MenuSurface x={menu.x} y={menu.y} className="min-w-[200px]">
           {/* Open actions — files only. */}
           {menu.relPath !== "" && !menu.isDir && (
             <>
@@ -597,7 +594,7 @@ export function FileTreePanel({
               />
             </>
           )}
-        </div>
+        </MenuSurface>
       )}
 
       {revDiff && (

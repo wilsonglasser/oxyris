@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type { BranchDetail } from "~/ipc/git.ts";
 import { useGitStore } from "~/stores/gitStore.ts";
+import { useAnchoredMenu } from "~/hooks/useAnchoredMenu.ts";
 
 const EMPTY: BranchDetail[] = [];
 
@@ -611,7 +612,9 @@ function BranchActions({
   const delRemote = useGitStore((s) => s.deleteRemoteBranch);
   const pull = useGitStore((s) => s.pull);
   const push = useGitStore((s) => s.push);
-  const ref = useRef<HTMLDivElement | null>(null);
+  // Shared placement: flips / clamps / scrolls so the popup never spills out of
+  // the viewport. The same node backs the outside-click check below.
+  const { ref, style } = useAnchoredMenu<HTMLDivElement>(x, y);
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -655,7 +658,7 @@ function BranchActions({
   return (
     <div
       ref={ref}
-      style={{ left: Math.min(x, window.innerWidth - 260), top: y }}
+      style={style}
       className="fixed z-40 w-[250px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-xl"
     >
       <div className="truncate border-b border-neutral-800 px-3 pb-1 text-[10px] text-neutral-500">

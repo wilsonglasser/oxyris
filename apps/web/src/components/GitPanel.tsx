@@ -37,6 +37,7 @@ import { MonacoDiffViewer } from "~/components/MonacoDiffViewer.tsx";
 import { RevDiffModal } from "~/components/RevDiffModal.tsx";
 import { MergeEditor } from "~/components/MergeEditor.tsx";
 import { BranchMenu } from "~/components/BranchMenu.tsx";
+import { MenuSurface } from "~/components/MenuSurface.tsx";
 import { useDragResize } from "~/lib/useDragResize.ts";
 import {
   buildSingleHunkPatch,
@@ -577,11 +578,7 @@ function LogSection({
         </div>
       )}
       {menu && (
-        <div
-          style={{ left: menu.x, top: menu.y }}
-          className="fixed z-50 min-w-[180px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-lg"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
+        <MenuSurface x={menu.x} y={menu.y} className="min-w-[180px]">
           <button
             type="button"
             onClick={() => {
@@ -669,7 +666,7 @@ function LogSection({
             <Tag size={11} />
             {t("tag_here")}
           </button>
-        </div>
+        </MenuSurface>
       )}
       {tagging && (
         <div className="border-t border-neutral-800 bg-neutral-900/60 px-2 py-1.5">

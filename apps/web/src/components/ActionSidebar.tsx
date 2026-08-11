@@ -6,6 +6,7 @@ import { actionDelete, actionList, type ActionRow } from "~/ipc/actions.ts";
 import { ActionEditModal } from "~/components/ActionEditModal.tsx";
 import { ActionRunsModal } from "~/components/ActionRunsModal.tsx";
 import { AllActionsModal } from "~/components/AllActionsModal.tsx";
+import { MenuSurface } from "~/components/MenuSurface.tsx";
 import { matchesKey } from "~/lib/keybindings.ts";
 import { useActionRunsStore } from "~/stores/actionRunsStore.ts";
 
@@ -207,11 +208,7 @@ export function ActionSidebar({
       </aside>
 
       {menu && (
-        <div
-          style={{ right: window.innerWidth - menu.x, top: menu.y }}
-          className="fixed z-50 min-w-[170px] rounded border border-neutral-800 bg-neutral-950 py-1 text-[11px] shadow-lg"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
+        <MenuSurface x={menu.x} y={menu.y} align="right" className="min-w-[170px]">
           <button
             type="button"
             onClick={async () => {
@@ -270,7 +267,7 @@ export function ActionSidebar({
             <Trash2 size={11} />
             {t("ctx_delete")}
           </button>
-        </div>
+        </MenuSurface>
       )}
 
       {edit && (
