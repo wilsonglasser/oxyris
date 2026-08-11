@@ -9,7 +9,7 @@ use std::path::Path;
 
 use oxyris_git::merge::{MergeOutcome, RebaseOutcome};
 use oxyris_git::types::RepoState;
-use oxyris_git::{branch, conflict, merge, status};
+use oxyris_git::{branch, conflict, merge, status, worktree};
 
 /// Repo with one commit containing `base.txt`, on branch `main`.
 fn init_repo(dir: &Path) -> git2::Repository {
@@ -346,4 +346,49 @@ fn list_detailed_reports_current_branch_and_ordering() {
     assert!(rows[0].upstream.is_none());
     assert_eq!(rows[0].tip_summary, "a");
     assert!(rows.iter().any(|r| r.name == "main" && !r.is_current));
+}
+
+#[test]
+fn remove_worktree_is_idempotent_when_the_checkout_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    let path = dir.to_str().unwrap();
+
+    let target = dir.join("wt-gone");
+    worktree::create_worktree(path, "gone", "feature/gone", target.to_str().unwrap()).unwrap();
+    // Simulate the user deleting the checkout behind the app's back.
+    fs::remove_dir_all(&target).unwrap();
+
+    worktree::remove_worktree(path, "gone").unwrap();
+    assert!(!dir.join(".git/worktrees/gone").exists());
+    assert!(
+        worktree::list_worktrees(path)
+            .unwrap()
+            .iter()
+            .all(|w| w.name != "gone")
+    );
+
+    // Removing again (row already gone) must not error either.
+    worktree::remove_worktree(path, "gone").unwrap();
+}
+
+#[test]
+fn a_half_deleted_admin_dir_does_not_break_listing_or_removal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    let path = dir.to_str().unwrap();
+
+    let target = dir.join("wt-broken");
+    worktree::create_worktree(path, "broken", "feature/broken", target.to_str().unwrap()).unwrap();
+    // `git_worktree_lookup` reads this file; without it the entry is listed
+    // by `repo.worktrees()` but can't be resolved.
+    fs::remove_file(dir.join(".git/worktrees/broken/gitdir")).unwrap();
+
+    let listed = worktree::list_worktrees(path).unwrap();
+    assert!(listed.iter().all(|w| w.name != "broken"));
+
+    worktree::remove_worktree(path, "broken").unwrap();
+    assert!(!dir.join(".git/worktrees/broken").exists());
 }

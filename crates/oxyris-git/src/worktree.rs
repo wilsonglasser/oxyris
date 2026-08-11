@@ -48,7 +48,13 @@ pub fn list_worktrees(repo_path: &str) -> Result<Vec<WorktreeRef>, GitError> {
     });
 
     for name in repo.worktrees()?.iter().flatten() {
-        let wt = repo.find_worktree(name)?;
+        // Skip entries libgit2 can't look up. A half-deleted admin dir (user
+        // ran `rm -rf` on `.git/worktrees/<name>` or on the checkout) makes
+        // `find_worktree` fail; propagating would blank the whole list and
+        // leave the UI unable to remove anything.
+        let Ok(wt) = repo.find_worktree(name) else {
+            continue;
+        };
         let path = wt.path().to_string_lossy().into_owned();
         let branch = git2::Repository::open(wt.path())
             .ok()
@@ -99,17 +105,52 @@ pub fn create_worktree(
     })
 }
 
+/// Removes a worktree, tolerating one whose directory is already gone.
+///
+/// Removal has to be idempotent: users delete worktree directories outside the
+/// app, and libgit2 can fail on both `find_worktree` and `prune` for a stale
+/// entry (it stats files under the admin dir). Failing there would leave a row
+/// the UI can never get rid of, so any git2 failure falls back to deleting the
+/// admin dir (`<commondir>/worktrees/<name>`) by hand — which is all `git
+/// worktree prune` does anyway.
 pub fn remove_worktree(repo_path: &str, name: &str) -> Result<(), GitError> {
     let repo = open_repo(Path::new(repo_path))?;
-    let wt = repo.find_worktree(name)?;
-    let path = wt.path().to_path_buf();
-    let mut opts = git2::WorktreePruneOptions::new();
-    opts.working_tree(true).valid(true);
-    wt.prune(Some(&mut opts))?;
-    if path.exists() {
+    // `commondir`, not `path`: the admin dirs live in the main repo's `.git`
+    // even when `repo_path` resolved to a linked worktree.
+    let admin_dir = repo.commondir().join("worktrees").join(name);
+    // Resolve the checkout path from git metadata before anything is deleted;
+    // `find_worktree` may be unusable, so fall back to the admin dir's `gitdir`
+    // file, which holds `<checkout>/.git`.
+    let found = repo.find_worktree(name).ok();
+    let path = found
+        .as_ref()
+        .map(|wt| wt.path().to_path_buf())
+        .or_else(|| gitdir_target(&admin_dir));
+
+    let pruned = match found {
+        Some(wt) => {
+            let mut opts = git2::WorktreePruneOptions::new();
+            opts.working_tree(true).valid(true);
+            wt.prune(Some(&mut opts)).is_ok()
+        }
+        None => false,
+    };
+    if !pruned && admin_dir.exists() {
+        std::fs::remove_dir_all(&admin_dir)?;
+    }
+
+    if let Some(path) = path
+        && path.exists()
+    {
         std::fs::remove_dir_all(&path).ok();
     }
     Ok(())
+}
+
+/// Reads `<admin_dir>/gitdir` (`<checkout>/.git`) and returns the checkout path.
+fn gitdir_target(admin_dir: &Path) -> Option<std::path::PathBuf> {
+    let raw = std::fs::read_to_string(admin_dir.join("gitdir")).ok()?;
+    Path::new(raw.trim()).parent().map(Path::to_path_buf)
 }
 
 fn open_repo(path: &Path) -> Result<git2::Repository, GitError> {
