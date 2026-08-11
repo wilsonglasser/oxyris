@@ -282,9 +282,18 @@ impl AgentPool {
                  exit 1\n\
              fi\n\
              mkdir -p ~/.oxyris/bin\n\
-             if [ ! -f ~/.oxyris/bin/oxyris-agent ] || [ \"$src\" -nt ~/.oxyris/bin/oxyris-agent ]; then\n\
-                 cp \"$src\" ~/.oxyris/bin/oxyris-agent\n\
-                 chmod +x ~/.oxyris/bin/oxyris-agent\n\
+             dst=~/.oxyris/bin/oxyris-agent\n\
+             if [ ! -f \"$dst\" ] || [ \"$src\" -nt \"$dst\" ]; then\n\
+                 # Never `cp` onto $dst directly: an agent from a previous run\n\
+                 # may still be executing it, and Linux answers ETXTBSY\n\
+                 # (\"Text file busy\") for writes to a mapped executable.\n\
+                 # Copy to a sibling temp, then `mv` — rename(2) unlinks the old\n\
+                 # inode, which the running process keeps open until it exits.\n\
+                 tmp=\"$dst.$$.tmp\"\n\
+                 trap 'rm -f \"$tmp\"' EXIT\n\
+                 cp \"$src\" \"$tmp\"\n\
+                 chmod +x \"$tmp\"\n\
+                 mv -f \"$tmp\" \"$dst\"\n\
              fi\n"
         );
 
