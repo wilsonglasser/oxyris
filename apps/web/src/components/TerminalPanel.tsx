@@ -295,6 +295,10 @@ export function TerminalView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Full renderer resync (re-measure char cell, rebuild glyph atlas, re-fit,
+  // repaint). Installed by the mount effect; called by anything outside it that
+  // can change the cell size or invalidate the atlas.
+  const hardResyncRef = useRef<(() => void) | null>(null);
   // Global terminal zoom. Kept in a ref too so the keydown/wheel handlers wired
   // once at mount read the latest size without rebuilding the terminal.
   const fontSize = useAppSettingsStore((s) => s.terminalFontSize);
@@ -364,6 +368,10 @@ export function TerminalView({
       gl.onContextLoss(() => {
         gl.dispose();
         webgl = null;
+        // Disposing swaps in the DOM renderer against a canvas that still holds
+        // the last (now frozen) GL frame. Re-measure + repaint so the fallback
+        // paints the real buffer instead of leaving the dead frame on screen.
+        hardResyncRef.current?.();
       });
       term.loadAddon(gl);
       webgl = gl;
@@ -601,6 +609,37 @@ export function TerminalView({
     let unlistenExit: (() => void) | null = null;
     let cancelled = false;
 
+    // ---- renderer resync ---------------------------------------------------
+    // Two repair levels for a terminal whose painted pixels drifted away from
+    // the buffer. Until these existed, a manual window resize was the only
+    // thing that fixed either symptom.
+    //
+    // `rebuildAtlas` (cheap) — throw away the WebGL glyph atlas and repaint
+    // every row. Fixes skewed/overlapping glyphs: the claude TUI burns through
+    // a huge number of fg/bg × glyph combos, and once the atlas fills up the
+    // renderer starts drawing from evicted/stale tiles. No re-measure, so no
+    // reflow — safe to run while the user is reading.
+    //
+    // `hardResync` (full) — also forces xterm to re-measure the char cell and
+    // re-fits. Needed whenever the *cell size* can have changed without the
+    // container resizing (webfont swap, zoom, DPR change, GPU restore): the
+    // canvas keeps `rows × oldCellHeight` pixels, overflows its box, and the
+    // bottom row renders half-cut under the composer.
+    let lastAtlasAt = Date.now();
+
+    const rebuildAtlas = () => {
+      if (cancelled) return;
+      const term2 = termRef.current;
+      if (!term2) return;
+      try {
+        webgl?.clearTextureAtlas();
+        term2.refresh(0, term2.rows - 1);
+      } catch {
+        /* noop */
+      }
+      lastAtlasAt = Date.now();
+    };
+
     // The terminal opens before the webfont ("JetBrains Mono") has loaded, so
     // xterm measures the char cell against the fallback font and bakes that
     // wrong cell width into the WebGL glyph atlas. A plain `fit()` on
@@ -609,9 +648,8 @@ export function TerminalView({
     // stay painted at the fallback size and overlap ("garbled until resize").
     // Reassigning a font option is the public trigger for a char re-measure;
     // that plus clearing the atlas rebuilds glyphs at the correct cell size.
-    // Then fit (PTY lands on right cols/rows) and force a full repaint. Manual
-    // window resize used to be the only thing that did all this.
-    const refitForFont = () => {
+    // Then fit (PTY lands on right cols/rows) and force a full repaint.
+    const hardResync = () => {
       if (cancelled) return;
       const term2 = termRef.current;
       if (!term2) return;
@@ -632,8 +670,36 @@ export function TerminalView({
       } catch {
         /* noop */
       }
+      lastAtlasAt = Date.now();
     };
-    void document.fonts?.ready.then(refitForFont);
+    hardResyncRef.current = hardResync;
+    void document.fonts?.ready.then(hardResync);
+
+    // Display scaling changed (window dragged to a monitor with a different
+    // DPR, or Windows scale changed). The atlas was rasterized at the old
+    // ratio and every glyph now paints at the wrong scale. `matchMedia` on the
+    // *current* dppx fires once, so re-arm it against the new ratio each time.
+    let dprMedia: MediaQueryList | null = null;
+    const onDprChange = () => {
+      hardResync();
+      armDpr();
+    };
+    const armDpr = () => {
+      dprMedia?.removeEventListener("change", onDprChange);
+      dprMedia = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio}dppx)`,
+      );
+      dprMedia.addEventListener("change", onDprChange);
+    };
+    armDpr();
+
+    // WebView2 tears down GPU resources while the window is hidden/minimized
+    // and does not always fire a WebGL context-loss event on restore — the
+    // canvas comes back painted from a dead atlas. Resync on the way back in.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") hardResync();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     let raf1 = 0;
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {
@@ -656,6 +722,12 @@ export function TerminalView({
     // output keeps resetting the timer, so the repaint only fires on the genuine
     // quiet after a turn settles — exactly when ghosts are visible.
     const REPAINT_QUIET_MS = 250;
+    // How long a glyph atlas may live before the next quiet gets a free
+    // rebuild. Atlas corruption creeps in with usage, not with time, but usage
+    // is unobservable from here — an idle-time rebuild every few minutes is
+    // invisible (no reflow, one repaint) and keeps the drift from ever becoming
+    // visible as "letters go crooked until I resize the window".
+    const ATLAS_MAX_AGE_MS = 5 * 60_000;
     let refreshTimer: number | undefined;
     const scheduleRepaint = () => {
       window.clearTimeout(refreshTimer);
@@ -663,6 +735,32 @@ export function TerminalView({
         // Never repaint while a selection is active: a forced refresh clears it,
         // breaking copy. Rows under a selection are static, so no ghosts there.
         if (term.hasSelection()) return;
+        // Geometry drift check. If the cell size changed without the container
+        // resizing, no ResizeObserver/window-resize ever fires, so nothing
+        // re-fits: the canvas stays sized for the old cell and the last row
+        // renders clipped. FitAddon's proposal vs the live cols/rows exposes
+        // exactly that, and only a re-measure + re-fit repairs it.
+        let dims: { cols: number; rows: number } | undefined;
+        try {
+          dims = fit.proposeDimensions();
+        } catch {
+          /* noop */
+        }
+        if (
+          dims &&
+          Number.isFinite(dims.cols) &&
+          Number.isFinite(dims.rows) &&
+          dims.cols > 0 &&
+          dims.rows > 0 &&
+          (dims.cols !== term.cols || dims.rows !== term.rows)
+        ) {
+          hardResync();
+          return;
+        }
+        if (Date.now() - lastAtlasAt > ATLAS_MAX_AGE_MS) {
+          rebuildAtlas();
+          return;
+        }
         try {
           term.refresh(0, term.rows - 1);
         } catch {
@@ -758,6 +856,9 @@ export function TerminalView({
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       window.removeEventListener("resize", safeFit);
+      document.removeEventListener("visibilitychange", onVisibility);
+      dprMedia?.removeEventListener("change", onDprChange);
+      hardResyncRef.current = null;
       textarea?.removeEventListener("paste", onPasteCapture, { capture: true });
       mount.removeEventListener("wheel", onWheelZoom, { capture: true });
       ro.disconnect();
@@ -795,12 +896,11 @@ export function TerminalView({
     const term = termRef.current;
     if (!term) return;
     term.options.fontSize = fontSize;
+    // Full resync, not a bare fit: a new font size means a new cell size, so
+    // the atlas holds glyphs rasterized at the old one and FitAddon would
+    // measure against xterm's cached metrics.
     const id = window.setTimeout(() => {
-      try {
-        fitRef.current?.fit();
-      } catch {
-        /* noop */
-      }
+      hardResyncRef.current?.();
     }, 0);
     if (!fontMountedRef.current) {
       fontMountedRef.current = true;
@@ -814,15 +914,13 @@ export function TerminalView({
 
   useEffect(() => () => window.clearTimeout(zoomBadgeTimer.current), []);
 
-  // Re-fit when becoming visible — xterm needs a relayout pass.
+  // Resync when becoming visible — xterm needs a relayout pass, and a canvas
+  // that sat hidden (other tab, minimized window) may come back with a stale
+  // atlas or a cell size measured while the box had no layout.
   useEffect(() => {
     if (!visible) return;
     const id = window.setTimeout(() => {
-      try {
-        fitRef.current?.fit();
-      } catch {
-        /* noop */
-      }
+      hardResyncRef.current?.();
     }, 30);
     return () => window.clearTimeout(id);
   }, [visible]);
