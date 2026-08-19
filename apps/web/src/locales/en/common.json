@@ -33,6 +33,11 @@
   },
   "sidebar": {
     "projects": "Projects",
+    "topics": "Topics",
+    "topics_pinned": "Pinned",
+    "topics_recent": "Recent",
+    "view_topics": "Switch to topic list (flat, pinned first)",
+    "view_projects": "Switch to project tree",
     "sessions": "Sessions",
     "no_sessions": "No threads yet",
     "new_project": "New project",

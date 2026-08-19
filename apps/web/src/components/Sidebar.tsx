@@ -5,7 +5,9 @@ import {
   Bot,
   ChevronDown,
   ChevronRight,
+  FolderTree,
   GitBranch,
+  ListTree,
   MessageSquarePlus,
   Pencil,
   Pin,
@@ -79,6 +81,8 @@ export function Sidebar({
   const setActiveProject = useProjectStore((s) => s.setActive);
   const workspaceFilter = useProjectStore((s) => s.workspaceFilter);
   const setWorkspaceFilter = useProjectStore((s) => s.setWorkspaceFilter);
+  const sidebarView = useProjectStore((s) => s.sidebarView);
+  const toggleSidebarView = useProjectStore((s) => s.toggleSidebarView);
   const expanded = useProjectStore((s) => s.expanded);
   const toggleExpanded = useProjectStore((s) => s.toggleExpanded);
   const setExpanded = useProjectStore((s) => s.setExpanded);
@@ -565,6 +569,86 @@ export function Sidebar({
     );
   };
 
+  // Worktree display labels per project, shared by both views. The primary
+  // checkout gets a ★ so it reads apart from the derived worktrees.
+  const worktreeLabels = useMemo(() => {
+    const out: Record<
+      string,
+      { byId: Record<string, string>; primary: string | null }
+    > = {};
+    for (const [projectId, rows] of Object.entries(worktreesByProject)) {
+      const byId: Record<string, string> = {};
+      for (const w of rows) {
+        byId[w.id] = w.is_primary ? `${w.branch || "main"} ★` : w.branch;
+      }
+      out[projectId] = { byId, primary: byId[PRIMARY_WORKTREE_ID] ?? null };
+    }
+    return out;
+  }, [worktreesByProject]);
+
+  const labelsFor = (projectId: string) =>
+    worktreeLabels[projectId] ?? { byId: {}, primary: null };
+
+  // Flat topic list — every visible thread across every visible project,
+  // pinned first (most recently pinned on top), then by recency. Folders are
+  // gone here, so each row carries its project badge for identification.
+  const topics = (() => {
+    const rows: { session: SessionSummary; project: ProjectRow }[] = [];
+    for (const p of visibleProjects) {
+      for (const s of visibleSessionsFor(p.id, p.name)) {
+        rows.push({ session: s, project: p });
+      }
+    }
+    const stamp = (iso: string | null) => {
+      const n = iso ? new Date(iso).getTime() : NaN;
+      return Number.isFinite(n) ? n : 0;
+    };
+    const pinned = rows
+      .filter((r) => !!r.session.pinned_at)
+      .sort(
+        (a, b) => stamp(b.session.pinned_at) - stamp(a.session.pinned_at),
+      );
+    const recent = rows
+      .filter((r) => !r.session.pinned_at)
+      .sort(
+        (a, b) =>
+          stamp(b.session.last_activity_at) - stamp(a.session.last_activity_at),
+      );
+    return { pinned, recent };
+  })();
+
+  const renderTopic = ({
+    session: s,
+    project: p,
+  }: {
+    session: SessionSummary;
+    project: ProjectRow;
+  }) => {
+    const { byId, primary } = labelsFor(p.id);
+    return (
+      <SessionEntry
+        key={s.id}
+        session={s}
+        isActive={s.id === activeSessionId}
+        worktreeName={
+          !s.worktree_id || s.worktree_id === PRIMARY_WORKTREE_ID
+            ? primary
+            : byId[s.worktree_id] ?? primary
+        }
+        project={p}
+        onSelect={() => {
+          setActiveProject(p.id);
+          setActiveSession(s.id);
+        }}
+        onChanged={() => void refreshProjectSessions(p.id)}
+        onDeleted={() => {
+          if (activeSessionId === s.id) setActiveSession(null);
+          void refreshProjectSessions(p.id);
+        }}
+      />
+    );
+  };
+
   return (
     <aside
       style={{ width }}
@@ -595,9 +679,28 @@ export function Sidebar({
       </div>
 
       <div className="flex items-center justify-between gap-2 px-3 pb-1">
-        <span className="text-[9px] font-medium uppercase tracking-wider text-neutral-500">
-          {t("sidebar.projects")}
-        </span>
+        <button
+          type="button"
+          onClick={toggleSidebarView}
+          aria-label={
+            sidebarView === "tree"
+              ? t("sidebar.view_topics")
+              : t("sidebar.view_projects")
+          }
+          title={
+            sidebarView === "tree"
+              ? t("sidebar.view_topics")
+              : t("sidebar.view_projects")
+          }
+          className="-ml-1 flex items-center gap-1 rounded px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-neutral-500 transition hover:bg-neutral-800/60 hover:text-neutral-300"
+        >
+          {sidebarView === "tree" ? (
+            <FolderTree className="size-3" strokeWidth={1.75} />
+          ) : (
+            <ListTree className="size-3" strokeWidth={1.75} />
+          )}
+          {sidebarView === "tree" ? t("sidebar.projects") : t("sidebar.topics")}
+        </button>
         {workspaces.length > 0 && (
           <select
             value={workspaceFilter}
@@ -623,20 +726,44 @@ export function Sidebar({
           <p className="px-2 py-1.5 text-[11px] text-neutral-500">
             {searching ? t("sidebar.no_results") : t("sidebar.no_projects")}
           </p>
+        ) : sidebarView === "topics" ? (
+          topics.pinned.length === 0 && topics.recent.length === 0 ? (
+            <p className="px-2 py-1.5 text-[11px] text-neutral-500">
+              {searching ? t("sidebar.no_results") : t("sidebar.no_sessions")}
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {topics.pinned.length > 0 && (
+                <section>
+                  <h3 className="flex items-center gap-1 px-1.5 pb-0.5 text-[9px] font-medium uppercase tracking-wider text-amber-500/80">
+                    <Pin className="size-2.5" strokeWidth={2} />
+                    {t("sidebar.topics_pinned")}
+                  </h3>
+                  <ul className="flex flex-col gap-0.5">
+                    {topics.pinned.map(renderTopic)}
+                  </ul>
+                </section>
+              )}
+              {topics.recent.length > 0 && (
+                <section>
+                  <h3 className="px-1.5 pb-0.5 text-[9px] font-medium uppercase tracking-wider text-neutral-600">
+                    {t("sidebar.topics_recent")}
+                  </h3>
+                  <ul className="flex flex-col gap-0.5">
+                    {topics.recent.map(renderTopic)}
+                  </ul>
+                </section>
+              )}
+            </div>
+          )
         ) : (
           <ul className="flex flex-col gap-0.5">
             {visibleProjects.map((p) => {
-              const worktrees = worktreesByProject[p.id] ?? [];
-              const worktreeNameById: Record<string, string> = {};
-              for (const w of worktrees) {
-                worktreeNameById[w.id] = w.is_primary
-                  ? `${w.branch || "main"} ★`
-                  : w.branch;
-              }
               // Sessions persisted before the synthetic-primary landed
               // carry `worktree_id: null` for the root checkout. Map that
               // to the same label the synthetic primary card shows.
-              const primaryLabel = worktreeNameById[PRIMARY_WORKTREE_ID];
+              const { byId: worktreeNameById, primary: primaryLabel } =
+                labelsFor(p.id);
               return (
                 <ProjectItem
                   key={p.id}
@@ -1010,6 +1137,12 @@ interface SessionEntryProps {
   session: SessionSummary;
   isActive: boolean;
   worktreeName: string | null;
+  /**
+   * Owning project — only passed by the flat topic view, where there is no
+   * folder above the row to say which project a thread belongs to. Renders the
+   * project badge inline and prefixes the subtitle with the project name.
+   */
+  project?: ProjectRow;
   onSelect: () => void;
   onChanged: () => void;
   onDeleted: () => void;
@@ -1019,6 +1152,7 @@ function SessionEntry({
   session,
   isActive,
   worktreeName,
+  project,
   onSelect,
   onChanged,
   onDeleted,
@@ -1089,6 +1223,7 @@ function SessionEntry({
 
   const subtitle = (() => {
     const parts: string[] = [];
+    if (project) parts.push(project.name);
     if (worktreeName) parts.push(worktreeName);
     parts.push(formatRelative(session.last_activity_at));
     return parts.join(" · ");
@@ -1107,6 +1242,14 @@ function SessionEntry({
                 : "text-neutral-400 hover:bg-neutral-800/40"
         }`}
       >
+        {project && (
+          <ProjectBadge
+            name={project.name}
+            projectId={project.id}
+            logoPath={project.logo_path}
+            size={14}
+          />
+        )}
         <StatusDot
           status={session.status}
           attention={needsAttention}

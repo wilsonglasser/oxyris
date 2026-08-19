@@ -33,6 +33,11 @@
   },
   "sidebar": {
     "projects": "Projetos",
+    "topics": "Tópicos",
+    "topics_pinned": "Fixados",
+    "topics_recent": "Recentes",
+    "view_topics": "Ver como lista de tópicos (plana, fixados primeiro)",
+    "view_projects": "Ver como árvore de projetos",
     "sessions": "Sessões",
     "no_sessions": "Nenhuma thread ainda",
     "new_project": "Novo projeto",

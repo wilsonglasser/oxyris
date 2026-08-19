@@ -4,12 +4,33 @@ import { type ProjectRow, projectList } from "~/ipc/commands.ts";
 /** Sentinel for "show every workspace" in the sidebar selector. */
 export const ALL_WORKSPACES = "__all__";
 const WORKSPACE_FILTER_KEY = "oxyris.workspaceFilter";
+const SIDEBAR_VIEW_KEY = "oxyris.sidebarView";
+
+/**
+ * How the sidebar lays out threads.
+ *
+ * - `tree` — the classic project → thread hierarchy (folders).
+ * - `topics` — one flat list of threads across every visible project, pinned
+ *   ones first, then most-recent. No folders, so each row carries the project
+ *   badge to say which project it belongs to.
+ */
+export type SidebarView = "tree" | "topics";
 
 function loadWorkspaceFilter(): string {
   try {
     return window.localStorage.getItem(WORKSPACE_FILTER_KEY) ?? ALL_WORKSPACES;
   } catch {
     return ALL_WORKSPACES;
+  }
+}
+
+function loadSidebarView(): SidebarView {
+  try {
+    return window.localStorage.getItem(SIDEBAR_VIEW_KEY) === "topics"
+      ? "topics"
+      : "tree";
+  } catch {
+    return "tree";
   }
 }
 
@@ -31,9 +52,13 @@ interface ProjectStoreState {
    * currently visible tab.
    */
   expanded: Record<string, boolean>;
+  /** Sidebar layout: project tree vs flat topic list. Persisted. */
+  sidebarView: SidebarView;
   refresh: () => Promise<void>;
   setActive: (id: string | null) => void;
   setWorkspaceFilter: (workspace: string) => void;
+  /** Flip between the project tree and the flat topic list. */
+  toggleSidebarView: () => void;
   /** Flip the expanded state of one project group. */
   toggleExpanded: (id: string) => void;
   /** Force a project group open or closed. */
@@ -49,6 +74,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   error: null,
   workspaceFilter: loadWorkspaceFilter(),
   expanded: {},
+  sidebarView: loadSidebarView(),
 
   refresh: async () => {
     set({ loading: true, error: null });
@@ -83,6 +109,17 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     }
     set({ workspaceFilter: workspace });
   },
+
+  toggleSidebarView: () =>
+    set((s) => {
+      const next: SidebarView = s.sidebarView === "tree" ? "topics" : "tree";
+      try {
+        window.localStorage.setItem(SIDEBAR_VIEW_KEY, next);
+      } catch {
+        /* localStorage may be disabled in odd contexts */
+      }
+      return { sidebarView: next };
+    }),
 
   toggleExpanded: (id) =>
     set((s) => ({ expanded: { ...s.expanded, [id]: !s.expanded[id] } })),
