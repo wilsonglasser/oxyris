@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "oxyris-desktop"
-version = "0.4.24"
+version = "0.4.25"
 dependencies = [
  "anyhow",
  "async-trait",
