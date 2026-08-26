@@ -278,6 +278,67 @@ const PATH_RE =
 const URL_RE = /https?:\/\/[^\s'"<>`]+/g;
 const URL_TRAILING_RE = /[.,;:!?)\]}>'"]+$/;
 
+interface LiveTerminal {
+  term: Terminal;
+  /** Live getter — the addon is nulled on GL context loss. */
+  webgl: () => WebglAddon | null;
+}
+
+/**
+ * Every mounted xterm. Several are alive at once (dock tabs stay mounted, the
+ * pure-claude panel and multi-view mount their own), and they all share one
+ * WebGL glyph atlas: xterm caches a single atlas per (font, size, theme, DPR)
+ * config and hands that same object to every terminal whose config matches.
+ */
+const liveTerminals = new Set<LiveTerminal>();
+
+/** Last app-wide atlas clear, for the idle-rebuild budget below. */
+let lastAtlasClearAt = Date.now();
+
+/**
+ * Clear the glyph atlas and repaint EVERY live terminal.
+ *
+ * Never call `WebglAddon.clearTextureAtlas()` on a single terminal: it wipes
+ * the shared atlas pages but only clears the calling renderer's cell model, so
+ * every other live terminal keeps a model full of texture coordinates into
+ * pages that are then repacked with different glyphs — its cells paint
+ * whatever glyph now sits at those coordinates (garbled text on a correct
+ * grid) until something forces it to rebuild the model. xterm's own atlas page
+ * merge avoids this by raising an atlas-wide "clear the model" flag; the public
+ * `clearTextureAtlas` path does not.
+ *
+ * Clearing is idempotent across terminals sharing one atlas (the second call
+ * no-ops on an already-empty atlas), so this loops over all of them rather
+ * than tracking which atlas belongs to whom.
+ *
+ * Coalesced to one run per frame: a global change (font size, DPR) resyncs
+ * every mounted terminal at once, and each of those would otherwise clear and
+ * repaint all the others.
+ */
+let atlasClearFrame = 0;
+
+function clearSharedAtlas(): void {
+  if (atlasClearFrame) return;
+  atlasClearFrame = requestAnimationFrame(() => {
+    atlasClearFrame = 0;
+    for (const entry of liveTerminals) {
+      try {
+        entry.webgl()?.clearTextureAtlas();
+      } catch {
+        /* noop */
+      }
+    }
+    for (const entry of liveTerminals) {
+      try {
+        entry.term.refresh(0, entry.term.rows - 1);
+      } catch {
+        /* noop */
+      }
+    }
+    lastAtlasClearAt = Date.now();
+  });
+}
+
 /**
  * Renders one xterm bound to an already-spawned PTY. Stays mounted across
  * tab switches (just toggles `visible`) so scrollback is preserved. Exported
@@ -299,6 +360,11 @@ export function TerminalView({
   // repaint). Installed by the mount effect; called by anything outside it that
   // can change the cell size or invalidate the atlas.
   const hardResyncRef = useRef<(() => void) | null>(null);
+  // Cheap counterpart: re-fit + repaint, escalating to the full resync only
+  // when the cell geometry actually drifted. Used by the paths that fire on
+  // every tab switch, where a hard resync would re-rasterize the whole shared
+  // atlas (and force a repaint of every other terminal) for nothing.
+  const softResyncRef = useRef<(() => void) | null>(null);
   // Global terminal zoom. Kept in a ref too so the keydown/wheel handlers wired
   // once at mount read the latest size without rebuilding the terminal.
   const fontSize = useAppSettingsStore((s) => s.terminalFontSize);
@@ -378,6 +444,11 @@ export function TerminalView({
     } catch {
       /* no WebGL — DOM renderer stays in place */
     }
+
+    // Join the registry so an atlas clear anywhere in the app repaints this
+    // terminal too (see `clearSharedAtlas`).
+    const liveEntry: LiveTerminal = { term, webgl: () => webgl };
+    liveTerminals.add(liveEntry);
 
     // Linkify file paths so Ctrl/Cmd+click opens them (the host resolves the
     // token against the PTY's cwd). Decorations are only emitted when a handler
@@ -618,26 +689,42 @@ export function TerminalView({
     // every row. Fixes skewed/overlapping glyphs: the claude TUI burns through
     // a huge number of fg/bg × glyph combos, and once the atlas fills up the
     // renderer starts drawing from evicted/stale tiles. No re-measure, so no
-    // reflow — safe to run while the user is reading.
+    // reflow — safe to run while the user is reading. Goes through
+    // `clearSharedAtlas` because the atlas belongs to every terminal, not
+    // this one.
     //
     // `hardResync` (full) — also forces xterm to re-measure the char cell and
     // re-fits. Needed whenever the *cell size* can have changed without the
     // container resizing (webfont swap, zoom, DPR change, GPU restore): the
     // canvas keeps `rows × oldCellHeight` pixels, overflows its box, and the
     // bottom row renders half-cut under the composer.
-    let lastAtlasAt = Date.now();
-
     const rebuildAtlas = () => {
       if (cancelled) return;
+      if (!termRef.current) return;
+      clearSharedAtlas();
+    };
+
+    // True when the char cell no longer matches the canvas: FitAddon's
+    // proposal for the current box disagrees with the live cols/rows. Nothing
+    // fires a ResizeObserver/window-resize in that case, so only a re-measure
+    // plus re-fit repairs it (bottom row otherwise renders clipped).
+    const geometryDrifted = () => {
       const term2 = termRef.current;
-      if (!term2) return;
+      if (!term2) return false;
+      let dims: { cols: number; rows: number } | undefined;
       try {
-        webgl?.clearTextureAtlas();
-        term2.refresh(0, term2.rows - 1);
+        dims = fit.proposeDimensions();
       } catch {
-        /* noop */
+        return false;
       }
-      lastAtlasAt = Date.now();
+      return (
+        !!dims &&
+        Number.isFinite(dims.cols) &&
+        Number.isFinite(dims.rows) &&
+        dims.cols > 0 &&
+        dims.rows > 0 &&
+        (dims.cols !== term2.cols || dims.rows !== term2.rows)
+      );
     };
 
     // The terminal opens before the webfont ("JetBrains Mono") has loaded, so
@@ -660,9 +747,28 @@ export function TerminalView({
         // parsing treats identically, so nothing renders differently.
         const fam = term2.options.fontFamily ?? "";
         term2.options.fontFamily = fam.endsWith(" ") ? fam.trimEnd() : `${fam} `;
-        webgl?.clearTextureAtlas();
       } catch {
         /* noop */
+      }
+      safeFit();
+      // App-wide: the re-measure above dropped THIS terminal onto a fresh
+      // atlas, but the one it left is shared with the other terminals and may
+      // still hold glyphs at the old cell size.
+      clearSharedAtlas();
+    };
+    hardResyncRef.current = hardResync;
+
+    // Cheap repair for a terminal coming back into view: re-fit and repaint
+    // from the buffer. Escalates to the full resync only on real cell drift —
+    // a hard resync re-rasterizes every glyph and repaints every other
+    // terminal, far too much to run on each tab switch.
+    const softResync = () => {
+      if (cancelled) return;
+      const term2 = termRef.current;
+      if (!term2) return;
+      if (geometryDrifted()) {
+        hardResync();
+        return;
       }
       safeFit();
       try {
@@ -670,9 +776,8 @@ export function TerminalView({
       } catch {
         /* noop */
       }
-      lastAtlasAt = Date.now();
     };
-    hardResyncRef.current = hardResync;
+    softResyncRef.current = softResync;
     void document.fonts?.ready.then(hardResync);
 
     // Display scaling changed (window dragged to a monitor with a different
@@ -697,7 +802,7 @@ export function TerminalView({
     // and does not always fire a WebGL context-loss event on restore — the
     // canvas comes back painted from a dead atlas. Resync on the way back in.
     const onVisibility = () => {
-      if (document.visibilityState === "visible") hardResync();
+      if (document.visibilityState === "visible") softResync();
     };
     document.addEventListener("visibilitychange", onVisibility);
     let raf1 = 0;
@@ -726,7 +831,9 @@ export function TerminalView({
     // rebuild. Atlas corruption creeps in with usage, not with time, but usage
     // is unobservable from here — an idle-time rebuild every few minutes is
     // invisible (no reflow, one repaint) and keeps the drift from ever becoming
-    // visible as "letters go crooked until I resize the window".
+    // visible as "letters go crooked until I resize the window". The budget is
+    // app-wide (`lastAtlasClearAt`): the atlas is shared, so N terminals must
+    // not each spend their own rebuild on it.
     const ATLAS_MAX_AGE_MS = 5 * 60_000;
     let refreshTimer: number | undefined;
     const scheduleRepaint = () => {
@@ -735,29 +842,11 @@ export function TerminalView({
         // Never repaint while a selection is active: a forced refresh clears it,
         // breaking copy. Rows under a selection are static, so no ghosts there.
         if (term.hasSelection()) return;
-        // Geometry drift check. If the cell size changed without the container
-        // resizing, no ResizeObserver/window-resize ever fires, so nothing
-        // re-fits: the canvas stays sized for the old cell and the last row
-        // renders clipped. FitAddon's proposal vs the live cols/rows exposes
-        // exactly that, and only a re-measure + re-fit repairs it.
-        let dims: { cols: number; rows: number } | undefined;
-        try {
-          dims = fit.proposeDimensions();
-        } catch {
-          /* noop */
-        }
-        if (
-          dims &&
-          Number.isFinite(dims.cols) &&
-          Number.isFinite(dims.rows) &&
-          dims.cols > 0 &&
-          dims.rows > 0 &&
-          (dims.cols !== term.cols || dims.rows !== term.rows)
-        ) {
+        if (geometryDrifted()) {
           hardResync();
           return;
         }
-        if (Date.now() - lastAtlasAt > ATLAS_MAX_AGE_MS) {
+        if (Date.now() - lastAtlasClearAt > ATLAS_MAX_AGE_MS) {
           rebuildAtlas();
           return;
         }
@@ -858,7 +947,9 @@ export function TerminalView({
       window.removeEventListener("resize", safeFit);
       document.removeEventListener("visibilitychange", onVisibility);
       dprMedia?.removeEventListener("change", onDprChange);
+      liveTerminals.delete(liveEntry);
       hardResyncRef.current = null;
+      softResyncRef.current = null;
       textarea?.removeEventListener("paste", onPasteCapture, { capture: true });
       mount.removeEventListener("wheel", onWheelZoom, { capture: true });
       ro.disconnect();
@@ -915,12 +1006,15 @@ export function TerminalView({
   useEffect(() => () => window.clearTimeout(zoomBadgeTimer.current), []);
 
   // Resync when becoming visible — xterm needs a relayout pass, and a canvas
-  // that sat hidden (other tab, minimized window) may come back with a stale
-  // atlas or a cell size measured while the box had no layout.
+  // that sat hidden (other tab, minimized window) may come back with a cell
+  // size measured while the box had no layout. Soft on purpose: tab switching
+  // must not rebuild the shared glyph atlas (that repaints every other
+  // terminal and re-rasterizes every glyph); the soft path escalates on its
+  // own when the geometry really drifted.
   useEffect(() => {
     if (!visible) return;
     const id = window.setTimeout(() => {
-      hardResyncRef.current?.();
+      softResyncRef.current?.();
     }, 30);
     return () => window.clearTimeout(id);
   }, [visible]);
