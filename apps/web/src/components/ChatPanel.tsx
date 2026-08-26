@@ -23,7 +23,6 @@ import {
   ChevronsUpDown,
   Clock,
   Cpu,
-  GitBranch,
   ShieldAlert,
   Mic,
   MicOff,
@@ -62,6 +61,7 @@ import {
   worktreeList,
 } from "~/ipc/worktree.ts";
 import { worktreeEnsureReady } from "~/ipc/indexing.ts";
+import { BranchChip } from "~/components/BranchChip.tsx";
 import { EmptyChatState } from "~/components/EmptyChatState.tsx";
 import { IndexingChip } from "~/components/IndexingChip.tsx";
 import { LspChip } from "~/components/LspChip.tsx";
@@ -694,10 +694,11 @@ export function ChatPanel({
                         (w) => w.id === activeSnapshot.worktree_id,
                       );
                 return wt ? (
-                  <span className="inline-flex items-center gap-1 truncate text-neutral-500">
-                    · <GitBranch className="size-3" strokeWidth={1.75} />
-                    {wt.branch || "main"}
-                  </span>
+                  <BranchChip
+                    projectId={activeSnapshot.project_id}
+                    worktreeId={wt.id}
+                    fallback={wt.branch || "main"}
+                  />
                 ) : null;
               })()}
             </>

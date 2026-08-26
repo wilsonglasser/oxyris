@@ -60,6 +60,7 @@ import { TerminalView } from "~/components/TerminalPanel.tsx";
 import { FileViewerModal } from "~/components/FileViewerModal.tsx";
 import { MobileTakeoverModal } from "~/components/MobileTakeoverModal.tsx";
 import { AutopilotPanel } from "~/components/AutopilotPanel.tsx";
+import { BranchChip } from "~/components/BranchChip.tsx";
 import { useAutopilotStore } from "~/stores/autopilotStore.ts";
 import { useAutopilotAlertStore } from "~/stores/autopilotAlertStore.ts";
 import { onAutopilotEvent } from "~/ipc/autopilot.ts";
@@ -896,6 +897,7 @@ function PureSessionView({
           <TerminalIcon className="size-3.5" strokeWidth={1.75} />
           <span className="font-medium">{t("pure_header")}</span>
           <span className="truncate text-neutral-500">· {project.name}</span>
+          <BranchChip projectId={openProjectId} worktreeId={worktreeId} />
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
