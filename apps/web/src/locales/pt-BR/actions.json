@@ -28,6 +28,7 @@
   "minimize": "Minimizar",
   "kill": "Matar (fechar)",
   "rerun": "Re-executar",
+  "restart": "Reiniciar",
   "copy_output": "Copiar saída",
   "copied": "Copiado!",
   "icon_change": "trocar",

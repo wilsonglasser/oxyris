@@ -47,9 +47,9 @@ export function ActionSidebar({
   );
 
   const startRun = useActionRunsStore((s) => s.start);
+  const restartRun = useActionRunsStore((s) => s.restart);
   const toggleOpen = useActionRunsStore((s) => s.toggleOpen);
   const setOpen = useActionRunsStore((s) => s.setOpen);
-  const killRun = useActionRunsStore((s) => s.killRun);
   const runs = useActionRunsStore((s) => s.runs);
   const openActionIds = useActionRunsStore((s) => s.openActionIds);
 
@@ -299,14 +299,10 @@ export function ActionSidebar({
             actionName={a.name}
             onMinimize={() => setOpen(a.id, false)}
             onRerun={() => {
-              // Re-run = drop the finished single instance, then start fresh.
-              // setOpen guards against killRun auto-closing the modal between
-              // the two calls.
-              const list = runs[a.id] ?? [];
-              const finished = list.find((r) => r.status.kind !== "running");
-              if (finished) killRun(a.id, finished.runId);
-              setOpen(a.id, true);
-              void startRun(
+              // Re-run = drop the shown instance (killing it first when still
+              // running), then start fresh. The store keeps the modal open
+              // across the swap.
+              void restartRun(
                 { id: a.id, name: a.name, kind: a.kind, command: a.command },
                 projectId,
                 worktreeId,

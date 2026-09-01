@@ -41,7 +41,10 @@ export function ActionRunsModal({
   if (!active) return null;
 
   const multi = runs.length > 1;
-  const canRerun = !multi && onRerun && active.status.kind !== "running";
+  // Available even while running — a long-lived action (dev server, watcher)
+  // is exactly the case where you want one-click restart.
+  const canRerun = !multi && onRerun;
+  const rerunLabel = active.status.kind === "running" ? t("restart") : t("rerun");
 
   const onCopy = async () => {
     const text = active.lines.map((l) => l.text).join("\n");
@@ -127,8 +130,8 @@ export function ActionRunsModal({
               type="button"
               onClick={onRerun}
               className="rounded p-1 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
-              title={t("rerun")}
-              aria-label={t("rerun")}
+              title={rerunLabel}
+              aria-label={rerunLabel}
             >
               <RotateCw size={13} />
             </button>

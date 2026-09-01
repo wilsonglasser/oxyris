@@ -54,6 +54,24 @@ interface State {
     sessionId: string | null,
     onOpenTerminal: () => void,
   ) => Promise<void>;
+  /**
+   * Kill the currently-shown instance (running or not), wait for the OS
+   * process to actually die, then start a fresh one. Awaiting the kill matters
+   * for long-lived actions like a dev server — starting the new process before
+   * the old released its port yields `EADDRINUSE`.
+   */
+  restart: (
+    action: {
+      id: string;
+      name: string;
+      kind: ActionKind;
+      command: string;
+    },
+    projectId: string,
+    worktreeId: string | null,
+    sessionId: string | null,
+    onOpenTerminal: () => void,
+  ) => Promise<void>;
   toggleOpen: (actionId: string) => void;
   setOpen: (actionId: string, open: boolean) => void;
   setActiveTab: (actionId: string, runId: string) => void;
@@ -133,6 +151,30 @@ export const useActionRunsStore = create<State>((set, get) => ({
     });
   },
 
+  restart: async (action, projectId, worktreeId, sessionId, onOpenTerminal) => {
+    const s = get();
+    const list = s.runs[action.id] ?? [];
+    const current =
+      list.find((r) => r.runId === s.activeTabRun[action.id]) ?? list[0];
+    if (current) {
+      // Keep the instance listed while the kill is in flight so the modal
+      // doesn't unmount (and flash) between the two steps.
+      if (current.status.kind === "running") {
+        try {
+          await actionKill(current.runId);
+        } catch {
+          // Process may already be gone — the drop below is what matters.
+        }
+      }
+      current.unlisten?.();
+      set((prev) => dropRun(prev, action.id, current.runId));
+    }
+    set((prev) => ({
+      openActionIds: { ...prev.openActionIds, [action.id]: true },
+    }));
+    await get().start(action, projectId, worktreeId, sessionId, onOpenTerminal);
+  },
+
   toggleOpen: (actionId) =>
     set((s) => {
       const open = !(s.openActionIds[actionId] ?? false);
@@ -151,34 +193,14 @@ export const useActionRunsStore = create<State>((set, get) => ({
 
   killRun: (actionId, runId) =>
     set((s) => {
-      const list = (s.runs[actionId] ?? []).filter((r) => {
-        if (r.runId === runId) {
-          r.unlisten?.();
-          // Tree-kill the OS process so a closed `watch` actually stops
-          // instead of running on headless. No-op once it has exited.
-          if (r.status.kind === "running") void actionKill(runId);
-          return false;
-        }
-        return true;
-      });
-      const nextRuns = { ...s.runs, [actionId]: list };
-      const stillActiveTab = list.find((r) => r.runId === s.activeTabRun[actionId]);
-      const nextActive = { ...s.activeTabRun };
-      if (!stillActiveTab && list.length > 0 && list[list.length - 1]) {
-        nextActive[actionId] = list[list.length - 1]!.runId;
-      } else if (list.length === 0) {
-        delete nextActive[actionId];
+      const target = (s.runs[actionId] ?? []).find((r) => r.runId === runId);
+      if (target) {
+        target.unlisten?.();
+        // Tree-kill the OS process so a closed `watch` actually stops
+        // instead of running on headless. No-op once it has exited.
+        if (target.status.kind === "running") void actionKill(runId);
       }
-      // Auto-close the modal if no instances remain.
-      const nextOpen = { ...s.openActionIds };
-      if (list.length === 0) {
-        delete nextOpen[actionId];
-      }
-      return {
-        runs: nextRuns,
-        activeTabRun: nextActive,
-        openActionIds: nextOpen,
-      };
+      return dropRun(s, actionId, runId);
     }),
 
   pruneFinished: (actionId) =>
@@ -191,6 +213,28 @@ export const useActionRunsStore = create<State>((set, get) => ({
       return { runs: { ...s.runs, [actionId]: list } };
     }),
 }));
+
+/**
+ * Remove one run from the store's bookkeeping (list, active tab, modal
+ * visibility). Pure — the caller owns unsubscribing and killing the process.
+ */
+function dropRun(s: State, actionId: string, runId: string): Partial<State> {
+  const list = (s.runs[actionId] ?? []).filter((r) => r.runId !== runId);
+  const nextRuns = { ...s.runs, [actionId]: list };
+  const stillActiveTab = list.find((r) => r.runId === s.activeTabRun[actionId]);
+  const nextActive = { ...s.activeTabRun };
+  if (!stillActiveTab && list.length > 0 && list[list.length - 1]) {
+    nextActive[actionId] = list[list.length - 1]!.runId;
+  } else if (list.length === 0) {
+    delete nextActive[actionId];
+  }
+  // Auto-close the modal if no instances remain.
+  const nextOpen = { ...s.openActionIds };
+  if (list.length === 0) {
+    delete nextOpen[actionId];
+  }
+  return { runs: nextRuns, activeTabRun: nextActive, openActionIds: nextOpen };
+}
 
 function mutateInstance(
   set: (updater: (s: State) => Partial<State>) => void,
