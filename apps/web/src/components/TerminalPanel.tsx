@@ -23,6 +23,7 @@ import {
   useAppSettingsStore,
 } from "~/stores/appSettingsStore.ts";
 import { useTerminalDockStore } from "~/stores/terminalDockStore.ts";
+import { PromptDialog } from "~/components/PromptDialog.tsx";
 
 interface DockProps {
   sessionId: string;
@@ -39,6 +40,9 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
   const [tabs, setTabs] = useState<TerminalInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; current: string } | null>(
+    null,
+  );
 
   // Set once we've made the first-load auto-spawn decision for a session.
   // Crucially armed inside `refresh` (not only when *this* panel auto-spawns)
@@ -130,15 +134,24 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
     void terminalKill({ id }).catch(() => {});
   };
 
-  const renameTab = async (id: string, current: string) => {
-    const next = window.prompt(t("terminal_rename_prompt"), current);
-    if (!next) return;
+  // `window.prompt` is a no-op in WebView2 — the new title comes from a
+  // `PromptDialog` instead.
+  const renameTab = (id: string, current: string) => {
+    setRenaming({ id, current });
+  };
+
+  const submitRename = async (next: string) => {
+    const target = renaming;
+    setRenaming(null);
+    if (!target) return;
     const trimmed = next.trim();
-    if (!trimmed || trimmed === current) return;
+    if (!trimmed || trimmed === target.current) return;
     try {
-      await terminalRename({ id, title: trimmed });
+      await terminalRename({ id: target.id, title: trimmed });
       setTabs((prev) =>
-        prev.map((tab) => (tab.id === id ? { ...tab, title: trimmed } : tab)),
+        prev.map((tab) =>
+          tab.id === target.id ? { ...tab, title: trimmed } : tab,
+        ),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -163,7 +176,7 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
                 <button
                   type="button"
                   onClick={() => setActiveId(tab.id)}
-                  onDoubleClick={() => void renameTab(tab.id, tab.title)}
+                  onDoubleClick={() => renameTab(tab.id, tab.title)}
                   className="flex items-center gap-1.5 py-1.5 pl-2 pr-12"
                   title={tab.cwd}
                 >
@@ -173,7 +186,7 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
                 <div className="pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100">
                   <button
                     type="button"
-                    onClick={() => void renameTab(tab.id, tab.title)}
+                    onClick={() => renameTab(tab.id, tab.title)}
                     aria-label={t("terminal_rename")}
                     title={t("terminal_rename")}
                     className="flex size-4 items-center justify-center rounded text-neutral-500 transition hover:bg-neutral-700 hover:text-neutral-200"
@@ -235,6 +248,14 @@ export function TerminalPanel({ sessionId, onClose }: DockProps) {
           </div>
         )}
       </div>
+      {renaming && (
+        <PromptDialog
+          title={t("terminal_rename_prompt")}
+          initial={renaming.current}
+          onSubmit={(v) => void submitRename(v)}
+          onClose={() => setRenaming(null)}
+        />
+      )}
     </section>
   );
 }

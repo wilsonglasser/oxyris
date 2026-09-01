@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 
 import { useAnchoredMenu, type MenuAlign } from "~/hooks/useAnchoredMenu.ts";
 
@@ -37,4 +37,61 @@ export function MenuSurface({
       {children}
     </div>
   );
+}
+
+/** Hairline divider between groups of `MenuItem`s. */
+export function MenuSeparator() {
+  return <div className="my-1 border-t border-neutral-800" />;
+}
+
+/** One row inside a `MenuSurface`. `danger` tints destructive actions red. */
+export function MenuItem({
+  icon,
+  label,
+  onClick,
+  danger,
+  disabled,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex w-full items-center gap-2 px-3 py-1 text-left disabled:cursor-default disabled:opacity-40 ${
+        danger
+          ? "text-red-300 enabled:hover:bg-red-900/30"
+          : "text-neutral-200 enabled:hover:bg-neutral-900"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Closes an open context menu on an outside click or Escape. `MenuSurface`
+ * stops mousedown propagation, so clicks inside the menu don't trigger it.
+ */
+export function useMenuDismiss(open: boolean, close: () => void) {
+  useEffect(() => {
+    if (!open) return;
+    const onDown = () => close();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 }

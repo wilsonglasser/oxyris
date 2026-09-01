@@ -1,11 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  PRIMARY_WORKTREE_ID,
-  worktreeList,
-  type WorktreeRow,
-} from "~/ipc/worktree.ts";
+import { PRIMARY_WORKTREE_ID } from "~/ipc/worktree.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
+import { useWorktreePickStore } from "~/stores/worktreePickStore.ts";
 import { FileTreePanel } from "~/components/FileTreePanel.tsx";
 import { FileEditorTabs } from "~/components/FileEditorTabs.tsx";
 import { useDragResize } from "~/lib/useDragResize.ts";
@@ -29,9 +26,10 @@ export function FilesPanel({ projectId }: Props) {
     activeSessionId ? s.snapshots[activeSessionId] : null,
   );
 
-  // Per-project explicit override of the active worktree. Persists in-memory
-  // for the session so switching tabs doesn't lose the user's pick.
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  // Per-project explicit override of the active worktree. Shared with the Git
+  // panel so both agree on which worktree is in view.
+  const overrides = useWorktreePickStore((s) => s.overrides);
+  const setOverride = useWorktreePickStore((s) => s.setOverride);
 
   const treeResize = useDragResize({
     storageKey: "oxyris.filesPanel.treeWidth",
@@ -74,9 +72,7 @@ export function FilesPanel({ projectId }: Props) {
         <FileTreePanel
           projectId={projectId}
           worktreeId={worktreeId}
-          onWorktreeChange={(id) =>
-            setOverrides((prev) => ({ ...prev, [projectId]: id }))
-          }
+          onWorktreeChange={(id) => setOverride(projectId, id)}
         />
         <div
           onMouseDown={treeResize.onResizeStart}

@@ -70,7 +70,9 @@
     "delete_session_confirm": "Excluir a sessão \"{{name}}\"? O histórico fica preservado no event log mas some da interface.",
     "pin_session": "Fixar no topo",
     "unpin_session": "Desafixar",
-    "project_settings": "Configurações do projeto"
+    "project_settings": "Configurações do projeto",
+    "ctx_reveal": "Mostrar no Explorer",
+    "ctx_copy_path": "Copiar caminho"
   },
   "empty_state": {
     "heading": "Iniciar nova conversa",
@@ -149,5 +151,9 @@
     "ready": "{{language}} pronto",
     "failed": "{{language}} falhou",
     "not_installed": "{{language}} não instalado"
+  },
+  "prompt_dialog": {
+    "confirm": "OK",
+    "cancel": "Cancelar"
   }
 }

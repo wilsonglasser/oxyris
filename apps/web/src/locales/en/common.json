@@ -70,7 +70,9 @@
     "delete_session_confirm": "Delete session \"{{name}}\"? Its history is kept in the event log but it disappears from the UI.",
     "pin_session": "Pin to top",
     "unpin_session": "Unpin",
-    "project_settings": "Project settings"
+    "project_settings": "Project settings",
+    "ctx_reveal": "Reveal in Explorer",
+    "ctx_copy_path": "Copy path"
   },
   "empty_state": {
     "heading": "Start a new conversation",
@@ -149,5 +151,9 @@
     "ready": "{{language}} ready",
     "failed": "{{language}} failed",
     "not_installed": "{{language}} missing"
+  },
+  "prompt_dialog": {
+    "confirm": "OK",
+    "cancel": "Cancel"
   }
 }

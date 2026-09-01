@@ -125,5 +125,13 @@
   "compare_tags": "Tags",
   "compare_no_refs": "Sem branches ou tags.",
   "file_history": "Histórico:",
-  "close": "Fechar"
+  "close": "Fechar",
+  "ctx_edit": "Editar arquivo",
+  "ctx_open_external": "Abrir no editor externo",
+  "ctx_reveal": "Mostrar no Explorer",
+  "ctx_copy_path": "Copiar caminho",
+  "ctx_copy_rel_path": "Copiar caminho relativo",
+  "ctx_delete": "Deletar arquivo",
+  "ctx_confirm_delete": "Deletar \"{{path}}\" do disco? Não há como desfazer.",
+  "ctx_op_failed": "Operação falhou"
 }

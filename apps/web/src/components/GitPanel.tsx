@@ -8,17 +8,22 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  ExternalLink,
   FileDiff as FileDiffIcon,
+  FolderOpen,
   GitBranch,
   GitCommit,
   History,
   Inbox,
+  Link2,
   Loader2,
   Minus,
+  Pencil,
   Plus,
   RefreshCw,
   Sparkles,
   Tag,
+  Trash2,
   Undo2,
   X,
 } from "lucide-react";
@@ -28,16 +33,23 @@ import {
   type WorktreeRow,
 } from "~/ipc/worktree.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
+import { useFileEditorStore } from "~/stores/fileEditorStore.ts";
+import { useWorktreePickStore } from "~/stores/worktreePickStore.ts";
 import {
   partitionByBucket,
   useGitStore,
 } from "~/stores/gitStore.ts";
+import { fsAbsPath, fsDelete, fsOpenExternal, fsReveal } from "~/ipc/fs.ts";
 import type { BranchDetail, DiffMode, StatusEntry } from "~/ipc/git.ts";
 import { MonacoDiffViewer } from "~/components/MonacoDiffViewer.tsx";
 import { RevDiffModal } from "~/components/RevDiffModal.tsx";
 import { MergeEditor } from "~/components/MergeEditor.tsx";
 import { BranchMenu } from "~/components/BranchMenu.tsx";
-import { MenuSurface } from "~/components/MenuSurface.tsx";
+import {
+  MenuItem,
+  MenuSeparator,
+  MenuSurface,
+} from "~/components/MenuSurface.tsx";
 import { useDragResize } from "~/lib/useDragResize.ts";
 import {
   buildSingleHunkPatch,
@@ -47,6 +59,9 @@ import {
 
 interface Props {
   projectId: string | null;
+  /** Switch the app over to the Files tab (used by "edit file" in the
+   *  changed-files context menu, which opens an editor tab over there). */
+  onOpenFiles?: (() => void) | undefined;
 }
 
 // Stable empty references — selectors that synthesize a new `[]` / `{}`
@@ -66,14 +81,16 @@ const EMPTY_TAGS: never[] = [];
 const AUTO_FETCH_MS = 30_000;
 const lastAutoFetch = new Map<string, number>();
 
-export function GitPanel({ projectId }: Props) {
+export function GitPanel({ projectId, onOpenFiles }: Props) {
   const { t } = useTranslation("git");
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessionSnapshot = useSessionStore((s) =>
     activeSessionId ? s.snapshots[activeSessionId] : null,
   );
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  // Shared with the Files panel — see worktreePickStore.
+  const overrides = useWorktreePickStore((s) => s.overrides);
+  const setOverride = useWorktreePickStore((s) => s.setOverride);
   // Owned here (not in the branch menu / log) so the modal survives the popup
   // closing when an action inside it opens a comparison.
   const [revDiff, setRevDiff] = useState<
@@ -122,9 +139,7 @@ export function GitPanel({ projectId }: Props) {
         <div className="flex items-center gap-1 border-b border-neutral-800 px-2 py-1.5">
           <select
             value={worktreeId}
-            onChange={(e) =>
-              setOverrides((prev) => ({ ...prev, [projectId]: e.target.value }))
-            }
+            onChange={(e) => setOverride(projectId, e.target.value)}
             className="min-w-0 flex-1 rounded bg-neutral-900 px-1.5 py-0.5 text-[11px] text-neutral-200 outline-none focus:ring-1 focus:ring-neutral-700"
             aria-label={t("worktree_picker_label")}
           >
@@ -142,7 +157,11 @@ export function GitPanel({ projectId }: Props) {
           onCompare={(from, to, title) => setRevDiff({ from, to, title })}
         />
         <SequencerBanner projectId={projectId} worktreeId={worktreeId} />
-        <GitChangesList projectId={projectId} worktreeId={worktreeId} />
+        <GitChangesList
+          projectId={projectId}
+          worktreeId={worktreeId}
+          onOpenFiles={onOpenFiles}
+        />
         <LogSection
           projectId={projectId}
           worktreeId={worktreeId}
@@ -699,9 +718,11 @@ function LogSection({
 function GitChangesList({
   projectId,
   worktreeId,
+  onOpenFiles,
 }: {
   projectId: string;
   worktreeId: string;
+  onOpenFiles?: (() => void) | undefined;
 }) {
   const { t } = useTranslation("git");
   const status = useGitStore((s) => s.status[worktreeId] ?? null);
@@ -713,6 +734,92 @@ function GitChangesList({
   const unstagePaths = useGitStore((s) => s.unstagePaths);
   const selectDiff = useGitStore((s) => s.selectDiff);
   const selected = useGitStore((s) => s.selected[worktreeId] ?? null);
+  const openFile = useFileEditorStore((s) => s.openFile);
+
+  // Right-click menu over a changed file. `staged` drives which of
+  // stage/unstage the menu offers.
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    path: string;
+    staged: boolean;
+    // A staged/unstaged deletion has no file left on disk, so the entries that
+    // touch one (edit, reveal, delete) are dropped from its menu.
+    deleted: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  const opFailed = (e: unknown) =>
+    window.alert(`${t("ctx_op_failed")}: ${e instanceof Error ? e.message : e}`);
+
+  // Open in the built-in editor. The editor lives on the Files tab, so switch
+  // over as well — the worktree pick is shared, so the tab lands in the scope
+  // the Files panel renders.
+  const doEdit = async (relPath: string) => {
+    setMenu(null);
+    try {
+      await openFile(projectId, worktreeId, relPath);
+      onOpenFiles?.();
+    } catch (e) {
+      opFailed(e);
+    }
+  };
+
+  const doOpenExternal = async (relPath: string) => {
+    setMenu(null);
+    try {
+      await fsOpenExternal({ projectId, worktreeId, relPath });
+    } catch (e) {
+      opFailed(e);
+    }
+  };
+
+  const doReveal = async (relPath: string) => {
+    setMenu(null);
+    try {
+      await fsReveal({ projectId, worktreeId, relPath });
+    } catch (e) {
+      opFailed(e);
+    }
+  };
+
+  const doCopyPath = async (relPath: string, relative: boolean) => {
+    setMenu(null);
+    try {
+      const text = relative
+        ? relPath
+        : await fsAbsPath({ projectId, worktreeId, relPath });
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      opFailed(e);
+    }
+  };
+
+  const doDelete = async (relPath: string) => {
+    setMenu(null);
+    if (!window.confirm(t("ctx_confirm_delete", { path: relPath }))) return;
+    try {
+      await fsDelete({ projectId, worktreeId, relPath });
+      // Nothing else invalidates the changes list, so the deleted row would
+      // linger (now as a "deleted" entry) until the next manual refresh.
+      await refreshStatus(projectId, worktreeId);
+    } catch (e) {
+      opFailed(e);
+    }
+  };
 
   useEffect(() => {
     // Always show local status immediately.
@@ -774,6 +881,15 @@ function GitChangesList({
               onAction={(paths) =>
                 void unstagePaths(projectId, worktreeId, paths)
               }
+              onContextMenu={(x, y, e) =>
+                setMenu({
+                  x,
+                  y,
+                  path: e.path,
+                  staged: true,
+                  deleted: e.status === "deleted",
+                })
+              }
               actionIcon={<Minus size={11} />}
               actionLabel={t("unstage")}
               defaultMode="staged_vs_head"
@@ -793,6 +909,15 @@ function GitChangesList({
               onAction={(paths) =>
                 void stagePaths(projectId, worktreeId, paths)
               }
+              onContextMenu={(x, y, e) =>
+                setMenu({
+                  x,
+                  y,
+                  path: e.path,
+                  staged: false,
+                  deleted: e.status === "deleted",
+                })
+              }
               actionIcon={<Plus size={11} />}
               actionLabel={t("stage")}
               defaultMode="working_vs_staged"
@@ -806,6 +931,15 @@ function GitChangesList({
               }
               onAction={(paths) =>
                 void stagePaths(projectId, worktreeId, paths)
+              }
+              onContextMenu={(x, y, e) =>
+                setMenu({
+                  x,
+                  y,
+                  path: e.path,
+                  staged: false,
+                  deleted: e.status === "deleted",
+                })
               }
               actionIcon={<Plus size={11} />}
               actionLabel={t("stage")}
@@ -827,6 +961,15 @@ function GitChangesList({
                 onAction={() => {
                   /* fase 3: merge editor */
                 }}
+                onContextMenu={(x, y, e) =>
+                  setMenu({
+                  x,
+                  y,
+                  path: e.path,
+                  staged: false,
+                  deleted: e.status === "deleted",
+                })
+                }
                 actionIcon={null}
                 actionLabel={t("conflicted")}
                 defaultMode="working_vs_head"
@@ -835,6 +978,71 @@ function GitChangesList({
           </>
         )}
       </div>
+      {menu && (
+        <MenuSurface x={menu.x} y={menu.y} className="min-w-[200px]">
+          {!menu.deleted && (
+            <>
+              <MenuItem
+                icon={<Pencil size={11} />}
+                label={t("ctx_edit")}
+                onClick={() => void doEdit(menu.path)}
+              />
+              <MenuItem
+                icon={<ExternalLink size={11} />}
+                label={t("ctx_open_external")}
+                onClick={() => void doOpenExternal(menu.path)}
+              />
+              <MenuItem
+                icon={<FolderOpen size={11} />}
+                label={t("ctx_reveal")}
+                onClick={() => void doReveal(menu.path)}
+              />
+              <MenuSeparator />
+            </>
+          )}
+          {menu.staged ? (
+            <MenuItem
+              icon={<Minus size={11} />}
+              label={t("unstage")}
+              onClick={() => {
+                setMenu(null);
+                void unstagePaths(projectId, worktreeId, [menu.path]);
+              }}
+            />
+          ) : (
+            <MenuItem
+              icon={<Plus size={11} />}
+              label={t("stage")}
+              onClick={() => {
+                setMenu(null);
+                void stagePaths(projectId, worktreeId, [menu.path]);
+              }}
+            />
+          )}
+          <MenuSeparator />
+          <MenuItem
+            icon={<Link2 size={11} />}
+            label={t("ctx_copy_path")}
+            onClick={() => void doCopyPath(menu.path, false)}
+          />
+          <MenuItem
+            icon={<Link2 size={11} />}
+            label={t("ctx_copy_rel_path")}
+            onClick={() => void doCopyPath(menu.path, true)}
+          />
+          {!menu.deleted && (
+            <>
+              <MenuSeparator />
+              <MenuItem
+                icon={<Trash2 size={11} />}
+                label={t("ctx_delete")}
+                danger
+                onClick={() => void doDelete(menu.path)}
+              />
+            </>
+          )}
+        </MenuSurface>
+      )}
     </div>
   );
 }
@@ -845,6 +1053,7 @@ interface SectionProps {
   selected: { path: string; mode: DiffMode } | null;
   onClick: (e: StatusEntry) => void;
   onAction: (paths: string[]) => void;
+  onContextMenu: (x: number, y: number, entry: StatusEntry) => void;
   actionIcon: React.ReactNode | null;
   actionLabel: string;
   defaultMode: DiffMode;
@@ -856,6 +1065,7 @@ function Section({
   selected,
   onClick,
   onAction,
+  onContextMenu,
   actionIcon,
   actionLabel,
   defaultMode,
@@ -900,6 +1110,10 @@ function Section({
           return (
             <div
               key={`${entry.bucket}-${entry.path}`}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                onContextMenu(e.clientX, e.clientY, entry);
+              }}
               className={`group flex items-center gap-1 px-2 py-0.5 ${
                 isSelected
                   ? "bg-neutral-900 text-neutral-100"

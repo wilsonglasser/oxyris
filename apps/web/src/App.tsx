@@ -530,7 +530,10 @@ export function App() {
               onOpenProjectSettings={(id) => setProjectSettingsId(id)}
             />
             <main className="flex min-h-0 flex-1 flex-col bg-neutral-950">
-              <GitPanel projectId={activeId} />
+              <GitPanel
+                projectId={activeId}
+                onOpenFiles={() => setTab("files")}
+              />
             </main>
           </>
         )}

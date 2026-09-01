@@ -38,11 +38,16 @@ import {
   highlightMatches,
 } from "~/lib/searchHighlight.tsx";
 import { RevDiffModal } from "~/components/RevDiffModal.tsx";
+import { PromptDialog } from "~/components/PromptDialog.tsx";
 import {
   CompareRefModal,
   FileHistoryModal,
 } from "~/components/FileGitCompare.tsx";
-import { MenuSurface } from "~/components/MenuSurface.tsx";
+import {
+  MenuItem,
+  MenuSeparator as Separator,
+  MenuSurface,
+} from "~/components/MenuSurface.tsx";
 
 interface Props {
   projectId: string;
@@ -101,10 +106,21 @@ export function FileTreePanel({
   >(null);
   // File history modal.
   const [history, setHistory] = useState<{ relPath: string } | null>(null);
+  // Name prompt (new file / new folder / rename).
+  const [prompt, setPrompt] = useState<{
+    kind: "new_file" | "new_folder" | "rename";
+    target: string;
+    initial: string;
+  } | null>(null);
 
   const parentOf = (relPath: string) => {
     const idx = relPath.lastIndexOf("/");
     return idx >= 0 ? relPath.slice(0, idx) : "";
+  };
+
+  const basename = (relPath: string) => {
+    const idx = relPath.lastIndexOf("/");
+    return idx >= 0 ? relPath.slice(idx + 1) : relPath;
   };
 
   const opFailed = (e: unknown) =>
@@ -174,43 +190,51 @@ export function FileTreePanel({
     };
   }, [menu]);
 
-  const promptNewFile = async (parentRel: string) => {
+  // `window.prompt` is a no-op in WebView2, so every name these flows need
+  // comes from a `PromptDialog` instead. `target` is the parent dir for the
+  // create flows, and the entry itself for rename.
+  const promptNewFile = (parentRel: string) => {
     setMenu(null);
-    const name = window.prompt(t("prompt_new_file"));
-    if (!name) return;
-    const target = parentRel ? `${parentRel}/${name}` : name;
-    try {
-      await createFile(projectId, worktreeId, target);
-      await openFile(projectId, worktreeId, target);
-    } catch (e) {
-      window.alert(`${t("op_failed")}: ${e instanceof Error ? e.message : e}`);
-    }
+    setPrompt({ kind: "new_file", target: parentRel, initial: "" });
   };
 
-  const promptNewFolder = async (parentRel: string) => {
+  const promptNewFolder = (parentRel: string) => {
     setMenu(null);
-    const name = window.prompt(t("prompt_new_folder"));
-    if (!name) return;
-    const target = parentRel ? `${parentRel}/${name}` : name;
-    try {
-      await createDir(projectId, worktreeId, target);
-    } catch (e) {
-      window.alert(`${t("op_failed")}: ${e instanceof Error ? e.message : e}`);
-    }
+    setPrompt({ kind: "new_folder", target: parentRel, initial: "" });
   };
 
-  const promptRename = async (relPath: string) => {
+  const promptRename = (relPath: string) => {
     setMenu(null);
-    const idx = relPath.lastIndexOf("/");
-    const oldName = idx >= 0 ? relPath.slice(idx + 1) : relPath;
-    const parent = idx >= 0 ? relPath.slice(0, idx) : "";
-    const newName = window.prompt(t("prompt_rename"), oldName);
-    if (!newName || newName === oldName) return;
-    const target = parent ? `${parent}/${newName}` : newName;
+    setPrompt({ kind: "rename", target: relPath, initial: basename(relPath) });
+  };
+
+  const submitPrompt = async (name: string) => {
+    if (!prompt) return;
+    const { kind, target } = prompt;
+    setPrompt(null);
+    const trimmed = name.trim();
+    if (!trimmed) return;
     try {
-      await renameEntry(projectId, worktreeId, relPath, target);
+      if (kind === "rename") {
+        const parent = parentOf(target);
+        if (trimmed === basename(target)) return;
+        await renameEntry(
+          projectId,
+          worktreeId,
+          target,
+          parent ? `${parent}/${trimmed}` : trimmed,
+        );
+        return;
+      }
+      const created = target ? `${target}/${trimmed}` : trimmed;
+      if (kind === "new_folder") {
+        await createDir(projectId, worktreeId, created);
+      } else {
+        await createFile(projectId, worktreeId, created);
+        await openFile(projectId, worktreeId, created);
+      }
     } catch (e) {
-      window.alert(`${t("op_failed")}: ${e instanceof Error ? e.message : e}`);
+      opFailed(e);
     }
   };
 
@@ -567,12 +591,12 @@ export function FileTreePanel({
               <MenuItem
                 icon={<FilePlus size={11} />}
                 label={t("ctx_new_file")}
-                onClick={() => void promptNewFile(menu.relPath)}
+                onClick={() => promptNewFile(menu.relPath)}
               />
               <MenuItem
                 icon={<FolderPlus size={11} />}
                 label={t("ctx_new_folder")}
-                onClick={() => void promptNewFolder(menu.relPath)}
+                onClick={() => promptNewFolder(menu.relPath)}
               />
             </>
           )}
@@ -584,7 +608,7 @@ export function FileTreePanel({
               <MenuItem
                 icon={<Pencil size={11} />}
                 label={t("ctx_rename")}
-                onClick={() => void promptRename(menu.relPath)}
+                onClick={() => promptRename(menu.relPath)}
               />
               <MenuItem
                 icon={<Trash2 size={11} />}
@@ -628,6 +652,20 @@ export function FileTreePanel({
           onClose={() => setComparePicker(null)}
         />
       )}
+      {prompt && (
+        <PromptDialog
+          title={t(
+            prompt.kind === "new_file"
+              ? "prompt_new_file"
+              : prompt.kind === "new_folder"
+                ? "prompt_new_folder"
+                : "prompt_rename",
+          )}
+          initial={prompt.initial}
+          onSubmit={(v) => void submitPrompt(v)}
+          onClose={() => setPrompt(null)}
+        />
+      )}
       {history && (
         <FileHistoryModal
           projectId={projectId}
@@ -637,40 +675,6 @@ export function FileTreePanel({
         />
       )}
     </div>
-  );
-}
-
-function Separator() {
-  return <div className="my-1 border-t border-neutral-800" />;
-}
-
-function MenuItem({
-  icon,
-  label,
-  onClick,
-  danger,
-  disabled,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-  danger?: boolean;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`flex w-full items-center gap-2 px-3 py-1 text-left disabled:cursor-default disabled:opacity-40 ${
-        danger
-          ? "text-red-300 enabled:hover:bg-red-900/30"
-          : "text-neutral-200 enabled:hover:bg-neutral-900"
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }
 

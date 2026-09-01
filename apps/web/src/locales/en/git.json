@@ -125,5 +125,13 @@
   "compare_tags": "Tags",
   "compare_no_refs": "No branches or tags.",
   "file_history": "History:",
-  "close": "Close"
+  "close": "Close",
+  "ctx_edit": "Edit file",
+  "ctx_open_external": "Open in external editor",
+  "ctx_reveal": "Reveal in Explorer",
+  "ctx_copy_path": "Copy path",
+  "ctx_copy_rel_path": "Copy relative path",
+  "ctx_delete": "Delete file",
+  "ctx_confirm_delete": "Delete \"{{path}}\" from disk? This cannot be undone.",
+  "ctx_op_failed": "Operation failed"
 }

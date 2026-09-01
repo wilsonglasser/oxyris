@@ -5,8 +5,10 @@ import {
   Bot,
   ChevronDown,
   ChevronRight,
+  FolderOpen,
   FolderTree,
   GitBranch,
+  Link2,
   ListTree,
   MessageSquarePlus,
   Pencil,
@@ -36,12 +38,23 @@ import {
   useProjectStore,
   workspacesOf,
 } from "~/stores/projectStore.ts";
-import { projectReorder, type ProjectRow } from "~/ipc/commands.ts";
+import {
+  projectDelete,
+  projectReorder,
+  type ProjectRow,
+} from "~/ipc/commands.ts";
+import { fsAbsPath, fsReveal } from "~/ipc/fs.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useBusyStore } from "~/stores/busyStore.ts";
 import { useAutopilotStore } from "~/stores/autopilotStore.ts";
 import { useHasUpdate } from "~/stores/updaterStore.ts";
 import { ProjectBadge } from "~/components/ProjectBadge.tsx";
+import {
+  MenuItem,
+  MenuSeparator,
+  MenuSurface,
+  useMenuDismiss,
+} from "~/components/MenuSurface.tsx";
 import {
   playCompletionChime,
   playEscalationChime,
@@ -955,6 +968,55 @@ function ProjectItem({
   onDragEndItem,
 }: ProjectItemProps) {
   const { t } = useTranslation("common");
+  const refreshProjects = useProjectStore((s) => s.refresh);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  useMenuDismiss(!!menu, () => setMenu(null));
+
+  // Explorer / clipboard act on the project's primary worktree root. `""` as
+  // the relative path resolves to the root itself (see join_inside_worktree).
+  const doReveal = async () => {
+    setMenu(null);
+    try {
+      await fsReveal({
+        projectId: project.id,
+        worktreeId: PRIMARY_WORKTREE_ID,
+        relPath: "",
+      });
+    } catch {
+      /* the project may point at a path that no longer exists */
+    }
+  };
+
+  const doCopyPath = async () => {
+    setMenu(null);
+    try {
+      const abs = await fsAbsPath({
+        projectId: project.id,
+        worktreeId: PRIMARY_WORKTREE_ID,
+        relPath: "",
+      });
+      await navigator.clipboard.writeText(abs);
+    } catch {
+      /* noop */
+    }
+  };
+
+  const doDeleteProject = async () => {
+    setMenu(null);
+    if (
+      !window.confirm(
+        t("project_settings_modal.delete_confirm", { name: project.name }),
+      )
+    )
+      return;
+    try {
+      await projectDelete({ id: project.id });
+      // `refresh` re-points `activeId` when the deleted project was active.
+      await refreshProjects();
+    } catch {
+      /* noop */
+    }
+  };
 
   // Strongest session signal in this project, so a collapsed row still shows
   // when something inside wants the user. Mirrors StatusDot's priority:
@@ -1037,6 +1099,10 @@ function ProjectItem({
       }`}
     >
       <div
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
         className={`group flex items-center gap-1 rounded-md pr-1 transition ${
           isActive
             ? "bg-neutral-800/70 text-neutral-100"
@@ -1098,6 +1164,49 @@ function ProjectItem({
           </button>
         )}
       </div>
+
+      {menu && (
+        <MenuSurface x={menu.x} y={menu.y} className="min-w-[210px]">
+          {onNewSession && (
+            <MenuItem
+              icon={<MessageSquarePlus className="size-3" strokeWidth={1.75} />}
+              label={t("sidebar.new_thread")}
+              onClick={() => {
+                setMenu(null);
+                onNewSession();
+              }}
+            />
+          )}
+          {onOpenProjectSettings && (
+            <MenuItem
+              icon={<Settings className="size-3" strokeWidth={1.75} />}
+              label={t("sidebar.project_settings")}
+              onClick={() => {
+                setMenu(null);
+                onOpenProjectSettings();
+              }}
+            />
+          )}
+          <MenuSeparator />
+          <MenuItem
+            icon={<FolderOpen className="size-3" strokeWidth={1.75} />}
+            label={t("sidebar.ctx_reveal")}
+            onClick={() => void doReveal()}
+          />
+          <MenuItem
+            icon={<Link2 className="size-3" strokeWidth={1.75} />}
+            label={t("sidebar.ctx_copy_path")}
+            onClick={() => void doCopyPath()}
+          />
+          <MenuSeparator />
+          <MenuItem
+            icon={<Trash2 className="size-3" strokeWidth={1.75} />}
+            label={t("project_settings_modal.delete_label")}
+            danger
+            onClick={() => void doDeleteProject()}
+          />
+        </MenuSurface>
+      )}
 
       {isExpanded && (
         <div className="ml-4 mt-0.5 flex flex-col gap-1.5 border-l border-neutral-800/80 pl-2">
@@ -1178,13 +1287,14 @@ function SessionEntry({
   // Purple dot — the pilot finished its mission on this thread (now disengaged).
   const pilotDone = useAutopilotStore((s) => !!s.done[session.id]);
 
-  const onRename = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const next = window.prompt(
-      t("sidebar.rename_session_prompt"),
-      session.title || "",
-    );
-    if (next === null) return;
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  useMenuDismiss(!!menu, () => setMenu(null));
+  // Rename happens in place: `window.prompt` is a no-op in WebView2, so the
+  // label swaps for an input instead of opening a dialog.
+  const [renaming, setRenaming] = useState<string | null>(null);
+
+  const commitRename = async (next: string) => {
+    setRenaming(null);
     const trimmed = next.trim();
     if (!trimmed || trimmed === session.title) return;
     try {
@@ -1195,8 +1305,13 @@ function SessionEntry({
     }
   };
 
-  const onTogglePin = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const startRename = () => {
+    setMenu(null);
+    setRenaming(session.title || "");
+  };
+
+  const onTogglePin = async () => {
+    setMenu(null);
     try {
       await sessionTogglePin({ session_id: session.id });
       onChanged();
@@ -1205,8 +1320,8 @@ function SessionEntry({
     }
   };
 
-  const onDelete = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const onDelete = async () => {
+    setMenu(null);
     if (!window.confirm(t("sidebar.delete_session_confirm", { name: label })))
       return;
     try {
@@ -1232,6 +1347,10 @@ function SessionEntry({
   return (
     <li>
       <div
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
         className={`group relative flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-[11px] transition ${
           isActive
             ? "bg-[#2e436e]/40 text-neutral-100"
@@ -1262,25 +1381,48 @@ function SessionEntry({
           lastActivityAt={session.last_activity_at}
           liveActivityAt={liveActivityAt}
         />
-        <button
-          type="button"
-          onClick={onSelect}
-          onDoubleClick={(e) => void onRename(e)}
-          className="min-w-0 flex-1 text-left"
-        >
-          <span className="block truncate">{label}</span>
-          <span className="block truncate text-[9px] text-neutral-500">
-            <GitBranch
-              className="-mt-px mr-0.5 inline size-2.5 align-middle"
-              strokeWidth={1.75}
-            />
-            {subtitle}
-          </span>
-        </button>
+        {renaming !== null ? (
+          <input
+            type="text"
+            autoFocus
+            value={renaming}
+            aria-label={t("sidebar.rename_session_prompt")}
+            onChange={(e) => setRenaming(e.target.value)}
+            onBlur={() => void commitRename(renaming)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") void commitRename(renaming);
+              else if (e.key === "Escape") setRenaming(null);
+            }}
+            className="min-w-0 flex-1 rounded bg-neutral-950 px-1.5 py-0.5 text-[11px] text-neutral-100 outline-none ring-1 ring-neutral-700 focus:ring-emerald-700"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={onSelect}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              startRename();
+            }}
+            className="min-w-0 flex-1 text-left"
+          >
+            <span className="block truncate">{label}</span>
+            <span className="block truncate text-[9px] text-neutral-500">
+              <GitBranch
+                className="-mt-px mr-0.5 inline size-2.5 align-middle"
+                strokeWidth={1.75}
+              />
+              {subtitle}
+            </span>
+          </button>
+        )}
         <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 pl-3">
           <button
             type="button"
-            onClick={(e) => void onTogglePin(e)}
+            onClick={(e) => {
+              e.stopPropagation();
+              void onTogglePin();
+            }}
             aria-label={
               pinned ? t("sidebar.unpin_session") : t("sidebar.pin_session")
             }
@@ -1302,7 +1444,10 @@ function SessionEntry({
           <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
             <button
               type="button"
-              onClick={(e) => void onRename(e)}
+              onClick={(e) => {
+                e.stopPropagation();
+                startRename();
+              }}
               aria-label={t("sidebar.rename_session")}
               title={t("sidebar.rename_session")}
               className="flex size-4 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
@@ -1311,7 +1456,10 @@ function SessionEntry({
             </button>
             <button
               type="button"
-              onClick={(e) => void onDelete(e)}
+              onClick={(e) => {
+                e.stopPropagation();
+                void onDelete();
+              }}
               aria-label={t("sidebar.delete_session")}
               title={t("sidebar.delete_session")}
               className="flex size-4 items-center justify-center rounded text-neutral-500 hover:bg-red-950/40 hover:text-red-300"
@@ -1321,6 +1469,35 @@ function SessionEntry({
           </div>
         </div>
       </div>
+      {menu && (
+        <MenuSurface x={menu.x} y={menu.y} className="min-w-[190px]">
+          <MenuItem
+            icon={<Pencil className="size-3" strokeWidth={1.75} />}
+            label={t("sidebar.rename_session")}
+            onClick={startRename}
+          />
+          <MenuItem
+            icon={
+              pinned ? (
+                <PinOff className="size-3" strokeWidth={1.75} />
+              ) : (
+                <Pin className="size-3" strokeWidth={1.75} />
+              )
+            }
+            label={
+              pinned ? t("sidebar.unpin_session") : t("sidebar.pin_session")
+            }
+            onClick={() => void onTogglePin()}
+          />
+          <MenuSeparator />
+          <MenuItem
+            icon={<Trash2 className="size-3" strokeWidth={1.75} />}
+            label={t("sidebar.delete_session")}
+            danger
+            onClick={() => void onDelete()}
+          />
+        </MenuSurface>
+      )}
     </li>
   );
 }
