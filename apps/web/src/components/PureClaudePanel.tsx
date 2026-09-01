@@ -189,7 +189,9 @@ function PureStartView({
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
   const [worktreeId, setWorktreeId] = useState<string>("");
   const [model, setModel] = useState<string>("");
-  const [runtime, setRuntime] = useState<RuntimeMode>("supervised");
+  const [runtime, setRuntime] = useState<RuntimeMode>(
+    () => useAppSettingsStore.getState().defaultRuntime,
+  );
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

@@ -86,7 +86,7 @@
   "pure_mode_desc": "Substitui o chat estruturado pelo Claude Code interativo de verdade rodando num terminal. Índice, LSP e workspace continuam integrados. Vale para todos os projetos.",
   "section_default_runtime": "Permissões de nova thread",
   "default_runtime_title": "Modo de permissão padrão",
-  "default_runtime_desc": "Modo usado ao iniciar uma thread pelo botão \"Nova thread\" de um clique ou por um tile do Multi View (que não têm seletor). Os seletores dentro da thread ainda sobrescrevem por sessão.",
+  "default_runtime_desc": "Modo usado em toda thread nova — botão \"Nova thread\" de um clique, tiles do Multi View e o valor já selecionado nos seletores de permissão da tela inicial. Esses seletores ainda sobrescrevem por sessão.",
   "default_runtime_supervised": "Supervisionado (pergunta antes)",
   "default_runtime_accept_edits": "Aceitar edições automaticamente",
   "default_runtime_full_access": "Acesso total (perigoso, sem prompts)",

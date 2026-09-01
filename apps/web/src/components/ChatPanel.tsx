@@ -144,7 +144,9 @@ export function ChatPanel({
   const setBusy = useBusyStore((s) => s.setBusy);
 
   const [model, setModel] = useState<string>("");
-  const [runtime, setRuntime] = useState<RuntimeMode>("supervised");
+  const [runtime, setRuntime] = useState<RuntimeMode>(
+    () => useAppSettingsStore.getState().defaultRuntime,
+  );
   const [thinking, setThinking] = useState<ThinkingMode>("auto");
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
   const [worktreesLoading, setWorktreesLoading] = useState(false);

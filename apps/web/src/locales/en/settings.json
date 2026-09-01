@@ -86,7 +86,7 @@
   "pure_mode_desc": "Replaces the structured chat with the real interactive Claude Code running in a terminal. Index, LSP and workspace stay wired in. Applies to all projects.",
   "section_default_runtime": "New thread permissions",
   "default_runtime_title": "Default permission mode",
-  "default_runtime_desc": "Mode used when you start a thread from the one-click \"New thread\" button or a Multi View tile (no picker there). In-thread pickers still override per session.",
+  "default_runtime_desc": "Mode used for every new thread — the one-click \"New thread\" button, Multi View tiles, and the pre-selected value in the start-screen permission pickers. Those pickers still override per session.",
   "default_runtime_supervised": "Supervised (ask first)",
   "default_runtime_accept_edits": "Auto-accept edits",
   "default_runtime_full_access": "Full access (dangerous, bypass prompts)",
