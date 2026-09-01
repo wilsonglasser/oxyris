@@ -67,5 +67,7 @@
   "use_regex": "Regular expression",
   "file_mask": "File mask:",
   "matches_in_files": "{{matches}} matches in {{files}} files",
-  "speed_search_no_match": "no match"
+  "speed_search_no_match": "no match",
+  "goto_line": "Go to line",
+  "goto_line_submit": "go"
 }

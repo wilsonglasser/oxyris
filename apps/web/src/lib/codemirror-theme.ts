@@ -73,6 +73,29 @@ export const islandDarkTheme: Extension = EditorView.theme(
       border: `1px solid ${surface}`,
     },
     ".cm-panels": { backgroundColor: surface, color: text },
+    // Panel widgets (search fields, the goto-line dialog) otherwise render with
+    // the browser's default light chrome on top of the dark panel.
+    ".cm-panel input, .cm-panel select": {
+      backgroundColor: bg,
+      color: text,
+      border: `1px solid #43454a`,
+      borderRadius: "3px",
+      padding: "1px 4px",
+    },
+    ".cm-panel input:focus-visible, .cm-panel button:focus-visible": {
+      outline: `1px solid ${blue}`,
+    },
+    ".cm-panel button": {
+      backgroundColor: bg,
+      backgroundImage: "none",
+      color: text,
+      border: `1px solid #43454a`,
+      borderRadius: "3px",
+      padding: "1px 6px",
+      cursor: "pointer",
+    },
+    ".cm-panel button:hover": { backgroundColor: "#393b40" },
+    ".cm-panel label": { color: muted },
     ".cm-searchMatch": { backgroundColor: "rgba(255,255,0,0.20)" },
     ".cm-selectionMatch": { backgroundColor: "rgba(255,255,255,0.07)" },
   },

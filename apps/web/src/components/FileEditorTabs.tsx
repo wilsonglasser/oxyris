@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, ExternalLink, Save, X } from "lucide-react";
 import { EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, lineNumbers, keymap } from "@codemirror/view";
 import {
+  gotoLine,
   highlightSelectionMatches,
   search,
   searchKeymap,
@@ -323,6 +324,12 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
       // Mod-Alt-f → replace, Enter/Shift-Enter → next/prev.
       search({ top: true }),
       highlightSelectionMatches(),
+      // The goto-line dialog is CodeMirror's own, so its labels come from the
+      // phrase table rather than a component's `t()` call.
+      EditorState.phrases.of({
+        "Go to line": t("goto_line"),
+        go: t("goto_line_submit"),
+      }),
       keymap.of([
         {
           key: "Mod-s",
@@ -332,6 +339,10 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
             return true;
           },
         },
+        // Ctrl+G → goto line, shadowing searchKeymap's find-next (still on F3
+        // and Enter inside the search panel). Listed before ...searchKeymap so
+        // it wins; Mod-Alt-g from searchKeymap keeps working too.
+        { key: "Mod-g", preventDefault: true, run: gotoLine },
         ...searchKeymap,
       ]),
       EditorView.updateListener.of((u) => {
