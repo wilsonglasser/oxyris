@@ -2,7 +2,35 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronLeft, ChevronRight, ExternalLink, Save, X } from "lucide-react";
 import { EditorSelection, EditorState, type Extension } from "@codemirror/state";
-import { EditorView, lineNumbers, keymap } from "@codemirror/view";
+import {
+  EditorView,
+  drawSelection,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  keymap,
+  lineNumbers,
+  rectangularSelection,
+  crosshairCursor,
+} from "@codemirror/view";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+} from "@codemirror/commands";
+import {
+  autocompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  completionKeymap,
+} from "@codemirror/autocomplete";
+import {
+  bracketMatching,
+  foldGutter,
+  foldKeymap,
+  indentOnInput,
+  indentUnit,
+} from "@codemirror/language";
 import {
   gotoLine,
   highlightSelectionMatches,
@@ -10,6 +38,13 @@ import {
   searchKeymap,
 } from "@codemirror/search";
 import { islandDark } from "~/lib/codemirror-theme.ts";
+import {
+  type LspContext,
+  lspExtensions,
+  refreshLspDiagnostics,
+  runLspFormat,
+} from "~/lib/codemirror-lsp.ts";
+import { lspDidClose, lspDidSave } from "~/ipc/lsp.ts";
 import { languageForPath } from "~/lib/codemirror-language.ts";
 import { Eye, FileText } from "lucide-react";
 import { fsExternalEditors, fsOpenExternal } from "~/ipc/fs.ts";
@@ -101,6 +136,36 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
     };
   }, [menu]);
 
+  /** Paths with unsaved edits among `paths`. Ghost tabs (not loaded yet) hold
+   *  no buffer, so they can never be dirty. */
+  const dirtyAmong = (paths: string[]) =>
+    paths.filter((p) => {
+      const tab = tabs[p];
+      return !!tab && tab.buffer !== tab.baseContent;
+    });
+
+  /** Closing drops the buffer, so ask before discarding unsaved edits. Matches
+   *  the rest of the app, which uses `window.confirm` for destructive steps. */
+  const confirmDiscard = (paths: string[]) => {
+    const dirtyPaths = dirtyAmong(paths);
+    if (dirtyPaths.length === 0) return true;
+    return window.confirm(
+      t("confirm_close_dirty", {
+        count: dirtyPaths.length,
+        files: dirtyPaths.map(basename).join(", "),
+      }),
+    );
+  };
+
+  /** Let the language server drop the closed files' buffers — otherwise it
+   *  keeps analysing text nobody is looking at. Fire-and-forget: a file with
+   *  no server (or no server running) rejects and there is nothing to undo. */
+  const releaseFromLsp = (paths: string[]) => {
+    for (const relPath of paths) {
+      lspDidClose({ projectId, worktreeId, relPath }).catch(() => {});
+    }
+  };
+
   const scrollBy = (delta: number) => {
     tabStripRef.current?.scrollBy({ left: delta, behavior: "smooth" });
   };
@@ -177,7 +242,11 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => closeTab(projectId, worktreeId, relPath)}
+                  onClick={() => {
+                    if (!confirmDiscard([relPath])) return;
+                    closeTab(projectId, worktreeId, relPath);
+                    releaseFromLsp([relPath]);
+                  }}
                   className="rounded p-0.5 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
                   aria-label={t("close_tab")}
                 >
@@ -204,8 +273,10 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           <button
             type="button"
             onClick={() => {
-              closeTab(projectId, worktreeId, menu.relPath);
               setMenu(null);
+              if (!confirmDiscard([menu.relPath])) return;
+              closeTab(projectId, worktreeId, menu.relPath);
+              releaseFromLsp([menu.relPath]);
             }}
             className="block w-full px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
           >
@@ -214,8 +285,11 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           <button
             type="button"
             onClick={() => {
-              closeOthers(projectId, worktreeId, menu.relPath);
               setMenu(null);
+              const others = order.filter((p) => p !== menu.relPath);
+              if (!confirmDiscard(others)) return;
+              closeOthers(projectId, worktreeId, menu.relPath);
+              releaseFromLsp(others);
             }}
             className="block w-full px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
           >
@@ -224,8 +298,10 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
           <button
             type="button"
             onClick={() => {
-              closeAll(projectId, worktreeId);
               setMenu(null);
+              if (!confirmDiscard(order)) return;
+              closeAll(projectId, worktreeId);
+              releaseFromLsp(order);
             }}
             className="block w-full px-3 py-1 text-left text-neutral-200 hover:bg-neutral-900"
           >
@@ -257,6 +333,18 @@ export function FileEditorTabs({ projectId, worktreeId }: Props) {
   );
 }
 
+/**
+ * Cursor + scroll position per `<scope>::<relPath>`. The editor pane remounts
+ * on every tab switch (the key includes the path), so without this the caret
+ * and scroll snap back to the top of the file each time. Module-level and
+ * deliberately not persisted: an offset saved across a restart would point
+ * into a file that may have changed underneath.
+ */
+const viewStateCache = new Map<
+  string,
+  { anchor: number; head: number; scrollTop: number }
+>();
+
 interface EditorPaneProps {
   projectId: string;
   worktreeId: string;
@@ -267,15 +355,31 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
   const { t } = useTranslation("files");
   const setBuffer = useFileEditorStore((s) => s.setBuffer);
   const saveTab = useFileEditorStore((s) => s.saveTab);
+  const loadFullFile = useFileEditorStore((s) => s.loadFullFile);
   const reloadFromDisk = useFileEditorStore((s) => s.reloadFromDisk);
   const keepLocalChanges = useFileEditorStore((s) => s.keepLocalChanges);
   const reveal = useFileEditorStore(
     (s) => s.reveal[scopeKey(projectId, worktreeId)] ?? null,
   );
   const consumeReveal = useFileEditorStore((s) => s.consumeReveal);
+  const openFileAt = useFileEditorStore((s) => s.openFileAt);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const diagTimer = useRef<number | null>(null);
   const dirty = tab.buffer !== tab.baseContent;
+
+  /** Save, then tell the language server the file was saved — that is what
+   *  triggers its check layer (rust-analyzer runs `cargo check` on didSave),
+   *  which the per-keystroke sync deliberately does not. Best-effort: a file
+   *  with no server rejects it and nothing is lost. */
+  const save = async () => {
+    await saveTab(projectId, worktreeId, tab.relPath);
+    const text = viewRef.current?.state.doc.toString() ?? tab.buffer;
+    lspDidSave({ projectId, worktreeId, relPath: tab.relPath, text }).catch(
+      () => {},
+    );
+  };
+
   const [editors, setEditors] = useState<{ id: string; label: string; available: boolean }[]>(
     [],
   );
@@ -314,8 +418,50 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
   useEffect(() => {
     if (!containerRef.current) return;
     if (!showEditor) return;
+    // Diagnostics are requested on a debounce: the server needs a beat to
+    // re-analyse after an edit, and each request carries the whole buffer.
+    const scheduleDiagnostics = () => {
+      if (diagTimer.current !== null) window.clearTimeout(diagTimer.current);
+      diagTimer.current = window.setTimeout(() => {
+        const v = viewRef.current;
+        if (v) void refreshLspDiagnostics(v, lspCtx);
+      }, 500);
+    };
+    const lspCtx: LspContext = {
+      projectId,
+      worktreeId,
+      relPath: tab.relPath,
+      openLocation: (loc) => {
+        if (loc.rel_path) {
+          void openFileAt(projectId, worktreeId, loc.rel_path, loc.line + 1);
+        }
+      },
+    };
     const extensions: Extension[] = [
       lineNumbers(),
+      highlightActiveLineGutter(),
+      highlightActiveLine(),
+      foldGutter(),
+      // Undo/redo. CodeMirror ships no history by default when extensions are
+      // composed by hand, and the WebView's native undo can't touch the
+      // editor's managed DOM — without this Ctrl+Z simply does nothing.
+      history(),
+      // Multi-cursor: `drawSelection` renders the extra carets that
+      // rectangularSelection (Alt+drag) and Ctrl+click create.
+      drawSelection(),
+      rectangularSelection(),
+      crosshairCursor(),
+      bracketMatching(),
+      closeBrackets(),
+      indentOnInput(),
+      autocompletion(),
+      indentUnit.of("  "),
+      EditorState.tabSize.of(2),
+      // A truncated read holds only the first slice of the file; editing it
+      // and saving would drop the rest, so the buffer stays read-only until
+      // the user loads the whole file (banner button above).
+      EditorState.readOnly.of(tab.truncated),
+      EditorView.editable.of(!tab.truncated),
       ...islandDark,
       languageForPath(tab.relPath) ?? [],
       // In-editor find/replace over the WHOLE document. Without this the
@@ -335,7 +481,7 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
           key: "Mod-s",
           preventDefault: true,
           run: () => {
-            void saveTab(projectId, worktreeId, tab.relPath);
+            void save();
             return true;
           },
         },
@@ -343,14 +489,39 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
         // and Enter inside the search panel). Listed before ...searchKeymap so
         // it wins; Mod-Alt-g from searchKeymap keeps working too.
         { key: "Mod-g", preventDefault: true, run: gotoLine },
+        {
+          // Shift+Alt+F — the format shortcut every editor uses.
+          key: "Shift-Alt-f",
+          preventDefault: true,
+          run: (v) => {
+            void runLspFormat(v, lspCtx);
+            return true;
+          },
+        },
         ...searchKeymap,
+        ...closeBracketsKeymap,
+        ...completionKeymap,
+        ...foldKeymap,
+        ...historyKeymap,
+        // Tab indents/dedents inside the editor. Listed last so it never
+        // shadows completion's Tab; blurring is still reachable with Escape
+        // then Tab, which is what the a11y guidance asks for.
+        indentWithTab,
+        // Base editing/navigation commands (word-wise motion, line ops,
+        // selection). Last so every binding above wins on conflict.
+        ...defaultKeymap,
       ]),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) {
           setBuffer(projectId, worktreeId, tab.relPath, u.state.doc.toString());
+          scheduleDiagnostics();
         }
       }),
       EditorView.lineWrapping,
+      // Diagnostics, hover and Ctrl+click go-to-definition, served by the same
+      // per-worktree language servers the MCP tools use. Everything fails soft:
+      // a file with no server just gets none of it.
+      ...lspExtensions(lspCtx),
     ];
     const view = new EditorView({
       state: EditorState.create({
@@ -360,7 +531,39 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
       parent: containerRef.current,
     });
     viewRef.current = view;
+    // Restore where the user was in this file. Offsets are re-clamped: the
+    // buffer may have shrunk since (external change, reload from disk).
+    const cacheKey = `${scopeKey(projectId, worktreeId)}::${tab.relPath}`;
+    const saved = viewStateCache.get(cacheKey);
+    if (saved) {
+      const max = view.state.doc.length;
+      view.dispatch({
+        selection: EditorSelection.single(
+          Math.min(saved.anchor, max),
+          Math.min(saved.head, max),
+        ),
+      });
+      view.scrollDOM.scrollTop = saved.scrollTop;
+    }
+    // First pass for the file as opened. Skipped while the tab is still
+    // loading — that mount holds the empty skeleton, not the file.
+    if (!tab.loading) scheduleDiagnostics();
     return () => {
+      if (diagTimer.current !== null) {
+        window.clearTimeout(diagTimer.current);
+        diagTimer.current = null;
+      }
+      // The pane also mounts once against the empty skeleton while the file
+      // loads (the key includes `loading`). Saving that mount's position would
+      // overwrite the real one with 0/0 every time a tab is reopened.
+      if (!tab.loading) {
+        const sel = view.state.selection.main;
+        viewStateCache.set(cacheKey, {
+          anchor: sel.anchor,
+          head: sel.head,
+          scrollTop: view.scrollDOM.scrollTop,
+        });
+      }
       view.destroy();
       viewRef.current = null;
     };
@@ -369,7 +572,7 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
     // keymap/updateListener closures rebind when switching between two
     // projects' same-path file (shared nil-UUID worktreeId sentinel).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, worktreeId, tab.relPath, showEditor]);
+  }, [projectId, worktreeId, tab.relPath, tab.truncated, tab.loading, showEditor]);
 
   // If the buffer was reset externally (e.g. file reload), sync into the view.
   useEffect(() => {
@@ -412,7 +615,7 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
           {tab.relPath}
           {tab.truncated && (
             <span className="ml-2 rounded bg-amber-900/40 px-1 text-amber-300">
-              {t("truncated")}
+              {t("truncated_readonly")}
             </span>
           )}
         </span>
@@ -448,10 +651,21 @@ export function EditorPane({ projectId, worktreeId, tab }: EditorPaneProps) {
               </button>
             </div>
           )}
+          {tab.truncated && (
+            <button
+              type="button"
+              onClick={() => void loadFullFile(projectId, worktreeId, tab.relPath)}
+              disabled={tab.loading}
+              title={t("load_full_file_hint")}
+              className="rounded border border-amber-800/60 px-1.5 py-0.5 text-amber-300 enabled:hover:bg-amber-950/40 disabled:opacity-40"
+            >
+              {tab.loading ? t("loading") : t("load_full_file")}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => void saveTab(projectId, worktreeId, tab.relPath)}
-            disabled={!dirty || tab.saving || isPreviewOnly}
+            onClick={() => void save()}
+            disabled={!dirty || tab.saving || isPreviewOnly || tab.truncated}
             className="flex items-center gap-1 rounded px-1.5 py-0.5 text-neutral-300 enabled:hover:bg-neutral-800 enabled:hover:text-neutral-100 disabled:opacity-40"
           >
             <Save size={11} />

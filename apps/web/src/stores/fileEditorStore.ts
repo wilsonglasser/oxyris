@@ -135,6 +135,13 @@ interface FileEditorState {
     worktreeId: string,
     relPath: string,
   ) => Promise<void>;
+  /** Re-read a tab that came back truncated, this time with a cap high enough
+   *  to hold the whole file, so it becomes editable/savable. */
+  loadFullFile: (
+    projectId: string,
+    worktreeId: string,
+    relPath: string,
+  ) => Promise<void>;
   /** Reconcile an open tab against an external (on-disk) change reported by
    *  the fs watcher. Clean buffers are reloaded silently; dirty buffers raise
    *  a conflict (sets `externalContent` → reload/keep banner). No-op when the
@@ -199,6 +206,11 @@ interface FileEditorState {
     destDir: string,
   ) => Promise<void>;
 }
+
+/** Read cap for "load the whole file": high enough for anything worth opening
+ *  in the editor, low enough that a stray multi-GB file can't wedge the
+ *  WebView. Files above it stay truncated → read-only. */
+const FULL_READ_CAP = 16 * 1024 * 1024;
 
 /** Best-effort string from a thrown value — Tauri rejections are often plain
  *  objects/strings, not `Error`s, so `String(e)` would yield "[object Object]". */
@@ -452,6 +464,10 @@ export const useFileEditorStore = create<FileEditorState>()(
     const key = scopeKey(projectId, worktreeId);
     const tab = get().tabs[key]?.[relPath];
     if (!tab || tab.saving) return;
+    // The buffer only holds the first `max_bytes` of the file — writing it
+    // back would drop everything past the cut. The editor is read-only in this
+    // state; this is the backstop for any other caller.
+    if (tab.truncated) return;
     set((state) => {
       const tabs = { ...(state.tabs[key] ?? {}) };
       tabs[relPath] = { ...tab, saving: true, error: null };
@@ -483,6 +499,58 @@ export const useFileEditorStore = create<FileEditorState>()(
         const cur = tabs[relPath];
         if (!cur) return state;
         tabs[relPath] = { ...cur, saving: false, error: message };
+        return { tabs: { ...state.tabs, [key]: tabs } };
+      });
+    }
+  },
+
+  loadFullFile: async (projectId, worktreeId, relPath) => {
+    const key = scopeKey(projectId, worktreeId);
+    const tab = get().tabs[key]?.[relPath];
+    if (!tab || tab.loading || tab.saving) return;
+    // Re-reading replaces the buffer. A truncated tab is read-only so it
+    // normally can't be dirty, but the rehydrate path carries a buffer over —
+    // never drop edits to widen the read.
+    if (tab.buffer !== tab.baseContent) return;
+    set((state) => {
+      const tabs = { ...(state.tabs[key] ?? {}) };
+      const cur = tabs[relPath];
+      if (!cur) return state;
+      tabs[relPath] = { ...cur, loading: true, error: null };
+      return { tabs: { ...state.tabs, [key]: tabs } };
+    });
+    try {
+      const result = await fsReadFile({
+        projectId,
+        worktreeId,
+        relPath,
+        maxBytes: FULL_READ_CAP,
+      });
+      set((state) => {
+        const tabs = { ...(state.tabs[key] ?? {}) };
+        const cur = tabs[relPath];
+        if (!cur) return state;
+        tabs[relPath] = {
+          ...cur,
+          baseContent: result.content,
+          buffer: result.content,
+          truncated: result.truncated,
+          loading: false,
+          // Still truncated (a genuinely huge file): the tab keeps its
+          // read-only banner. No error string here — the store holds no
+          // user-facing copy, the banner is rendered from `truncated`.
+          error: null,
+          externalContent: null,
+        };
+        return { tabs: { ...state.tabs, [key]: tabs } };
+      });
+    } catch (e) {
+      const message = errMessage(e);
+      set((state) => {
+        const tabs = { ...(state.tabs[key] ?? {}) };
+        const cur = tabs[relPath];
+        if (!cur) return state;
+        tabs[relPath] = { ...cur, loading: false, error: message };
         return { tabs: { ...state.tabs, [key]: tabs } };
       });
     }
