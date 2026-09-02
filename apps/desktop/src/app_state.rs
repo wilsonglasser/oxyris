@@ -249,9 +249,10 @@ impl AppState {
         // `mcp.json`.
         {
             let lsp_for_bridge = lsp.clone();
+            let agents_for_bridge = agent_pool.clone();
             let port_slot = lsp_bridge_port.clone();
             tauri::async_runtime::spawn(async move {
-                match lsp_bridge::serve(lsp_for_bridge).await {
+                match lsp_bridge::serve(lsp_for_bridge, agents_for_bridge).await {
                     Ok(port) => {
                         if let Ok(mut slot) = port_slot.lock() {
                             *slot = Some(port);

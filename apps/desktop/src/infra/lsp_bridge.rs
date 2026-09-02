@@ -33,11 +33,13 @@ use crate::infra::wsl_distro_for_path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::infra::agent_pool::AgentPool;
+use crate::infra::fs as fs_infra;
 use crate::infra::lsp::LspManager;
 
 /// Bind the bridge listener and spawn the accept loop. Returns the bound
 /// port so callers can wire it into `mcp.json`.
-pub async fn serve(lsp: Arc<LspManager>) -> std::io::Result<u16> {
+pub async fn serve(lsp: Arc<LspManager>, agents: Arc<AgentPool>) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     tracing::info!(port, "lsp_bridge: listening");
@@ -47,7 +49,8 @@ pub async fn serve(lsp: Arc<LspManager>) -> std::io::Result<u16> {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     let lsp = lsp.clone();
-                    tokio::spawn(handle_conn(stream, addr, lsp));
+                    let agents = agents.clone();
+                    tokio::spawn(handle_conn(stream, addr, lsp, agents));
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "lsp_bridge: accept failed");
@@ -59,7 +62,12 @@ pub async fn serve(lsp: Arc<LspManager>) -> std::io::Result<u16> {
     Ok(port)
 }
 
-async fn handle_conn(stream: TcpStream, addr: SocketAddr, lsp: Arc<LspManager>) {
+async fn handle_conn(
+    stream: TcpStream,
+    addr: SocketAddr,
+    lsp: Arc<LspManager>,
+    agents: Arc<AgentPool>,
+) {
     tracing::debug!(?addr, "lsp_bridge: client connected");
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -72,7 +80,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, lsp: Arc<LspManager>) 
         if trimmed.is_empty() {
             continue;
         }
-        let response = handle_request(trimmed, &lsp).await;
+        let response = handle_request(trimmed, &lsp, &agents).await;
         let mut bytes = serde_json::to_vec(&response).unwrap_or_default();
         bytes.push(b'\n');
         if write.write_all(&bytes).await.is_err() {
@@ -85,7 +93,7 @@ async fn handle_conn(stream: TcpStream, addr: SocketAddr, lsp: Arc<LspManager>) 
     tracing::debug!(?addr, "lsp_bridge: client disconnected");
 }
 
-async fn handle_request(line: &str, lsp: &Arc<LspManager>) -> Value {
+async fn handle_request(line: &str, lsp: &Arc<LspManager>, agents: &Arc<AgentPool>) -> Value {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -101,9 +109,9 @@ async fn handle_request(line: &str, lsp: &Arc<LspManager>) -> Value {
     let params = req.get("params").cloned().unwrap_or(Value::Null);
 
     let result = match method {
-        "lsp.find_references" => find_references(lsp, &params).await,
-        "lsp.hover" => hover(lsp, &params).await,
-        "lsp.diagnostics" => diagnostics(lsp, &params).await,
+        "lsp.find_references" => find_references(lsp, agents, &params).await,
+        "lsp.hover" => hover(lsp, agents, &params).await,
+        "lsp.diagnostics" => diagnostics(lsp, agents, &params).await,
         "lsp.check" => check(lsp, &params).await,
         "ping" => Ok(json!({})),
         other => Err(format!("unknown method: {other}")),
@@ -123,7 +131,35 @@ async fn handle_request(line: &str, lsp: &Arc<LspManager>) -> Value {
     }
 }
 
-async fn find_references(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, String> {
+/// Give the server the file's current text before asking about it.
+///
+/// The LSP client itself cannot read these files: for a WSL workspace the
+/// paths are POSIX paths *inside the distro*, which `tokio::fs` on the Windows
+/// side resolves to nothing — every `ensure_open` there failed with NotFound,
+/// silently disabling hover/references/diagnostics for WSL projects. Reading
+/// through `fs_infra` routes by environment (native, or the distro's agent),
+/// and the text is then pushed with `open_or_update`.
+async fn sync_doc(
+    client: &Arc<oxyris_lsp::LspClient>,
+    agents: &Arc<AgentPool>,
+    env: &Environment,
+    file: &Path,
+) -> Result<(), String> {
+    let read = fs_infra::read_file(env, agents, file.to_string_lossy().into_owned(), None)
+        .await
+        .map_err(|e| e.to_string())?;
+    client
+        .open_or_update(file, &read.content)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn find_references(
+    lsp: &Arc<LspManager>,
+    agents: &Arc<AgentPool>,
+    params: &Value,
+) -> Result<Value, String> {
     let (workspace, file, line, column) = parse_position(params)?;
     let include_declaration = params
         .get("include_declaration")
@@ -136,6 +172,7 @@ async fn find_references(lsp: &Arc<LspManager>, params: &Value) -> Result<Value,
         .ensure_at(&workspace, &env, lang)
         .await
         .map_err(|e| e.to_string())?;
+    sync_doc(&client, agents, &env, &file).await?;
     let locations = client
         .find_references(&file, line, column, include_declaration)
         .await
@@ -143,7 +180,11 @@ async fn find_references(lsp: &Arc<LspManager>, params: &Value) -> Result<Value,
     serde_json::to_value(locations).map_err(|e| e.to_string())
 }
 
-async fn hover(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, String> {
+async fn hover(
+    lsp: &Arc<LspManager>,
+    agents: &Arc<AgentPool>,
+    params: &Value,
+) -> Result<Value, String> {
     let (workspace, file, line, column) = parse_position(params)?;
     let lang = LspManager::language_for_workspace(&workspace, &file)
         .ok_or_else(|| format!("no LSP language detected for {}", file.display()))?;
@@ -152,6 +193,7 @@ async fn hover(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, String> {
         .ensure_at(&workspace, &env, lang)
         .await
         .map_err(|e| e.to_string())?;
+    sync_doc(&client, agents, &env, &file).await?;
     let result = client
         .hover(&file, line, column)
         .await
@@ -159,7 +201,11 @@ async fn hover(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, String> {
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
-async fn diagnostics(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, String> {
+async fn diagnostics(
+    lsp: &Arc<LspManager>,
+    agents: &Arc<AgentPool>,
+    params: &Value,
+) -> Result<Value, String> {
     let workspace = params
         .get("workspace")
         .and_then(|v| v.as_str())
@@ -177,7 +223,7 @@ async fn diagnostics(lsp: &Arc<LspManager>, params: &Value) -> Result<Value, Str
         .ensure_at(&workspace, &env, lang)
         .await
         .map_err(|e| e.to_string())?;
-    client.ensure_open(&file).await.map_err(|e| e.to_string())?;
+    sync_doc(&client, agents, &env, &file).await?;
     let diags = client
         .diagnostics_for(&file)
         .await

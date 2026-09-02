@@ -31,12 +31,13 @@ use std::time::{Duration, Instant};
 
 use lsp_types::{
     ClientCapabilities, Diagnostic, DidChangeConfigurationParams, DidChangeTextDocumentParams,
-    DidChangeWorkspaceFoldersParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams, Hover,
-    HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams, Location,
-    MarkedString, MarkupContent, PartialResultParams, Position, ReferenceContext, ReferenceParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier, WindowClientCapabilities,
-    WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
+    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentFormattingParams, FormattingOptions, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams, InitializeResult,
+    InitializedParams, Location, MarkedString, MarkupContent, PartialResultParams, Position,
+    ReferenceContext, ReferenceParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier,
+    WindowClientCapabilities, WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
     WorkspaceFoldersChangeEvent,
 };
 use oxyris_procutil::HideConsole;
@@ -344,6 +345,144 @@ impl LspClient {
             .await
             .insert(path.to_owned(), OpenDoc { version: 1, hash });
         Ok(())
+    }
+
+    /// Push `text` as the document's content, without touching the filesystem.
+    ///
+    /// This is the entry point for callers that already hold the bytes: the
+    /// editor (whose buffer is unsaved, so disk is stale by definition) and
+    /// any WSL-hosted workspace, where the paths are POSIX paths inside the
+    /// distro that the Windows-side process cannot read at all —
+    /// [`LspClient::sync_from_disk`] is a guaranteed `NotFound` there.
+    ///
+    /// Sends `didOpen` the first time and a full-document `didChange`
+    /// afterwards. Deliberately **no** `didSave`: this runs on every keystroke
+    /// debounce, and for rust-analyzer a `didSave` is what kicks off
+    /// `cargo check`. Call [`LspClient::did_save`] when the user actually
+    /// saves. Returns `true` when something was sent.
+    pub async fn open_or_update(&self, path: &Path, text: &str) -> Result<bool> {
+        let hash = content_hash(text);
+        let uri = path_to_uri(path)?;
+        let version = {
+            let mut opened = self.opened.lock().await;
+            match opened.get_mut(path) {
+                Some(doc) if doc.hash == hash => return Ok(false),
+                Some(doc) => {
+                    doc.version += 1;
+                    doc.hash = hash;
+                    doc.version
+                }
+                None => {
+                    let language_id = language::language_id_for(path).unwrap_or("plaintext");
+                    self.notify(
+                        "textDocument/didOpen",
+                        DidOpenTextDocumentParams {
+                            text_document: TextDocumentItem {
+                                uri,
+                                language_id: language_id.into(),
+                                version: 1,
+                                text: text.to_owned(),
+                            },
+                        },
+                    )?;
+                    opened.insert(path.to_owned(), OpenDoc { version: 1, hash });
+                    return Ok(true);
+                }
+            }
+        };
+        self.notify(
+            "textDocument/didChange",
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier { uri, version },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: text.to_owned(),
+                }],
+            },
+        )?;
+        Ok(true)
+    }
+
+    /// Tell the server the document was saved. Separate from
+    /// [`LspClient::open_or_update`] because save is what triggers the
+    /// check/lint layer (rust-analyzer's `cargo check`), and that must not run
+    /// per keystroke. No-op for a document we never opened.
+    pub async fn did_save(&self, path: &Path) -> Result<()> {
+        if !self.opened.lock().await.contains_key(path) {
+            return Ok(());
+        }
+        self.notify(
+            "textDocument/didSave",
+            DidSaveTextDocumentParams {
+                text_document: TextDocumentIdentifier {
+                    uri: path_to_uri(path)?,
+                },
+                text: None,
+            },
+        )
+    }
+
+    /// Drop a document from the server's open set (editor tab closed). The
+    /// server goes back to trusting disk for it and stops re-analysing our
+    /// stale buffer. No-op when it was never opened.
+    pub async fn close_document(&self, path: &Path) -> Result<()> {
+        if self.opened.lock().await.remove(path).is_none() {
+            return Ok(());
+        }
+        self.notify(
+            "textDocument/didClose",
+            DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier {
+                    uri: path_to_uri(path)?,
+                },
+            },
+        )
+    }
+
+    /// `textDocument/definition`. The response is one of three shapes; all
+    /// three collapse to a flat location list here.
+    pub async fn definition(&self, path: &Path, line: u32, column: u32) -> Result<Vec<Location>> {
+        let params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: path_to_uri(path)?,
+                },
+                position: Position {
+                    line,
+                    character: column,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+        let result: Option<GotoDefinitionResponse> =
+            self.request("textDocument/definition", params).await?;
+        Ok(flatten_definition(result))
+    }
+
+    /// `textDocument/formatting`. Returns the server's edits against the
+    /// document *it currently holds* — push the live buffer with
+    /// [`LspClient::open_or_update`] first or the offsets will not line up.
+    pub async fn formatting(
+        &self,
+        path: &Path,
+        tab_size: u32,
+        insert_spaces: bool,
+    ) -> Result<Vec<TextEdit>> {
+        let params = DocumentFormattingParams {
+            text_document: TextDocumentIdentifier {
+                uri: path_to_uri(path)?,
+            },
+            options: FormattingOptions {
+                tab_size,
+                insert_spaces,
+                ..Default::default()
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+        let result: Option<Vec<TextEdit>> = self.request("textDocument/formatting", params).await?;
+        Ok(result.unwrap_or_default())
     }
 
     /// Reconcile the server's view of `path` with what is on disk right now.
@@ -799,6 +938,26 @@ fn flycheck_params(path: Option<&Path>) -> Result<Value> {
     Ok(serde_json::json!({ "textDocument": text_document }))
 }
 
+/// Collapse the three shapes `textDocument/definition` can answer with
+/// (`Location`, `Vec<Location>`, `Vec<LocationLink>`) into one list. Link
+/// responses carry the target in `target_uri`/`target_selection_range`; the
+/// selection range is the identifier itself, which is where the caret should
+/// land.
+fn flatten_definition(resp: Option<GotoDefinitionResponse>) -> Vec<Location> {
+    match resp {
+        None => Vec::new(),
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Link(links)) => links
+            .into_iter()
+            .map(|l| Location {
+                uri: l.target_uri,
+                range: l.target_selection_range,
+            })
+            .collect(),
+    }
+}
+
 fn path_to_uri(path: &Path) -> Result<Uri> {
     let normalized = path.to_string_lossy().replace('\\', "/");
     let absolute = if normalized.starts_with('/') || has_windows_drive_prefix(&normalized) {
@@ -916,6 +1075,57 @@ mod tests {
     fn empty_hover_is_none() {
         let h = HoverContents::Scalar(MarkedString::String("".into()));
         assert!(flatten_hover(h).is_none());
+    }
+
+    #[test]
+    fn definition_flattens_every_response_shape() {
+        use lsp_types::{LocationLink, Range};
+        let range = Range {
+            start: Position {
+                line: 3,
+                character: 1,
+            },
+            end: Position {
+                line: 3,
+                character: 9,
+            },
+        };
+        let uri: Uri = "file:///c:/p/src/lib.rs".parse().expect("uri");
+        let scalar = flatten_definition(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: uri.clone(),
+            range,
+        })));
+        assert_eq!(scalar.len(), 1);
+        assert_eq!(scalar[0].range.start.line, 3);
+
+        let array = flatten_definition(Some(GotoDefinitionResponse::Array(vec![Location {
+            uri: uri.clone(),
+            range,
+        }])));
+        assert_eq!(array.len(), 1);
+
+        // Link responses must surface the *selection* range (the identifier),
+        // not the full target range (the whole item body).
+        let link = flatten_definition(Some(GotoDefinitionResponse::Link(vec![LocationLink {
+            origin_selection_range: None,
+            target_uri: uri,
+            target_range: Range {
+                start: Position {
+                    line: 3,
+                    character: 0,
+                },
+                end: Position {
+                    line: 40,
+                    character: 0,
+                },
+            },
+            target_selection_range: range,
+        }])));
+        assert_eq!(link.len(), 1);
+        assert_eq!(link[0].range.start.character, 1);
+        assert_eq!(link[0].range.end.line, 3);
+
+        assert!(flatten_definition(None).is_empty());
     }
 
     #[test]

@@ -220,6 +220,12 @@ pub fn run() {
             tauri_commands::language_packs::language_packs_uninstall,
             tauri_commands::language_packs::language_packs_install_in_wsl,
             tauri_commands::language_packs::wsl_distros,
+            tauri_commands::lsp::lsp_diagnostics,
+            tauri_commands::lsp::lsp_hover,
+            tauri_commands::lsp::lsp_definition,
+            tauri_commands::lsp::lsp_format,
+            tauri_commands::lsp::lsp_did_save,
+            tauri_commands::lsp::lsp_did_close,
         ])
         .setup(|app| {
             // Keep dev runs isolated from the installed release. Both share

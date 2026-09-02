@@ -386,6 +386,27 @@ impl LspManager {
     /// We hold the pool lock across the (slow) spawn, matching the original
     /// single-`Mutex` behaviour — spawns were already globally serialised and
     /// `warm_primary` (a background task) is the only hot spawner.
+    /// The client already serving `workspace_root` for `lang`, if any — never
+    /// spawns one. For teardown paths (an editor tab closing) where starting a
+    /// server just to tell it about a document would be absurd.
+    pub async fn running_at(
+        &self,
+        workspace_root: &Path,
+        _env: &Environment,
+        lang: LspLanguage,
+    ) -> Option<Arc<LspClient>> {
+        let pools = self.pools.lock().await;
+        let worktree_id = *pools.by_path.get(workspace_root)?;
+        let rec = pools.worktrees.get(&worktree_id)?;
+        if let Some(c) = pools.dedicated.get(&(worktree_id, lang)) {
+            return Some(c.clone());
+        }
+        pools
+            .projects
+            .get(&rec.project_id)
+            .and_then(|ps| ps.shared.get(&lang).cloned())
+    }
+
     pub async fn ensure(
         &self,
         worktree_id: AggregateId,
