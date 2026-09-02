@@ -1,11 +1,12 @@
 //! Attachments storage for composer drag-drop / paste. The resulting absolute
 //! path is handed back to the UI so it can prepend `@<path>` when sending the
-//! message — Claude CLI resolves `@path` as a vision attachment.
+//! message — Claude CLI resolves `@path` as an attachment: vision input for
+//! images, a file read for anything else.
 //!
 //! **Routing.** For Windows projects the file is written under
-//! `<data_dir>/attachments/<bucket>/<uuid>.<ext>`. For WSL projects the bytes
+//! `<data_dir>/attachments/<bucket>/<stored>`. For WSL projects the bytes
 //! are streamed through the per-distro agent (`fs.write_bytes`) into
-//! `<home>/.oxyris/attachments/<bucket>/<uuid>.<ext>` *inside the distro*, and
+//! `<home>/.oxyris/attachments/<bucket>/<stored>` *inside the distro*, and
 //! the returned path is the POSIX one — a `\\wsl.localhost\…` or `C:\…` path
 //! would be meaningless to a `claude` running within the distro.
 
@@ -30,7 +31,8 @@ pub struct AttachmentSaveInput {
     pub mime: String,
     /// Base64-encoded bytes (no data-URL prefix).
     pub data_base64: String,
-    /// Optional original filename; used only for extension detection fallback.
+    /// Optional original filename; drives extension detection and, for
+    /// non-image files, the readable half of the stored name.
     #[serde(default)]
     pub filename: Option<String>,
 }
@@ -65,7 +67,7 @@ pub async fn attachment_save(
     input: AttachmentSaveInput,
     state: State<'_, AppState>,
 ) -> Result<AttachmentInfo, TauriAttachmentError> {
-    let ext = extension_for(&input.mime, input.filename.as_deref())
+    let filename = stored_filename(&input.mime, input.filename.as_deref())
         .ok_or_else(|| TauriAttachmentError::UnsupportedMime(input.mime.clone()))?;
 
     let bytes = B64
@@ -79,7 +81,6 @@ pub async fn attachment_save(
     }
 
     let bucket = sanitize_bucket(&input.bucket_id).ok_or(TauriAttachmentError::InvalidBucket)?;
-    let filename = format!("{}.{ext}", Uuid::now_v7());
     let size = bytes.len();
 
     // Route by the bucket's project environment. Unresolvable buckets (e.g.
@@ -228,7 +229,22 @@ fn sanitize_bucket(raw: &str) -> Option<String> {
     }
 }
 
-fn extension_for(mime: &str, filename: Option<&str>) -> Option<&'static str> {
+/// Name the copy takes inside the bucket. Images keep the historical
+/// `<uuid>.<ext>` shape (claude only needs the extension to treat them as
+/// vision input). Every other dropped file keeps its original basename behind
+/// a uuid prefix — `01ab…-notes.pdf` — so the name claude sees in `@path`
+/// still means something, while the uuid keeps two drops of `notes.pdf` from
+/// colliding inside one bucket.
+fn stored_filename(mime: &str, filename: Option<&str>) -> Option<String> {
+    let uuid = Uuid::now_v7();
+    if let Some(ext) = image_extension(mime, filename) {
+        return Some(format!("{uuid}.{ext}"));
+    }
+    let safe = filename.map(sanitize_filename).filter(|s| !s.is_empty())?;
+    Some(format!("{uuid}-{safe}"))
+}
+
+fn image_extension(mime: &str, filename: Option<&str>) -> Option<&'static str> {
     match mime.to_ascii_lowercase().as_str() {
         "image/png" => Some("png"),
         "image/jpeg" | "image/jpg" => Some("jpg"),
@@ -247,5 +263,78 @@ fn extension_for(mime: &str, filename: Option<&str>) -> Option<&'static str> {
                 }
             })
         }
+    }
+}
+
+/// Strip any directory part, then keep only `[A-Za-z0-9._-]` so the name can't
+/// escape the bucket (`..`, separators) or need shell quoting in `@path`.
+/// The stem is truncated (not the whole name) so a long filename keeps its
+/// extension — claude routes on it. Dotfiles (`.env`) keep their leading dot;
+/// only trailing dots are dropped, since Windows silently strips those on
+/// create, which would make the returned path point at a file that isn't there.
+fn sanitize_filename(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let cleaned: String = base
+        .trim_end_matches('.')
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Split on the *last* dot, skipping a leading one so `.env` stays a stem.
+    let dot = cleaned
+        .get(1..)
+        .and_then(|rest| rest.rfind('.'))
+        .map(|i| i + 1);
+    let (stem, ext) = match dot {
+        Some(i) => (&cleaned[..i], &cleaned[i..]),
+        None => (cleaned.as_str(), ""),
+    };
+    let stem: String = stem.chars().take(60).collect();
+    let ext: String = ext.chars().take(20).collect();
+    format!("{stem}{ext}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_keep_the_uuid_ext_shape() {
+        let name = stored_filename("image/png", Some("shot.png")).unwrap();
+        assert!(name.ends_with(".png"), "{name}");
+        assert!(!name.contains("shot"), "{name}");
+    }
+
+    #[test]
+    fn other_files_keep_their_basename_behind_a_uuid() {
+        let name = stored_filename("application/pdf", Some("Relatório final.pdf")).unwrap();
+        assert!(name.ends_with("-Relat_rio_final.pdf"), "{name}");
+    }
+
+    #[test]
+    fn typeless_drop_still_stores_when_a_filename_is_known() {
+        assert!(stored_filename("", Some("notes.txt")).is_some());
+        // Nothing to name the copy after — the caller gets UnsupportedMime.
+        assert!(stored_filename("", None).is_none());
+    }
+
+    #[test]
+    fn sanitize_cannot_escape_the_bucket() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_filename(r"a\b\c.txt"), "c.txt");
+    }
+
+    #[test]
+    fn dotfiles_keep_their_leading_dot_and_long_stems_keep_the_ext() {
+        assert_eq!(sanitize_filename(".env"), ".env");
+        let long = format!("{}.tsx", "a".repeat(200));
+        let out = sanitize_filename(&long);
+        assert!(out.ends_with(".tsx"), "{out}");
+        assert_eq!(out.len(), 64);
     }
 }

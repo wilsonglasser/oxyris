@@ -55,6 +55,7 @@ import {
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import { matchesKey } from "~/lib/keybindings.ts";
+import { useFileDrop } from "~/hooks/useFileDrop.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import { TerminalView } from "~/components/TerminalPanel.tsx";
 import { FileViewerModal } from "~/components/FileViewerModal.tsx";
@@ -867,15 +868,12 @@ function PureSessionView({
     [sessionId, termId],
   );
 
-  const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData.items;
-    if (!items) return;
-    for (let i = 0; i < items.length; i += 1) {
-      const item = items[i];
-      if (item && item.kind === "file") {
-        const file = item.getAsFile();
-        if (!file) continue;
-        e.preventDefault();
+  // Shared by paste and drop: the webview only hands over bytes (never the
+  // source path), so each file is copied into the session's attachment bucket —
+  // inside the distro for WSL projects — and the chip references that copy.
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      for (const file of files) {
         try {
           const base64 = await blobToBase64(file);
           const info = await attachmentSave({
@@ -889,11 +887,39 @@ function PureSessionView({
           setError(err instanceof Error ? err.message : String(err));
         }
       }
+    },
+    [sessionId, addAttachment],
+  );
+
+  const onDropFiles = useCallback(
+    (files: File[]) => void addFiles(files),
+    [addFiles],
+  );
+  const { dragging, dropProps } = useFileDrop(onDropFiles, {
+    disabled: takenOver,
+  });
+
+  const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i];
+      if (item && item.kind === "file") {
+        const file = item.getAsFile();
+        if (!file) continue;
+        e.preventDefault();
+        files.push(file);
+      }
     }
+    if (files.length > 0) await addFiles(files);
   };
 
   return (
-    <section className="flex h-full min-h-0 flex-col bg-neutral-950">
+    <section
+      className="relative flex h-full min-h-0 flex-col bg-neutral-950"
+      {...dropProps}
+    >
       {!embedded && (
         <header className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-3 py-1.5 text-[11px] text-neutral-300">
           <TerminalIcon className="size-3.5" strokeWidth={1.75} />
@@ -1071,6 +1097,18 @@ function PureSessionView({
           </div>
         )}
       </div>
+
+      {/* Drop hint. Covers the whole panel (terminal included) since the drop
+          handler sits on the section — anywhere is a valid target. Above the
+          whip overlay (z-20), below the takeover one (z-30, drop disabled). */}
+      {dragging && (
+        <div className="pointer-events-none absolute inset-0 z-[25] flex items-center justify-center bg-neutral-950/70 backdrop-blur-[1px]">
+          <div className="flex items-center gap-2 rounded-lg border border-dashed border-sky-600 bg-neutral-900/90 px-4 py-3 text-[12px] text-sky-200">
+            <Paperclip className="size-4" strokeWidth={1.75} />
+            {t("drop_files_hint")}
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5 border-t border-neutral-800 bg-neutral-900 p-2">
         {attachments.length > 0 && (

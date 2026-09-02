@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { parseUserMessage } from "~/lib/parseUserMessage.ts";
 import { matchesKey } from "~/lib/keybindings.ts";
+import { useFileDrop } from "~/hooks/useFileDrop.ts";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
 import {
@@ -23,6 +24,7 @@ import {
   ChevronsUpDown,
   Clock,
   Cpu,
+  FileText,
   ShieldAlert,
   Mic,
   MicOff,
@@ -1254,7 +1256,11 @@ interface ComposerProps {
 
 interface ComposerAttachment {
   info: AttachmentInfo;
-  previewUrl: string;
+  /** Object URL for the thumbnail; null for non-image files (chip instead). */
+  previewUrl: string | null;
+  /** Original name as dropped/picked — `info.filename` is the uuid-prefixed
+   *  on-disk name, which reads as noise in the chip. */
+  label: string;
 }
 
 function Composer({
@@ -1342,16 +1348,22 @@ function Composer({
   // attachments shrinks.
   useEffect(() => {
     return () => {
-      attachments.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+      attachments.forEach((a) => {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Any file type is accepted: images become vision input, everything else is a
+  // file claude can read through the `@path` reference. The webview never hands
+  // over the source path, so the bytes are copied into the session's attachment
+  // bucket (inside the distro for WSL projects) and the copy is what's cited.
   const addFromBlobs = async (blobs: Blob[]) => {
-    const accepted = blobs.filter((b) => /^image\/(png|jpe?g|webp|gif)$/i.test(b.type));
-    if (accepted.length === 0) return;
+    if (blobs.length === 0) return;
     setAttachError(null);
-    for (const blob of accepted) {
+    for (const blob of blobs) {
+      const isImage = /^image\/(png|jpe?g|webp|gif)$/i.test(blob.type);
       try {
         const base64 = await blobToBase64(blob);
         const info = await attachmentSave({
@@ -1360,8 +1372,9 @@ function Composer({
           data_base64: base64,
           filename: (blob as File).name ?? undefined,
         });
-        const previewUrl = URL.createObjectURL(blob);
-        setAttachments((prev) => [...prev, { info, previewUrl }]);
+        const previewUrl = isImage ? URL.createObjectURL(blob) : null;
+        const label = (blob as File).name || info.filename;
+        setAttachments((prev) => [...prev, { info, previewUrl, label }]);
       } catch (e) {
         setAttachError(extractError(e));
       }
@@ -1371,7 +1384,7 @@ function Composer({
   const removeAttachment = (path: string) => {
     setAttachments((prev) => {
       const target = prev.find((a) => a.info.path === path);
-      if (target) URL.revokeObjectURL(target.previewUrl);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
       return prev.filter((a) => a.info.path !== path);
     });
   };
@@ -1393,7 +1406,9 @@ function Composer({
     setAttachments([]);
     try {
       await onSend(payload);
-      sentAttachments.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+      sentAttachments.forEach((a) => {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      });
     } catch (e) {
       // Surfaces via the panel-level error handler in onSend already.
       // Restore the draft so the user doesn't lose their input.
@@ -1444,6 +1459,15 @@ function Composer({
     await addFromBlobs(blobs);
   };
 
+  const onDropFiles = useCallback(
+    (files: File[]) => void addFromBlobs(files),
+    // `addFromBlobs` is recreated on every render but only closes over stable setters
+    // and `sessionKey`; keying on the latter keeps the handler identity stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sessionKey],
+  );
+  const { dragging, dropProps } = useFileDrop(onDropFiles);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -1492,7 +1516,18 @@ function Composer({
   );
 
   return (
-    <footer className="shrink-0 border-t border-neutral-800 bg-neutral-950 px-4 py-3">
+    <footer
+      className="relative shrink-0 border-t border-neutral-800 bg-neutral-950 px-4 py-3"
+      {...dropProps}
+    >
+      {dragging && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-neutral-950/80">
+          <div className="flex items-center gap-2 rounded-lg border border-dashed border-sky-600 bg-neutral-900/90 px-4 py-3 text-[12px] text-sky-200">
+            <Paperclip className="size-4" strokeWidth={1.75} />
+            {t("drop_files_hint")}
+          </div>
+        </div>
+      )}
       <div className="mx-auto max-w-3xl">
         {queue.length > 0 && (
           <div className="mb-2 flex flex-col gap-1 rounded-lg border border-neutral-800 bg-neutral-900/40 px-2.5 py-1.5">
@@ -1531,11 +1566,23 @@ function Composer({
                   key={a.info.path}
                   className="group relative overflow-hidden rounded-md border border-neutral-800 bg-neutral-950"
                 >
-                  <img
-                    src={a.previewUrl}
-                    alt={a.info.filename}
-                    className="size-14 object-cover"
-                  />
+                  {a.previewUrl ? (
+                    <img
+                      src={a.previewUrl}
+                      alt={a.label}
+                      className="size-14 object-cover"
+                    />
+                  ) : (
+                    <div
+                      title={a.label}
+                      className="flex size-14 flex-col items-center justify-center gap-1 px-1 text-neutral-400"
+                    >
+                      <FileText className="size-4" strokeWidth={1.75} />
+                      <span className="w-full truncate text-center text-[9px]">
+                        {a.label}
+                      </span>
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() => removeAttachment(a.info.path)}
@@ -1596,7 +1643,6 @@ function Composer({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
                 multiple
                 onChange={(e) => void onPickFile(e)}
                 className="hidden"
