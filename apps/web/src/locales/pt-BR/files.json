@@ -69,5 +69,22 @@
   "matches_in_files": "{{matches}} resultados em {{files}} arquivos",
   "speed_search_no_match": "sem resultado",
   "goto_line": "Ir para linha",
-  "goto_line_submit": "ir"
+  "goto_line_submit": "ir",
+  "replace_toggle": "Alternar substituição (Ctrl+Shift+R)",
+  "replace_all": "Substituir tudo",
+  "replace_confirm": "Substituir {{matches}} em {{files}} arquivos — clique para confirmar",
+  "replace_running": "Substituindo…",
+  "replace_done": "{{matches}} ocorrências substituídas em {{files}} arquivos — sem desfazer, use o git para reverter.",
+  "replace_skipped": "{{count}} ignorados",
+  "replace_placeholder": "Substituir por…",
+  "replace_placeholder_regex": "Substituir por… ($1 para grupos de captura)",
+  "replace_too_many": "Ocorrências demais para substituir de uma vez (acima de {{max}}). Refine a busca ou a máscara.",
+  "replace_skip_large": "arquivo grande demais",
+  "replace_skip_binary": "não é UTF-8 válido",
+  "replace_skip_regex": "regex inválida",
+  "truncated_readonly": "truncado · somente leitura",
+  "load_full_file": "Carregar arquivo inteiro",
+  "load_full_file_hint": "Reler o arquivo sem o limite de tamanho para poder editar e salvar",
+  "confirm_close_dirty_one": "{{files}} tem alterações não salvas. Fechar e descartar?",
+  "confirm_close_dirty_other": "{{count}} arquivos com alterações não salvas ({{files}}). Fechar e descartar?"
 }

@@ -69,5 +69,22 @@
   "matches_in_files": "{{matches}} matches in {{files}} files",
   "speed_search_no_match": "no match",
   "goto_line": "Go to line",
-  "goto_line_submit": "go"
+  "goto_line_submit": "go",
+  "replace_toggle": "Toggle replace (Ctrl+Shift+R)",
+  "replace_all": "Replace all",
+  "replace_confirm": "Replace {{matches}} in {{files}} files — click to confirm",
+  "replace_running": "Replacing…",
+  "replace_done": "Replaced {{matches}} matches in {{files}} files — no undo, use git to revert.",
+  "replace_skipped": "{{count}} skipped",
+  "replace_placeholder": "Replace with…",
+  "replace_placeholder_regex": "Replace with… ($1 for capture groups)",
+  "replace_too_many": "Too many matches to replace at once (over {{max}}). Narrow the query or the file mask.",
+  "replace_skip_large": "file too large",
+  "replace_skip_binary": "not valid UTF-8",
+  "replace_skip_regex": "invalid regex",
+  "truncated_readonly": "truncated · read-only",
+  "load_full_file": "Load whole file",
+  "load_full_file_hint": "Re-read the file without the size cap so it can be edited and saved",
+  "confirm_close_dirty_one": "{{files}} has unsaved changes. Close and discard?",
+  "confirm_close_dirty_other": "{{count}} files have unsaved changes ({{files}}). Close and discard?"
 }

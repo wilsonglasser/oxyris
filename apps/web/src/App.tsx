@@ -77,6 +77,8 @@ export function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTab, setSearchTab] = useState<SearchTab>("symbols");
   const [findOpen, setFindOpen] = useState(false);
+  /** Find in Files opens with the replace row expanded (Ctrl+Shift+R). */
+  const [findReplace, setFindReplace] = useState(false);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessionSnapshot = useSessionStore((s) =>
     activeSessionId ? s.snapshots[activeSessionId] : null,
@@ -222,6 +224,20 @@ export function App() {
   // Global keyboard shortcuts driven by the user-editable keybindings.json.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // WebView2 still honours the browser reload accelerators, and a reload
+      // here is a hard app restart: PTYs detach from their panes, modal state
+      // and drafts are gone. Swallow them unconditionally (same trick as
+      // Ctrl+W below); Ctrl+Shift+R is then free to mean "replace in files".
+      if (
+        e.key === "F5" ||
+        ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "r")
+      ) {
+        e.preventDefault();
+        if (!(e.shiftKey && activeId && tab === "files")) return;
+        setFindReplace(true);
+        setFindOpen(true);
+        return;
+      }
       if (matchesKey(e, bindings.new_thread)) {
         // The default "new thread" combo (Ctrl+Shift+N) doubles as "go to
         // file" when not in a conversation view — JetBrains-style. New thread
@@ -270,6 +286,7 @@ export function App() {
         tab === "files"
       ) {
         e.preventDefault();
+        setFindReplace(false);
         setFindOpen(true);
         return;
       }
@@ -609,6 +626,7 @@ export function App() {
           projectId={activeId}
           worktreeId={quickWorktreeId}
           open={findOpen}
+          replace={findReplace}
           onClose={() => setFindOpen(false)}
         />
       )}
