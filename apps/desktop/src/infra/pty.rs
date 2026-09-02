@@ -249,10 +249,13 @@ pub struct PureState {
 }
 
 /// Compute the pure-turn dot snapshot from the live sniffer + output clock.
-/// `needs_input` (red) outranks `busy` (blue). A turn is "busy" only while the
+/// `needs_input` (red) outranks `busy` (blue). A turn is "busy" while the
 /// current TUI frame shows it running ([`PureSniffer::is_busy_now`]) AND output
 /// hasn't gone silent past `IDLE_DONE_MS` — the silence guard unsticks a finished
-/// turn whose last painted frame still looks like a spinner.
+/// turn whose last painted frame still looks like a spinner. The exception is a
+/// turn blocked on background agents
+/// ([`PureSniffer::waiting_for_agents`]), which is legitimately silent for as
+/// long as the agents run and so bypasses the silence guard.
 fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     let needs_input = sniffer.prompt_open();
     let errored = sniffer.api_error();
@@ -262,7 +265,15 @@ fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     // momentarily read "settled" and flap the dot.
     let busy_recent = idle.last_busy.elapsed() < Duration::from_millis(BUSY_HYSTERESIS_MS);
     // A failed turn (errored) is never "busy" — red outranks blue.
-    let busy = !needs_input && !errored && fresh && (sniffer.is_busy_now() || busy_recent);
+    // Blocked on background agents: the turn is live but the PTY emits nothing
+    // at all, so the freshness gate (which exists to unstick stale spinner
+    // frames) would drop the dot mid-work. This is the one running state that
+    // has to survive silence — it clears as soon as claude paints past the
+    // status line.
+    let waiting_agents = sniffer.waiting_for_agents();
+    let busy = !needs_input
+        && !errored
+        && (waiting_agents || (fresh && (sniffer.is_busy_now() || busy_recent)));
     PureState {
         needs_input,
         busy,

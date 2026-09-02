@@ -165,6 +165,27 @@ fn recap_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)([\x{2720}-\x{274F}]|※)\s*recap").expect("pure recap regex"))
 }
 
+/// While a turn is blocked on background agents (the Task tool run in
+/// parallel), claude paints a static status line — "✻ Waiting for 2
+/// background agents to finish" — and then goes completely silent: no
+/// spinner frames, no "esc to interrupt" footer, no output at all until an
+/// agent reports back. Both of the usual "a turn is running" tells are
+/// therefore absent, and the dot used to fall back to idle for what can be
+/// several minutes of real work.
+///
+/// Anchored to the start of the line (past the TUI's box/bullet chrome) so
+/// the assistant *describing* background agents in prose doesn't read as the
+/// status line itself.
+fn waiting_agents_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?im)^[\s\x{2502}\x{2514}\x{251C}\x{2570}\x{2500}\x{2720}-\x{274F}*]*waiting\s+for\s+\d+\s+background\s+agents?\b",
+        )
+        .expect("pure waiting-agents regex")
+    })
+}
+
 /// claude prints an "API Error:" / "API Error (…)" line when a request to the
 /// model API fails mid-turn (e.g. "API Error: Connection closed mid-response",
 /// "API Error (Request timed out)"). A hard failure of the turn — surfaced as
@@ -331,6 +352,20 @@ impl PureSniffer {
     /// Drives the red bull + the pure-mode warning banner.
     pub fn api_error(&self) -> bool {
         self.api_error_seen
+    }
+
+    /// True while the current frame shows claude blocked on background
+    /// agents (see [`waiting_agents_re`]). Scoped to the recent window rather
+    /// than the last line: the status line sits *above* the input box, so it
+    /// is never the bottom-most row, and the scoping keeps it from lingering
+    /// once claude paints past it.
+    ///
+    /// This is the one busy state with no output behind it — the turn is
+    /// live but the PTY is silent — so callers must treat it as busy
+    /// *without* the output-freshness gate that unsticks every other stale
+    /// frame.
+    pub fn waiting_for_agents(&self) -> bool {
+        waiting_agents_re().is_match(recent_window(&self.tail))
     }
 
     /// True while a permission/question menu is on screen. The idle watchdog
@@ -579,6 +614,63 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
         // A cursor-blink redraw of the same frame keeps the menu live.
         s.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude\n");
         assert!(s.prompt_open());
+    }
+
+    /// The frame claude paints while `Task` agents run: a status line above the
+    /// input box, then nothing at all until an agent reports. Neither the
+    /// spinner nor the "esc to interrupt" footer is on screen, so the ordinary
+    /// busy tells are absent and the dot needs this one.
+    #[test]
+    fn detects_waiting_for_background_agents() {
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed(
+            "\u{2726} Waiting for 2 background agents to finish\n\
+             \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\
+             \u{276F} \n",
+        );
+        assert!(sniffer.waiting_for_agents());
+        // The status line is not the bottom row (the input box is), so the
+        // last-line check can't see it — that is exactly why it has its own.
+        assert!(!sniffer.is_busy_now());
+    }
+
+    #[test]
+    fn waiting_matches_the_singular_form() {
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed("\u{2726} Waiting for 1 background agent to finish\n");
+        assert!(sniffer.waiting_for_agents());
+    }
+
+    /// Prose *about* background agents is not the status line. The assistant
+    /// describing what it launched must not pin the dot blue.
+    #[test]
+    fn waiting_ignores_a_mid_line_mention() {
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed(
+            "\u{2022} Dois agentes rodando em paralelo, aviso quando \
+             terminarem de waiting for 2 background agents to finish\n",
+        );
+        assert!(!sniffer.waiting_for_agents());
+    }
+
+    /// Once claude paints past the wait, the marker leaves the recent window
+    /// and the state clears — otherwise the dot would stay blue forever.
+    #[test]
+    fn waiting_clears_once_newer_output_scrolls_past_it() {
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed("\u{2726} Waiting for 2 background agents to finish\n");
+        assert!(sniffer.waiting_for_agents());
+        sniffer.feed(&"agent reported back, continuing with the edit\n".repeat(40));
+        assert!(!sniffer.waiting_for_agents());
+    }
+
+    #[test]
+    fn reset_clears_waiting_for_agents() {
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed("\u{2726} Waiting for 3 background agents to finish\n");
+        assert!(sniffer.waiting_for_agents());
+        sniffer.reset();
+        assert!(!sniffer.waiting_for_agents());
     }
 
     #[test]
