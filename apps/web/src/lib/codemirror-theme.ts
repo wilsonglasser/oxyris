@@ -43,6 +43,11 @@ export const islandDarkTheme: Extension = EditorView.theme(
       backgroundColor: bg,
       color: text,
       height: "100%",
+      // CodeMirror's own overlays carry big z-indexes in the *root* stacking
+      // context (`.cm-panels` is 300, tooltips 100), which outrank every modal
+      // in the app (z-50). Isolating the editor keeps them layered correctly
+      // inside it while never painting over a dialog on top of the editor.
+      isolation: "isolate",
     },
     ".cm-content": {
       caretColor: cursor,
