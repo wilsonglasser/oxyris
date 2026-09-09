@@ -20,14 +20,8 @@ export function Modal({ open, onClose, children, closeLabel }: Props) {
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-6 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="relative mt-10 w-full max-w-2xl rounded-xl border border-neutral-800 bg-neutral-950 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-6 backdrop-blur-sm">
+      <div className="relative mt-10 w-full max-w-2xl rounded-xl border border-neutral-800 bg-neutral-950 shadow-2xl">
         <button
           type="button"
           aria-label={closeLabel}

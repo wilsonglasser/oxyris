@@ -17,7 +17,6 @@ import {
   type SearchTab,
 } from "~/components/SearchEverywhere.tsx";
 import { FindInFiles } from "~/components/FindInFiles.tsx";
-import { PRIMARY_WORKTREE_ID } from "~/ipc/worktree.ts";
 import type { ProjectRow } from "~/ipc/commands.ts";
 import { NewChatModal } from "~/components/NewChatModal.tsx";
 import { ProjectSwitcher } from "~/components/ProjectSwitcher.tsx";
@@ -32,6 +31,7 @@ import { AutopilotAlerts } from "~/components/AutopilotAlerts.tsx";
 import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useDragResize } from "~/lib/useDragResize.ts";
+import { useScopedWorktreeId } from "~/hooks/useScopedWorktreeId.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
 import { sessionStart, type SessionKind } from "~/ipc/session.ts";
@@ -347,8 +347,9 @@ export function App() {
     return () => document.body.classList.remove("whip-armed");
   }, [whipActive]);
 
-  const quickWorktreeId =
-    sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
+  // Must match what the Files panel renders, otherwise a result picked in one
+  // of the search dialogs opens a tab in a scope nobody is looking at.
+  const quickWorktreeId = useScopedWorktreeId(activeId);
 
   // Picking a project for a new chat: switch to it, drop into the empty
   // composer, and make sure we're on the chat tab.

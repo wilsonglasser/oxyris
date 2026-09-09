@@ -1,11 +1,9 @@
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { PRIMARY_WORKTREE_ID } from "~/ipc/worktree.ts";
-import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useWorktreePickStore } from "~/stores/worktreePickStore.ts";
 import { FileTreePanel } from "~/components/FileTreePanel.tsx";
 import { FileEditorTabs } from "~/components/FileEditorTabs.tsx";
 import { useDragResize } from "~/lib/useDragResize.ts";
+import { useScopedWorktreeId } from "~/hooks/useScopedWorktreeId.ts";
 
 interface Props {
   projectId: string | null;
@@ -21,15 +19,11 @@ interface Props {
  */
 export function FilesPanel({ projectId }: Props) {
   const { t } = useTranslation("files");
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const sessionSnapshot = useSessionStore((s) =>
-    activeSessionId ? s.snapshots[activeSessionId] : null,
-  );
 
   // Per-project explicit override of the active worktree. Shared with the Git
-  // panel so both agree on which worktree is in view.
-  const overrides = useWorktreePickStore((s) => s.overrides);
+  // panel and the search dialogs — see useScopedWorktreeId.
   const setOverride = useWorktreePickStore((s) => s.setOverride);
+  const worktreeId = useScopedWorktreeId(projectId);
 
   const treeResize = useDragResize({
     storageKey: "oxyris.filesPanel.treeWidth",
@@ -39,21 +33,6 @@ export function FilesPanel({ projectId }: Props) {
     axis: "horizontal",
     direction: "right",
   });
-
-  const sessionWorktreeId = useMemo(() => {
-    if (!sessionSnapshot) return null;
-    // Only adopt the active session's worktree when that session actually
-    // belongs to the project being viewed — otherwise the tree would try to
-    // load another project's worktree under this project (root mismatch / the
-    // wrong files showing). Fall back to PRIMARY for the selected project.
-    if (sessionSnapshot.project_id !== projectId) return null;
-    return sessionSnapshot.worktree_id ?? PRIMARY_WORKTREE_ID;
-  }, [sessionSnapshot, projectId]);
-
-  const worktreeId =
-    (projectId && overrides[projectId]) ||
-    sessionWorktreeId ||
-    PRIMARY_WORKTREE_ID;
 
   if (!projectId) {
     return (

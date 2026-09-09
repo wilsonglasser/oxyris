@@ -27,14 +27,10 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import {
-  PRIMARY_WORKTREE_ID,
-  worktreeList,
-  type WorktreeRow,
-} from "~/ipc/worktree.ts";
-import { useSessionStore } from "~/stores/sessionStore.ts";
+import { worktreeList, type WorktreeRow } from "~/ipc/worktree.ts";
 import { useFileEditorStore } from "~/stores/fileEditorStore.ts";
 import { useWorktreePickStore } from "~/stores/worktreePickStore.ts";
+import { useScopedWorktreeId } from "~/hooks/useScopedWorktreeId.ts";
 import {
   partitionByBucket,
   useGitStore,
@@ -83,14 +79,10 @@ const lastAutoFetch = new Map<string, number>();
 
 export function GitPanel({ projectId, onOpenFiles }: Props) {
   const { t } = useTranslation("git");
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const sessionSnapshot = useSessionStore((s) =>
-    activeSessionId ? s.snapshots[activeSessionId] : null,
-  );
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
-  // Shared with the Files panel — see worktreePickStore.
-  const overrides = useWorktreePickStore((s) => s.overrides);
+  // Shared with the Files panel — see worktreePickStore / useScopedWorktreeId.
   const setOverride = useWorktreePickStore((s) => s.setOverride);
+  const worktreeId = useScopedWorktreeId(projectId);
   // Owned here (not in the branch menu / log) so the modal survives the popup
   // closing when an action inside it opens a comparison.
   const [revDiff, setRevDiff] = useState<
@@ -104,12 +96,6 @@ export function GitPanel({ projectId, onOpenFiles }: Props) {
     axis: "horizontal",
     direction: "right",
   });
-
-  const sessionWorktreeId = sessionSnapshot?.worktree_id ?? PRIMARY_WORKTREE_ID;
-  const worktreeId =
-    (projectId && overrides[projectId]) ||
-    sessionWorktreeId ||
-    PRIMARY_WORKTREE_ID;
 
   useEffect(() => {
     if (!projectId) return;

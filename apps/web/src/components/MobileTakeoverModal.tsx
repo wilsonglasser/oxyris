@@ -27,6 +27,15 @@ export function MobileTakeoverModal({ onClose }: { onClose: () => void }) {
       .catch(() => {});
   }, []);
 
+  // The backdrop doesn't dismiss (X or Escape only), so Escape has to work.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const start = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -51,14 +60,8 @@ export function MobileTakeoverModal({ onClose }: { onClose: () => void }) {
   const running = info?.running ?? false;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-sm rounded-xl border border-neutral-800 bg-neutral-900 p-5"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="w-full max-w-sm rounded-xl border border-neutral-800 bg-neutral-900 p-5">
         <div className="mb-1 flex items-center gap-2">
           <Smartphone className="size-4 text-sky-400" strokeWidth={1.75} />
           <h2 className="text-sm font-medium text-neutral-100">

@@ -43,14 +43,8 @@ export function AllActionsModal({ projectId, onClose }: Props) {
   }, [onClose]);
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[75vh] w-[80vw] max-w-3xl flex-col rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50">
+      <div className="flex h-[75vh] w-[80vw] max-w-3xl flex-col rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl">
         <div className="flex h-9 shrink-0 items-center justify-between border-b border-neutral-800 px-3 text-[12px] text-neutral-200">
           <span className="font-semibold">{t("all_actions")}</span>
           <div className="flex items-center gap-1">

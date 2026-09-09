@@ -99,6 +99,22 @@ export function FindInFiles({
     if (open) requestAnimationFrame(() => inputRef.current?.focus());
   }, [open]);
 
+  // Escape works from anywhere in the dialog, not only from the two inputs —
+  // clicking a result row moves focus off them, and the backdrop no longer
+  // closes. A pending "click again to confirm" replace is cancelled first, so
+  // Escape never closes the dialog out from under an armed write.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (confirming) setConfirming(false);
+      else onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, confirming, onClose]);
+
   // Each open honours the shortcut it was opened with (Ctrl+Shift+F → find,
   // Ctrl+Shift+R → find + replace) and starts without a stale run summary.
   useEffect(() => {
@@ -292,15 +308,17 @@ export function FindInFiles({
     void openFileAt(projectId, worktreeId, current.relPath, current.line);
   };
 
+  const openAt = (idx: number) => {
+    const hit = flat[idx];
+    if (!hit) return;
+    setSelected(idx);
+    onClose();
+    void openFileAt(projectId, worktreeId, hit.relPath, hit.line);
+  };
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-12"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[80vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-12">
+      <div className="flex h-[80vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl">
         {/* Query row + flag toggles */}
         <div className="flex items-center gap-2 border-b border-neutral-800 px-3 py-2">
           <Search size={15} className="shrink-0 text-neutral-500" />
@@ -319,9 +337,6 @@ export function FindInFiles({
               } else if (e.key === "Enter") {
                 e.preventDefault();
                 openCurrent();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                onClose();
               }
             }}
             placeholder={t("find_in_files_placeholder")}
@@ -373,12 +388,6 @@ export function FindInFiles({
               type="text"
               value={replacement}
               onChange={(e) => setReplacement(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  onClose();
-                }
-              }}
               placeholder={
                 isRegex ? t("replace_placeholder_regex") : t("replace_placeholder")
               }
@@ -493,8 +502,10 @@ export function FindInFiles({
                   <button
                     key={`${f.rel_path}:${m.line}`}
                     type="button"
-                    onClick={() => setSelected(idx)}
-                    onDoubleClick={openCurrent}
+                    // Single click opens, like every other result list in the
+                    // app (Quick Open, Search Everywhere). The preview pane is
+                    // for arrow-key browsing, not a required second click.
+                    onClick={() => openAt(idx)}
                     className={`flex w-full items-baseline gap-2 px-3 py-0.5 text-left font-mono text-[11px] ${
                       activeRow
                         ? "bg-neutral-800 text-neutral-100"
@@ -570,23 +581,31 @@ function PreviewPane({
   const [content, setContent] = useState<{ relPath: string; lines: string[] } | null>(
     null,
   );
+  const [readError, setReadError] = useState<string | null>(null);
   const selectedRef = useRef<HTMLDivElement | null>(null);
 
   // Load the file content when the selected file changes (not on every line).
   useEffect(() => {
     if (!hit) {
       setContent(null);
+      setReadError(null);
       return;
     }
     if (content?.relPath === hit.relPath) return;
     let cancelled = false;
     void fsReadFile({ projectId, worktreeId, relPath: hit.relPath })
       .then((r) => {
-        if (!cancelled)
-          setContent({ relPath: hit.relPath, lines: r.content.split(/\r?\n/) });
+        if (cancelled) return;
+        setReadError(null);
+        setContent({ relPath: hit.relPath, lines: r.content.split(/\r?\n/) });
       })
-      .catch(() => {
-        if (!cancelled) setContent(null);
+      // Surfaced rather than swallowed: a read that fails on a path the search
+      // just matched means the (project, worktree) pair this dialog is scoped
+      // to no longer resolves, and a blank pane hides that.
+      .catch((e) => {
+        if (cancelled) return;
+        setContent(null);
+        setReadError(e instanceof Error ? e.message : String(e));
       });
     return () => {
       cancelled = true;
@@ -600,8 +619,13 @@ function PreviewPane({
 
   if (!hit || !content) {
     return (
-      <div className="flex h-1/2 shrink-0 items-center justify-center border-t border-neutral-800 text-[12px] text-neutral-600">
-        {t("find_in_files_preview_hint")}
+      <div
+        {...(readError ? { role: "alert" as const } : {})}
+        className={`flex h-1/2 shrink-0 items-center justify-center border-t border-neutral-800 px-4 text-center text-[12px] ${
+          readError ? "text-red-400" : "text-neutral-600"
+        }`}
+      >
+        {readError ?? t("find_in_files_preview_hint")}
       </div>
     );
   }

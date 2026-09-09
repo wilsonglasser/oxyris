@@ -39,14 +39,8 @@ export function FileViewerModal({ projectId, worktreeId, relPath, onClose }: Pro
   }, [onClose]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="relative flex h-[80vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-950 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm">
+      <div className="relative flex h-[80vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-950 shadow-2xl">
         <header className="flex h-9 shrink-0 items-center justify-between border-b border-neutral-800 bg-neutral-900 pl-3 pr-2 text-[12px] text-neutral-300">
           <span className="truncate font-mono" title={relPath}>
             {relPath}

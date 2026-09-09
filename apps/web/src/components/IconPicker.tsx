@@ -62,14 +62,8 @@ export function IconPicker({ value, onPick, onClose }: Props) {
   }, [allIcons, query]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[70vh] w-full max-w-2xl flex-col rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="flex h-[70vh] w-full max-w-2xl flex-col rounded-lg border border-neutral-800 bg-neutral-950 shadow-2xl">
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-3">
           <Search size={13} className="text-neutral-500" />
           <input
