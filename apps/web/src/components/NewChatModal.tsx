@@ -74,25 +74,32 @@ export function NewChatModal({
               {t("new_chat.empty")}
             </p>
           ) : (
-            <ul className="flex flex-col gap-0.5">
-              {filtered.map((p) => (
+            <ul className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+              {filtered.map((p, i) => (
                 <li key={p.id}>
                   <button
                     type="button"
                     onClick={() => onPick(p)}
-                    className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition hover:bg-neutral-800/60"
+                    title={`${p.name} · ${envLabel(p)}`}
+                    className={`flex h-full w-full flex-col items-center gap-2 rounded-lg border px-2 py-3 text-center transition hover:border-neutral-700 hover:bg-neutral-800/60 ${
+                      // Enter picks the first match — highlight it so the
+                      // keyboard target is visible while typing.
+                      i === 0 && query.trim()
+                        ? "border-neutral-700 bg-neutral-800/40"
+                        : "border-neutral-800/80 bg-neutral-900/40"
+                    }`}
                   >
                     <ProjectBadge
                       name={p.name}
                       projectId={p.id}
                       logoPath={p.logo_path}
-                      size={28}
+                      size={40}
                     />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] font-medium text-neutral-100">
+                    <span className="flex min-w-0 w-full flex-col">
+                      <span className="line-clamp-2 break-words text-[12px] font-medium leading-tight text-neutral-100">
                         {p.name}
                       </span>
-                      <span className="block truncate text-[11px] text-neutral-500">
+                      <span className="mt-0.5 truncate text-[10px] text-neutral-500">
                         {envLabel(p)}
                       </span>
                     </span>

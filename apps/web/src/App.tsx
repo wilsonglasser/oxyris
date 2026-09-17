@@ -453,6 +453,15 @@ export function App() {
               onOpenSettings={() => setTab("settings")}
               onNewSession={startNewSession}
               onOpenProjectSettings={(id) => setProjectSettingsId(id)}
+              onNewChat={() => {
+                // Same fallback as the Ctrl+Shift+N handler: with no projects
+                // there is nothing to scope the chat to, so create one instead.
+                if (useProjectStore.getState().projects.length > 0) {
+                  setNewChatOpen(true);
+                } else {
+                  setProjectModalOpen(true);
+                }
+              }}
             />
             <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-950">
               <main className="flex min-h-0 min-w-0 flex-1 flex-col">

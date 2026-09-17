@@ -77,6 +77,12 @@ interface Props {
   onOpenSettings: () => void;
   onNewSession?: (project: import("~/ipc/commands.ts").ProjectRow) => void;
   onOpenProjectSettings?: (projectId: string) => void;
+  /**
+   * "New conversation" from the flat topic view. The tree view starts threads
+   * per project row; the topic list has no project rows, so it needs an
+   * explicit entry point that opens the project picker.
+   */
+  onNewChat?: () => void;
 }
 
 type SessionsByProject = Record<string, SessionSummary[]>;
@@ -87,6 +93,7 @@ export function Sidebar({
   onOpenSettings,
   onNewSession,
   onOpenProjectSettings,
+  onNewChat,
 }: Props) {
   const { t } = useTranslation("common");
   const projects = useProjectStore((s) => s.projects);
@@ -740,35 +747,44 @@ export function Sidebar({
             {searching ? t("sidebar.no_results") : t("sidebar.no_projects")}
           </p>
         ) : sidebarView === "topics" ? (
-          topics.pinned.length === 0 && topics.recent.length === 0 ? (
-            <p className="px-2 py-1.5 text-[11px] text-neutral-500">
-              {searching ? t("sidebar.no_results") : t("sidebar.no_sessions")}
-            </p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {topics.pinned.length > 0 && (
-                <section>
-                  <h3 className="flex items-center gap-1 px-1.5 pb-0.5 text-[9px] font-medium uppercase tracking-wider text-amber-500/80">
-                    <Pin className="size-2.5" strokeWidth={2} />
-                    {t("sidebar.topics_pinned")}
-                  </h3>
-                  <ul className="flex flex-col gap-0.5">
-                    {topics.pinned.map(renderTopic)}
-                  </ul>
-                </section>
-              )}
-              {topics.recent.length > 0 && (
-                <section>
-                  <h3 className="px-1.5 pb-0.5 text-[9px] font-medium uppercase tracking-wider text-neutral-600">
-                    {t("sidebar.topics_recent")}
-                  </h3>
-                  <ul className="flex flex-col gap-0.5">
-                    {topics.recent.map(renderTopic)}
-                  </ul>
-                </section>
-              )}
-            </div>
-          )
+          <div className="flex flex-col gap-2">
+            {onNewChat && (
+              <button
+                type="button"
+                onClick={onNewChat}
+                className="flex w-full items-center gap-2 rounded-md border border-dashed border-neutral-700/80 px-2 py-1.5 text-left text-[11px] font-medium text-neutral-300 transition hover:border-neutral-600 hover:bg-neutral-800/60 hover:text-neutral-100"
+              >
+                <MessageSquarePlus className="size-3.5" strokeWidth={1.75} />
+                {t("sidebar.new_chat")}
+              </button>
+            )}
+            {topics.pinned.length === 0 && topics.recent.length === 0 && (
+              <p className="px-2 py-1.5 text-[11px] text-neutral-500">
+                {searching ? t("sidebar.no_results") : t("sidebar.no_sessions")}
+              </p>
+            )}
+            {topics.pinned.length > 0 && (
+              <section>
+                <h3 className="flex items-center gap-1 px-1.5 pb-0.5 text-[9px] font-medium uppercase tracking-wider text-amber-500/80">
+                  <Pin className="size-2.5" strokeWidth={2} />
+                  {t("sidebar.topics_pinned")}
+                </h3>
+                <ul className="flex flex-col gap-0.5">
+                  {topics.pinned.map(renderTopic)}
+                </ul>
+              </section>
+            )}
+            {topics.recent.length > 0 && (
+              <section>
+                <h3 className="px-1.5 pb-0.5 text-[9px] font-medium uppercase tracking-wider text-neutral-600">
+                  {t("sidebar.topics_recent")}
+                </h3>
+                <ul className="flex flex-col gap-0.5">
+                  {topics.recent.map(renderTopic)}
+                </ul>
+              </section>
+            )}
+          </div>
         ) : (
           <ul className="flex flex-col gap-0.5">
             {visibleProjects.map((p) => {
