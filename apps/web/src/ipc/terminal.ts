@@ -65,6 +65,9 @@ export type PureState = {
   /** An "API Error" line appeared this turn — the red "errored" dot + a warning
    * banner. Latched until the user's next submit. */
   errored: boolean;
+  /** The turn settled but background work outlived it ("1 shell, 1 monitor
+   * still running"). Already folded into `busy` by the backend. */
+  background_running: boolean;
 };
 
 /**

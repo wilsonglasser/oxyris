@@ -119,11 +119,14 @@ fn poll_re() -> &'static Regex {
 
 /// Turn-end summary line ("✶ Worked for 3m 9s", "✻ Brewed for 12s", …). A hard
 /// "done" signal. Port of `PURE_TURN_END_RE`. Glyph class widened past the
-/// original `✱-✽` (see [`working_re`]).
+/// original `✱-✽` (see [`working_re`]), plus `※` (U+203B): some builds settle
+/// the footer on it ("※ Churned for 4m 38s · done 12:51 · 1 shell still
+/// running"), the same mark the recap line uses.
 fn turn_end_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)[\x{2720}-\x{274F}]\s+\S+\s+for\s+\d+[ms]").expect("pure turn-end regex")
+        Regex::new(r"(?i)[\x{2720}-\x{274F}\x{203B}]\s+\S+\s+for\s+\d+[ms]")
+            .expect("pure turn-end regex")
     })
 }
 
@@ -183,6 +186,24 @@ fn waiting_agents_re() -> &'static Regex {
             r"(?im)^[\s\x{2502}\x{2514}\x{251C}\x{2570}\x{2500}\x{2720}-\x{274F}*]*waiting\s+for\s+\d+\s+background\s+agents?\b",
         )
         .expect("pure waiting-agents regex")
+    })
+}
+
+/// The turn-end footer sometimes reports work that outlived the turn — "✳
+/// Worked for 15m 2s · done 10:05 · 1 shell, 1 monitor still running". The turn
+/// itself settled, but background shells / monitors are still alive and will
+/// wake claude when they finish — so the thread still counts as working.
+///
+/// Anchored to the turn-end marker ([`turn_end_re`]) so assistant prose saying
+/// "still running" can't trip it; the gap between the two halves is `[\s\S]` so
+/// a footer wrapped by a narrow PTY still matches.
+fn background_running_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)[\x{2720}-\x{274F}\x{203B}]\s+\S+\s+for\s+\d+[ms][\s\S]{0,200}?\b\d+\s+(shells?|monitors?|agents?|tasks?|commands?)\b[\s\S]{0,80}?still\s+running",
+        )
+        .expect("pure background-running regex")
     })
 }
 
@@ -352,6 +373,30 @@ impl PureSniffer {
     /// Drives the red bull + the pure-mode warning banner.
     pub fn api_error(&self) -> bool {
         self.api_error_seen
+    }
+
+    /// True when the **last** turn-end footer in the tail reported background
+    /// work still running (shells, monitors, background agents). Keeps the dot
+    /// blue: the turn is done, but the thread still has something alive behind
+    /// it that will wake it up.
+    ///
+    /// Derived as a level, not latched: the tail keeps old footers, so a latch
+    /// re-armed on every quiet frame from a *previous* turn's footer ("1 shell,
+    /// 1 monitor still running") even after a monitor-woken turn ended clean.
+    /// Scoping to the last footer, and discarding it when any turn activity
+    /// painted past it, makes the answer depend only on what is currently on
+    /// screen.
+    pub fn background_running(&self) -> bool {
+        let Some(footer) = turn_end_re().find_iter(&self.tail).last() else {
+            return false;
+        };
+        // Anything after the footer that looks like a live turn means a newer
+        // turn started — the footer is history, whatever it claimed.
+        let after = &self.tail[footer.end()..];
+        if working_re().is_match(after) || interrupt_re().is_match(after) {
+            return false;
+        }
+        background_running_re().is_match(&self.tail[footer.start()..])
     }
 
     /// True while the current frame shows claude blocked on background
@@ -671,6 +716,89 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
         assert!(sniffer.waiting_for_agents());
         sniffer.reset();
         assert!(!sniffer.waiting_for_agents());
+    }
+
+    #[test]
+    fn detects_background_running_footer() {
+        let mut s = PureSniffer::new();
+        assert!(!s.background_running());
+        s.feed("\u{2733} Worked for 15m 2s \u{b7} done 10:05 \u{b7} 1 shell, 1 monitor still running\n");
+        assert!(s.background_running());
+        // A plain redraw (no spinner) keeps it latched.
+        s.feed("\n> \n");
+        assert!(s.background_running());
+    }
+
+    #[test]
+    fn detects_background_running_single_shell() {
+        let mut s = PureSniffer::new();
+        s.feed("\u{2736} Worked for 42s \u{b7} 1 shell still running\n");
+        assert!(s.background_running());
+    }
+
+    /// Footer settled on the reference mark instead of a dingbat glyph — seen
+    /// live, and the old dingbat-only class missed both the turn end and the
+    /// background half.
+    #[test]
+    fn detects_background_running_reference_mark_footer() {
+        let mut s = PureSniffer::new();
+        let signals = s.feed(
+            "\u{203B} Churned for 4m 38s \u{b7} done 12:51 \u{b7} 1 shell still running\n\n\
+             \u{203B} recap: Estou trazendo os building:part do OSM. (disable recaps in /config)\n> \n",
+        );
+        assert!(signals.contains(&PureSignal::TurnEnded));
+        assert!(s.background_running());
+    }
+
+    #[test]
+    fn prose_about_still_running_does_not_latch_background() {
+        let mut s = PureSniffer::new();
+        s.feed("The monitor is still running, so the 2 tasks keep polling.\n");
+        assert!(!s.background_running());
+    }
+
+    #[test]
+    fn background_running_clears_when_a_new_turn_paints() {
+        let mut s = PureSniffer::new();
+        s.feed("\u{2733} Worked for 15m 2s \u{b7} 1 shell, 1 monitor still running\n");
+        assert!(s.background_running());
+        // The next turn starts: the spinner footer is the bottom-most line.
+        s.feed("\u{2736} Flummoxing\u{2026} (3s \u{b7} esc to interrupt)");
+        assert!(!s.background_running());
+    }
+
+    /// The monitor wakes claude, the follow-up turn ends with nothing left
+    /// running — the *previous* turn's footer is still in the tail, and must not
+    /// re-arm the pulse.
+    #[test]
+    fn background_running_is_not_relatched_from_a_previous_footer() {
+        let mut s = PureSniffer::new();
+        s.feed("\u{2733} Worked for 15m 2s \u{b7} 1 shell, 1 monitor still running\n");
+        assert!(s.background_running());
+        s.feed("\u{2736} Flummoxing\u{2026} (3s \u{b7} esc to interrupt)\n");
+        s.feed("\u{2736} Worked for 12s\n> \n");
+        assert!(!s.background_running());
+    }
+
+    /// Same stale footer, but the follow-up turn stops on a permission prompt —
+    /// the dot is red and must not pick up a pulse from the old footer either.
+    #[test]
+    fn background_running_off_while_a_later_turn_prompts() {
+        let mut s = PureSniffer::new();
+        s.feed("\u{2733} Worked for 15m 2s \u{b7} 1 shell, 1 monitor still running\n");
+        s.feed("\u{2736} Flummoxing\u{2026} (3s \u{b7} esc to interrupt)\n");
+        s.feed("Do you want to proceed?\n\u{276F} 1. Yes\n  2. No, and tell Claude what to do\n");
+        assert!(s.prompt_open());
+        assert!(!s.background_running());
+    }
+
+    #[test]
+    fn reset_clears_background_running() {
+        let mut s = PureSniffer::new();
+        s.feed("\u{2733} Worked for 15m 2s \u{b7} 1 shell, 1 monitor still running\n");
+        assert!(s.background_running());
+        s.reset();
+        assert!(!s.background_running());
     }
 
     #[test]

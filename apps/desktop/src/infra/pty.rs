@@ -246,6 +246,10 @@ pub struct PureState {
     /// An "API Error" line appeared this turn — the red "errored" dot + a warning
     /// banner. Latched until the user's next submit (sniffer `reset`).
     pub errored: bool,
+    /// The turn settled but its footer reported background work still alive
+    /// ("1 shell, 1 monitor still running"). Folded into `busy` — the thread
+    /// will wake up on its own when that work finishes, so it reads as working.
+    pub background_running: bool,
 }
 
 /// Compute the pure-turn dot snapshot from the live sniffer + output clock.
@@ -271,13 +275,21 @@ fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     // has to survive silence — it clears as soon as claude paints past the
     // status line.
     let waiting_agents = sniffer.waiting_for_agents();
+    // Background shells/monitors that outlived the turn ("… · 1 shell still
+    // running"). claude is idle at its prompt — silent like the agents wait —
+    // but finishing work wakes it, so it also bypasses the freshness gate.
+    // Clears once a newer turn paints past that footer.
+    let background_running = !needs_input && !errored && sniffer.background_running();
     let busy = !needs_input
         && !errored
-        && (waiting_agents || (fresh && (sniffer.is_busy_now() || busy_recent)));
+        && (waiting_agents
+            || background_running
+            || (fresh && (sniffer.is_busy_now() || busy_recent)));
     PureState {
         needs_input,
         busy,
         errored,
+        background_running,
     }
 }
 

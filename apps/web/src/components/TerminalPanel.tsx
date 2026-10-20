@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Pencil, Plus, X } from "lucide-react";
 import { Terminal, type IDisposable, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
@@ -360,6 +361,22 @@ function clearSharedAtlas(): void {
   });
 }
 
+/** Window event carrying a manual "redraw this terminal" request. */
+const REDRAW_EVENT = "oxyris:terminal-redraw";
+
+/**
+ * Manual repair for a garbled terminal — what a window resize used to be the
+ * only cure for. With `terminalId`, redraws that terminal; without one (the F5
+ * shortcut), every terminal currently on screen.
+ */
+export function requestTerminalRedraw(terminalId?: string): void {
+  window.dispatchEvent(
+    new CustomEvent<{ id?: string }>(REDRAW_EVENT, {
+      detail: terminalId ? { id: terminalId } : {},
+    }),
+  );
+}
+
 /**
  * Renders one xterm bound to an already-spawned PTY. Stays mounted across
  * tab switches (just toggles `visible`) so scrollback is preserved. Exported
@@ -400,12 +417,18 @@ export function TerminalView({
   const onInputRef = useRef(onInput);
   const onOutputRef = useRef(onOutput);
   const onOpenPathRef = useRef(onOpenPath);
+  // Read by the redraw listener wired once at mount (F5 targets only the
+  // terminals actually on screen).
+  const visibleRef = useRef(visible);
   useEffect(() => {
     onImagePasteRef.current = onImagePaste;
     onInputRef.current = onInput;
     onOutputRef.current = onOutput;
     onOpenPathRef.current = onOpenPath;
   }, [onImagePaste, onInput, onOutput, onOpenPath]);
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
 
   useEffect(() => {
     const mount = containerRef.current;
@@ -435,9 +458,23 @@ export function TerminalView({
       // exactly how far back the user can scroll. Kept in step with the backend
       // replay cap (REPLAY_CAP_BYTES) so a tab-switch re-attach doesn't truncate.
       scrollback: 50000,
+      // `term.unicode` (below) is a proposed API.
+      allowProposedApi: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Unicode 11 cell widths. xterm defaults to Unicode 6 tables, where emoji
+    // and symbols like ✅ / ⏺ are one cell wide; the claude TUI (string-width)
+    // lays its frame out with them two wide. Every such glyph then shifted the
+    // rest of its line by a cell and the TUI's in-place cursor moves landed on
+    // the wrong columns — the "letters scramble until I resize" bug (a resize
+    // only helped because the TUI repaints its whole frame on SIGWINCH).
+    try {
+      term.loadAddon(new Unicode11Addon());
+      term.unicode.activeVersion = "11";
+    } catch {
+      /* keep the default tables */
+    }
     term.open(mount);
     termRef.current = term;
     fitRef.current = fit;
@@ -801,6 +838,35 @@ export function TerminalView({
     softResyncRef.current = softResync;
     void document.fonts?.ready.then(hardResync);
 
+    // Manual redraw (refresh button / F5): the renderer resync above, then
+    // nudge the PTY one column narrower and back. Each size change is a
+    // SIGWINCH, and the claude TUI answers it by repainting its whole frame —
+    // which rebuilds the buffer itself, not just the pixels. That repaint is
+    // what a manual window resize did; the resync alone can't fix content the
+    // TUI wrote at the wrong columns. Final size is read live, so a re-fit that
+    // landed in between still wins.
+    let redrawTimer: number | undefined;
+    const redraw = () => {
+      if (cancelled) return;
+      hardResync();
+      window.clearTimeout(redrawTimer);
+      redrawTimer = window.setTimeout(() => {
+        if (cancelled || term.cols < 2) return;
+        void terminalResize({ id: terminalId, cols: term.cols - 1, rows: term.rows })
+          .then(() => new Promise((r) => setTimeout(r, 120)))
+          .then(() => {
+            if (cancelled) return;
+            return terminalResize({ id: terminalId, cols: term.cols, rows: term.rows });
+          })
+          .catch(() => {});
+      }, 100);
+    };
+    const onRedrawRequest = (e: Event) => {
+      const id = (e as CustomEvent<{ id?: string }>).detail?.id;
+      if (id ? id === terminalId : visibleRef.current) redraw();
+    };
+    window.addEventListener(REDRAW_EVENT, onRedrawRequest);
+
     // Display scaling changed (window dragged to a monitor with a different
     // DPR, or Windows scale changed). The atlas was rasterized at the old
     // ratio and every glyph now paints at the wrong scale. `matchMedia` on the
@@ -963,6 +1029,8 @@ export function TerminalView({
       window.clearTimeout(fitTimer);
       window.clearTimeout(resizeTimer);
       window.clearTimeout(refreshTimer);
+      window.clearTimeout(redrawTimer);
+      window.removeEventListener(REDRAW_EVENT, onRedrawRequest);
       cancelAnimationFrame(raf1);
       cancelAnimationFrame(raf2);
       window.removeEventListener("resize", safeFit);

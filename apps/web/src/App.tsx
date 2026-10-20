@@ -24,7 +24,10 @@ import { ProjectPanel } from "~/components/ProjectPanel.tsx";
 import { ProjectSettingsModal } from "~/components/ProjectSettingsModal.tsx";
 import { SettingsPanel } from "~/components/SettingsPanel.tsx";
 import { Sidebar } from "~/components/Sidebar.tsx";
-import { TerminalPanel } from "~/components/TerminalPanel.tsx";
+import {
+  requestTerminalRedraw,
+  TerminalPanel,
+} from "~/components/TerminalPanel.tsx";
 import { TitleBar } from "~/components/TitleBar.tsx";
 import { UpdateBanner } from "~/components/UpdateBanner.tsx";
 import { AutopilotAlerts } from "~/components/AutopilotAlerts.tsx";
@@ -48,7 +51,6 @@ import { useMultiViewStore } from "~/stores/multiViewStore.ts";
 import { useProjectStore } from "~/stores/projectStore.ts";
 import { useSessionStore } from "~/stores/sessionStore.ts";
 import { useAppSettingsStore } from "~/stores/appSettingsStore.ts";
-import { useWhipStore } from "~/stores/whipStore.ts";
 
 type Tab = "chat" | "multi" | "files" | "git" | "settings";
 
@@ -227,12 +229,17 @@ export function App() {
       // WebView2 still honours the browser reload accelerators, and a reload
       // here is a hard app restart: PTYs detach from their panes, modal state
       // and drafts are gone. Swallow them unconditionally (same trick as
-      // Ctrl+W below); Ctrl+Shift+R is then free to mean "replace in files".
+      // Ctrl+W below); Ctrl+Shift+R is then free to mean "replace in files",
+      // and F5 to redraw the terminals on screen (the garbled-TUI repair).
       if (
         e.key === "F5" ||
         ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "r")
       ) {
         e.preventDefault();
+        if (e.key === "F5") {
+          requestTerminalRedraw();
+          return;
+        }
         if (!(e.shiftKey && activeId && tab === "files")) return;
         setFindReplace(true);
         setFindOpen(true);
@@ -321,31 +328,16 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [bindings, activeSessionId, activeId, setActiveSession, tab, toggleTerminal]);
 
-  // Whip mode: Ctrl+W arms the whip cursor, Esc disarms. The body class drives
-  // the global cursor swap (see index.css). Ctrl+W must preventDefault or the
-  // WebView treats it as "close". Esc only disarms when whip is actually armed,
-  // so it doesn't swallow Esc from modals/menus the rest of the time.
-  const whipActive = useWhipStore((s) => s.active);
-  const whipToggle = useWhipStore((s) => s.toggle);
-  const whipSetActive = useWhipStore((s) => s.setActive);
+  // Ctrl+W must preventDefault or the WebView treats it as "close".
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "w") {
         e.preventDefault();
-        whipToggle();
-        return;
-      }
-      if (e.key === "Escape" && useWhipStore.getState().active) {
-        whipSetActive(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whipToggle, whipSetActive]);
-  useEffect(() => {
-    document.body.classList.toggle("whip-armed", whipActive);
-    return () => document.body.classList.remove("whip-armed");
-  }, [whipActive]);
+  }, []);
 
   // Must match what the Files panel renders, otherwise a result picked in one
   // of the search dialogs opens a tab in a scope nobody is looking at.
