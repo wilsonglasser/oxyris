@@ -27,7 +27,7 @@ use uuid::Uuid;
 const OUTPUT_BROADCAST_CAP: usize = 4096;
 
 use crate::infra::pure_signals::{
-    PureSignal, PureSniffer, has_content_stripped, strip_ansi, strip_for_detection,
+    PureSignal, PureSniffer, has_content_stripped, osc_title, strip_ansi, strip_for_detection,
 };
 
 /// In-process notification of a pure-signal marker edge, pushed from the PTY
@@ -280,11 +280,16 @@ fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     // but finishing work wakes it, so it also bypasses the freshness gate.
     // Clears once a newer turn paints past that footer.
     let background_running = !needs_input && !errored && sniffer.background_running();
-    let busy = !needs_input
-        && !errored
-        && (waiting_agents
-            || background_running
-            || (fresh && (sniffer.is_busy_now() || busy_recent)));
+    // claude's own run state from its window title, when it reports one. It
+    // keeps flipping through long silent commands (where the painted spinner
+    // row only updates a cell or two, never a whole line the screen heuristic
+    // could read) and settles the instant the turn ends — so it outranks the
+    // heuristic both ways. Unknown → the heuristic, as before.
+    let running = match sniffer.title_busy() {
+        Some(running) => running,
+        None => fresh && (sniffer.is_busy_now() || busy_recent),
+    };
+    let busy = !needs_input && !errored && (waiting_agents || background_running || running);
     PureState {
         needs_input,
         busy,
@@ -834,6 +839,12 @@ impl PtySupervisor {
                         // emit — so the strip runs a single time and the emit
                         // doesn't need a clone.
                         let stripped = reader_pure.as_ref().map(|_| strip_for_detection(&chunk));
+                        // claude's window title carries its run state; the strip
+                        // drops OSC, so pull it from the raw chunk here.
+                        let title = reader_pure
+                            .as_ref()
+                            .and_then(|_| osc_title(&chunk))
+                            .map(str::to_owned);
                         // Mobile-takeover fan-out — only pay the clone when a
                         // phone is actually subscribed. Same (seq, data) the
                         // desktop event carries, tagged with the terminal id.
@@ -860,6 +871,9 @@ impl PtySupervisor {
                         if let (Some(pure), Some(stripped)) = (&reader_pure, &stripped)
                             && let Ok(mut sniffer) = pure.lock()
                         {
+                            if let Some(title) = &title {
+                                sniffer.note_title(title);
+                            }
                             let signals = sniffer.feed_stripped(stripped);
                             // Auto-pilot still reacts to marker edges (a prompt
                             // to answer / a settled turn). Independent of the dot.

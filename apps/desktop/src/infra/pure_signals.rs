@@ -12,6 +12,7 @@
 //! minimized. Keep the regexes in lockstep with `pureTurn.ts`.
 
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde::Serialize;
@@ -41,9 +42,22 @@ fn recent_window(s: &str) -> &str {
     &s[start..]
 }
 
+/// Cap on the spaces one cursor-forward (`ESC[nC`) expands to — a sane bound
+/// on a single row, so a bogus count can't balloon the tail.
+const MAX_CUF_SPACES: usize = 512;
+
 /// Strip ANSI escape sequences (CSI + OSC) so prompt text matches across the
-/// TUI's redraws. Mirrors `stripAnsi` in `pureTurn.ts` (char-scan, not regex,
-/// to handle the OSC `BEL`/`ESC \` terminators cleanly).
+/// TUI's redraws (char-scan, not regex, to handle the OSC `BEL`/`ESC \`
+/// terminators cleanly).
+///
+/// Cursor movement is kept as whitespace rather than dropped. ConPTY (every
+/// Windows-native PTY) re-encodes claude's output as a diff of the screen: a
+/// space between words becomes `ESC[1C` (cursor forward) and a line break
+/// becomes an absolute `ESC[row;colH`. Dropping those glued the text into
+/// "✻Crunched for 7s" / "doyouwanttoproceed", which no detector matched. So
+/// cursor-forward expands to that many spaces, an absolute move to a newline
+/// indented to its column, other vertical moves to a newline, and a
+/// horizontal-absolute move to one space.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     // Iterate in place over a peekable char stream — no intermediate
@@ -57,11 +71,42 @@ pub fn strip_ansi(s: &str) -> String {
         }
         match chars.next() {
             Some('[') => {
-                // CSI: skip until a final byte in @–~ (0x40–0x7e), inclusive.
+                // CSI: parameter bytes up to a final byte in @–~ (0x40–0x7e),
+                // inclusive. The first two numeric parameters are kept — the
+                // cursor-forward count, and the column of an absolute move.
+                let mut params: [Option<usize>; 2] = [None, None];
+                let mut idx = 0;
+                let mut fin = None;
                 for f in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&f) {
+                        fin = Some(f);
                         break;
                     }
+                    if f == ';' {
+                        idx += 1;
+                    } else if let (Some(d), Some(slot)) = (f.to_digit(10), params.get_mut(idx)) {
+                        *slot = Some(
+                            slot.unwrap_or(0)
+                                .saturating_mul(10)
+                                .saturating_add(d as usize),
+                        );
+                    }
+                }
+                match fin {
+                    Some('C') => {
+                        let n = params[0].unwrap_or(1).clamp(1, MAX_CUF_SPACES);
+                        out.extend(std::iter::repeat_n(' ', n));
+                    }
+                    // Absolute move: a new line, indented to the target column,
+                    // so an indented row ("  2. No") keeps its indent.
+                    Some('H' | 'f') => {
+                        out.push('\n');
+                        let col = params[1].unwrap_or(1).clamp(1, MAX_CUF_SPACES);
+                        out.extend(std::iter::repeat_n(' ', col - 1));
+                    }
+                    Some('A' | 'B' | 'E' | 'F' | 'd') => out.push('\n'),
+                    Some('G' | '`') => out.push(' '),
+                    _ => {}
                 }
             }
             Some(']') => {
@@ -86,6 +131,37 @@ pub fn strip_ansi(s: &str) -> String {
     }
     out
 }
+
+/// The last window title (OSC 0 / OSC 2) set in `raw`, if any. claude keeps
+/// its run state there: the title starts with a half-circle spinner (`◐`/`◑`,
+/// flipping about once a second) for the whole time a turn is live — through
+/// long silent shell commands too — and with `✳` once it settles. Unlike the
+/// painted spinner row, it doesn't depend on how the screen is redrawn.
+pub fn osc_title(raw: &str) -> Option<&str> {
+    let start = raw
+        .rfind("\x1b]0;")
+        .or_else(|| raw.rfind("\x1b]2;"))
+        .map(|i| i + 4)?;
+    let rest = &raw[start..];
+    let end = rest.find(['\u{7}', '\u{1b}'])?;
+    Some(&rest[..end])
+}
+
+/// A turn-state reading of claude's window title: `Some(true)` while a turn
+/// runs (`◐◑◒◓`), `Some(false)` once settled (`✳`), `None` for anything else
+/// (startup titles, a title-less build, another program).
+fn classify_title(title: &str) -> Option<bool> {
+    match title.trim_start().chars().next()? {
+        '\u{25D0}'..='\u{25D3}' => Some(true),
+        '\u{2733}' => Some(false),
+        _ => None,
+    }
+}
+
+/// A busy title that hasn't flipped for this long is no longer trusted (the
+/// spinner flips about once a second; a frozen one means claude stopped
+/// painting it) — the dot falls back to the screen heuristics.
+const TITLE_STALE: Duration = Duration::from_secs(5);
 
 /// The claude TUI renders a numbered menu whenever it needs the user to approve
 /// a tool or answer a question. While it's on screen the thread "wants input".
@@ -290,6 +366,10 @@ pub struct PureSniffer {
     /// Latched once an "API Error" line appears, until [`reset`] (the user's next
     /// submit). Drives the red bull + warning banner in pure mode.
     api_error_seen: bool,
+    /// claude's last window title (see [`osc_title`]) and when it last
+    /// changed. A level, not a per-turn latch — [`reset`] leaves it alone.
+    title: Option<String>,
+    title_changed_at: Option<Instant>,
 }
 
 impl PureSniffer {
@@ -367,6 +447,29 @@ impl PureSniffer {
         }
 
         out
+    }
+
+    /// Record a window title claude set (from [`osc_title`] on a raw chunk —
+    /// the detection strip drops OSC). Only a *change* restarts the staleness
+    /// clock, so a spinner frozen on one frame ages out.
+    pub fn note_title(&mut self, title: &str) {
+        if self.title.as_deref() != Some(title) {
+            self.title = Some(title.to_owned());
+            self.title_changed_at = Some(Instant::now());
+        }
+    }
+
+    /// Turn state as claude reports it in its window title: `Some(true)` while
+    /// the spinner title keeps flipping, `Some(false)` once it settled on `✳`,
+    /// `None` when unknown (no title yet, an unrecognised one, or a busy title
+    /// frozen past [`TITLE_STALE`]) — callers then fall back to the screen
+    /// heuristics.
+    pub fn title_busy(&self) -> Option<bool> {
+        let busy = classify_title(self.title.as_deref()?)?;
+        if busy && self.title_changed_at?.elapsed() >= TITLE_STALE {
+            return None;
+        }
+        Some(busy)
     }
 
     /// True once an "API Error" line has appeared this turn (until [`reset`]).
@@ -466,7 +569,93 @@ mod tests {
 
     #[test]
     fn strips_cursor_moves() {
-        assert_eq!(strip_ansi("a\x1b[2Kb\x1b[1;1Hc"), "abc");
+        // Erase-line vanishes; an absolute move becomes a line break.
+        assert_eq!(strip_ansi("a\x1b[2Kb\x1b[1;1Hc"), "ab\nc");
+    }
+
+    /// ConPTY sends a space as cursor-forward and a line break as an absolute
+    /// move (bytes from a real Windows capture).
+    #[test]
+    fn cursor_forward_becomes_spaces() {
+        assert_eq!(
+            strip_ansi("Blocked.\x1b[1CThe\x1b[3Charness"),
+            "Blocked. The   harness"
+        );
+        assert_eq!(strip_ansi("x\x1b[Cy"), "x y");
+        assert_eq!(strip_ansi("a\x1b[13;3Hb\x1b[5Gc"), "a\n  b c");
+    }
+
+    /// The turn-end footer as ConPTY really paints it: glyph and verb joined by
+    /// a cursor-forward, the row placed by an absolute move.
+    #[test]
+    fn detects_conpty_footer_with_background_shell() {
+        let mut s = PureSniffer::new();
+        let signals = s.feed(
+            "\x1b[?25l\x1b[10;1H \x1b[38;2;153;153;153m\x1b[1CRan \x1b[1m1\x1b[22m shell command\x1b[K\x1b[m\r\n\r\n   \u{25CF}\x1b[m\x1b[1Cstarted\x1b[38;2;153;153;153m\x1b[14;1H\u{273B}\x1b[1CSaut\u{e9}ed for 5s \u{b7} done 16:30 \u{b7} 1 shell still running\x1b[m\x1b[24;1H\x1b[K\x1b[27;1H\u{276F} \x1b[?25h",
+        );
+        assert!(signals.contains(&PureSignal::TurnEnded));
+        assert!(s.background_running());
+    }
+
+    /// Spinner ticks repaint a single cell each — they must not read as a
+    /// prompt or a turn end.
+    #[test]
+    fn conpty_spinner_ticks_are_inert() {
+        let mut s = PureSniffer::new();
+        for glyph in [
+            '\u{2736}', '*', '\u{2722}', '\u{b7}', '\u{273B}', '\u{273D}',
+        ] {
+            let signals = s.feed(&format!(
+                "\x1b[?25l\x1b[38;2;215;119;87m\x1b[23;1H{glyph}\x1b[26;3H\x1b[?25h"
+            ));
+            assert!(!signals.contains(&PureSignal::TurnEnded));
+            assert!(!signals.contains(&PureSignal::NeedsInput));
+        }
+        assert!(!s.prompt_open());
+        assert!(!s.background_running());
+    }
+
+    #[test]
+    fn conpty_prompt_phrase_matches() {
+        let mut s = PureSniffer::new();
+        s.feed("\x1b[20;3HDo\x1b[1Cyou\x1b[1Cwant\x1b[1Cto\x1b[1Cproceed?");
+        assert!(s.prompt_open());
+    }
+
+    /// The numbered-menu branch on a real AskUserQuestion paint: each option
+    /// row is placed by an absolute move, its indent only in the column.
+    #[test]
+    fn conpty_numbered_menu_matches() {
+        let mut s = PureSniffer::new();
+        s.feed(
+            "\x1b[11;1HTea or coffee?\x1b[13;1H\u{276F}\x1b[38;2;153;153;153m\x1b[1C1.\x1b[1CTea\x1b[14;6HPrefer tea.\x1b[15;3H2.\x1b[m\x1b[1CCoffee\x1b[16;6HPrefer coffee.",
+        );
+        assert!(s.prompt_open());
+    }
+
+    #[test]
+    fn reads_turn_state_from_window_title() {
+        assert_eq!(
+            osc_title("x\x1b]0;\u{25D0} Ping localhost test\x07\x1b[?25l"),
+            Some("\u{25D0} Ping localhost test")
+        );
+        assert_eq!(
+            osc_title("\x1b]2;\u{2733} Claude Code\x1b\\"),
+            Some("\u{2733} Claude Code")
+        );
+        assert_eq!(osc_title("no title here"), None);
+
+        let mut s = PureSniffer::new();
+        assert_eq!(s.title_busy(), None);
+        s.note_title("claude");
+        assert_eq!(s.title_busy(), None);
+        s.note_title("\u{25D1} Ping localhost test");
+        assert_eq!(s.title_busy(), Some(true));
+        s.note_title("\u{2733} Ping localhost test");
+        assert_eq!(s.title_busy(), Some(false));
+        // A submit clears the per-turn latches, not the title level.
+        s.reset();
+        assert_eq!(s.title_busy(), Some(false));
     }
 
     #[test]
