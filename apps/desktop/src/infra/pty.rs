@@ -1070,6 +1070,16 @@ impl PtySupervisor {
             .collect()
     }
 
+    /// Sessions that currently have an interactive `claude` PTY alive.
+    pub fn claude_session_ids(&self) -> Vec<AggregateId> {
+        let terminals = self.terminals.lock().expect("pty mutex poisoned");
+        terminals
+            .values()
+            .filter(|t| t.kind == TerminalKind::Claude)
+            .map(|t| t.session_id)
+            .collect()
+    }
+
     /// Rename a terminal — used by the dock when the user double-clicks a tab.
     pub fn rename(&self, id: &str, title: &str) -> Result<(), PtyError> {
         let mut terminals = self.terminals.lock().expect("pty mutex poisoned");

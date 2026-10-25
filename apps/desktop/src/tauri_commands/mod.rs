@@ -8,6 +8,7 @@ pub mod action;
 pub mod attachments;
 pub mod autopilot;
 pub mod badge;
+pub mod claude_accounts;
 pub mod env;
 pub mod environment;
 pub mod fs;

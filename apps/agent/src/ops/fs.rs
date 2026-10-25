@@ -79,12 +79,32 @@ pub fn read(path_str: &str, max_bytes: Option<u64>) -> Result<FsReadResult, OpEr
     })
 }
 
-pub fn write(path_str: &str, contents: &str) -> Result<FsWriteResult, OpError> {
+pub fn write(path_str: &str, contents: &str, mode: Option<u32>) -> Result<FsWriteResult, OpError> {
     let path = Path::new(path_str);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, contents)?;
+    match mode {
+        // Create with the requested bits so a secret never exists on disk
+        // with umask-default (often 0644) permissions, then chmod in case the
+        // file already existed with a wider mode.
+        #[cfg(unix)]
+        Some(mode) => {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(mode)
+                .open(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            file.write_all(contents.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        Some(_) => fs::write(path, contents)?,
+        None => fs::write(path, contents)?,
+    }
     Ok(FsWriteResult {
         path: path_str.to_owned(),
         bytes_written: contents.len() as u64,

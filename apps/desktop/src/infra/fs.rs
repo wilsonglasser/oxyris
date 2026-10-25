@@ -252,6 +252,7 @@ pub async fn write_file(
                     serde_json::to_value(FsWriteArgs {
                         path: abs_path,
                         contents,
+                        mode: None,
                     })
                     .map_err(|e| FsError::Agent(e.to_string()))?,
                 )

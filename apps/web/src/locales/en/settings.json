@@ -2,6 +2,7 @@
   "heading": "Settings",
   "tabs": {
     "general": "General",
+    "accounts": "Accounts",
     "voice": "Voice",
     "languages": "Languages",
     "advanced": "Advanced"
@@ -130,5 +131,64 @@
   "error_label": "Error: {{message}}",
   "no_providers": "No providers discovered yet.",
   "logs_heading": "Logs",
-  "logs_path_label": "Trace files are written to:"
+  "logs_path_label": "Trace files are written to:",
+  "accounts": {
+    "intro": "Each environment (Windows and every WSL distro) has its own Claude Code login and its own reserve accounts. Switching rewrites only the login of that environment; sessions already open there keep the previous account until restarted.",
+    "refresh": "Refresh",
+    "save_current": "Save current account",
+    "add": "Add account",
+    "login_waiting": "Waiting for login…",
+    "login_hint": "Finish signing in in the console window that opened. It closes on its own when done.",
+    "login_added": "Added {{email}}.",
+    "login_cancelled": "Login window closed without signing in.",
+    "not_tracked": "Not monitored yet.",
+    "track": "Monitor",
+    "loading": "Loading…",
+    "empty": "No Claude login found here. Add an account or sign in with `claude` in this environment.",
+    "active": "Active",
+    "activate": "Switch",
+    "switching": "Switching…",
+    "switched": "Switched. Claude sessions already open in {{env}} keep the previous account until restarted.",
+    "remove": "Remove account",
+    "remove_confirm": "Remove?",
+    "window_5h": "5-hour",
+    "window_7d": "Weekly",
+    "window_7d_opus": "Weekly · Opus",
+    "window_7d_sonnet": "Weekly · Sonnet",
+    "resets_in": "resets in {{time}}",
+    "plan": {
+      "pro": "Pro",
+      "max5x": "Max 5x",
+      "max20x": "Max 20x",
+      "max": "Max",
+      "team": "Team",
+      "enterprise": "Enterprise",
+      "free": "Free",
+      "unknown": "Unknown plan"
+    },
+    "error": {
+      "no_scope": "This login can't read usage (token without profile scope).",
+      "auth": "Login rejected. Sign in to this account again.",
+      "rate_limited": "Usage API rate-limited; showing the last known numbers.",
+      "network": "Network error: {{message}}",
+      "http": "Usage request failed: {{message}}",
+      "credentials": "Couldn't read credentials: {{message}}"
+    },
+    "sessions_running_one": "{{count}} Claude session is open in this environment. It keeps the previous account in memory and can overwrite the switch when it refreshes its token — restart it after switching.",
+    "sessions_running_other": "{{count}} Claude sessions are open in this environment. They keep the previous account in memory and can overwrite the switch when they refresh their token — restart them after switching.",
+    "switch_anyway": "Switch anyway",
+    "cancel": "Cancel",
+    "offline": "offline",
+    "offline_hint": "Distro not running — showing the last known usage. Oxyris never starts it on its own.",
+    "wsl_offline": "WSL ({{distro}}) is not running. Start it (open a terminal or a WSL project) and try again.",
+    "widget": {
+      "heading": "Taskbar widget",
+      "enabled": "Show usage in the Windows taskbar",
+      "distro": "WSL row:",
+      "distro_auto": "First monitored distro",
+      "hint": "Shows the active account's 5-hour and weekly usage for Windows and one WSL distro, next to the system tray. Click it to open this panel. WSL distros appear once monitored.",
+      "row_local": "WIN",
+      "row_wsl": "WSL"
+    }
+  }
 }

@@ -2,6 +2,7 @@
   "heading": "Configurações",
   "tabs": {
     "general": "Geral",
+    "accounts": "Contas",
     "voice": "Voz",
     "languages": "Linguagens",
     "advanced": "Avançado"
@@ -130,5 +131,64 @@
   "error_label": "Erro: {{message}}",
   "no_providers": "Nenhum provider descoberto ainda.",
   "logs_heading": "Logs",
-  "logs_path_label": "Arquivos de trace são escritos em:"
+  "logs_path_label": "Arquivos de trace são escritos em:",
+  "accounts": {
+    "intro": "Cada ambiente (Windows e cada distro WSL) tem seu próprio login do Claude Code e suas próprias contas reserva. Trocar reescreve só o login daquele ambiente; sessões já abertas nele continuam na conta anterior até serem reiniciadas.",
+    "refresh": "Atualizar",
+    "save_current": "Salvar conta atual",
+    "add": "Adicionar conta",
+    "login_waiting": "Aguardando login…",
+    "login_hint": "Conclua o login na janela de console que abriu. Ela fecha sozinha ao terminar.",
+    "login_added": "{{email}} adicionada.",
+    "login_cancelled": "Janela de login fechada sem entrar.",
+    "not_tracked": "Ainda não monitorado.",
+    "track": "Monitorar",
+    "loading": "Carregando…",
+    "empty": "Nenhum login do Claude aqui. Adicione uma conta ou entre com `claude` neste ambiente.",
+    "active": "Ativa",
+    "activate": "Ativar",
+    "switching": "Trocando…",
+    "switched": "Conta trocada. Sessões Claude já abertas em {{env}} continuam na conta anterior até serem reiniciadas.",
+    "remove": "Remover conta",
+    "remove_confirm": "Remover?",
+    "window_5h": "5 horas",
+    "window_7d": "Semanal",
+    "window_7d_opus": "Semanal · Opus",
+    "window_7d_sonnet": "Semanal · Sonnet",
+    "resets_in": "reseta em {{time}}",
+    "plan": {
+      "pro": "Pro",
+      "max5x": "Max 5x",
+      "max20x": "Max 20x",
+      "max": "Max",
+      "team": "Team",
+      "enterprise": "Enterprise",
+      "free": "Free",
+      "unknown": "Plano desconhecido"
+    },
+    "error": {
+      "no_scope": "Este login não consegue ler o uso (token sem escopo de perfil).",
+      "auth": "Login rejeitado. Entre nesta conta novamente.",
+      "rate_limited": "API de uso limitou as requisições; mostrando os últimos valores.",
+      "network": "Erro de rede: {{message}}",
+      "http": "Falha ao consultar uso: {{message}}",
+      "credentials": "Não foi possível ler as credenciais: {{message}}"
+    },
+    "sessions_running_one": "{{count}} sessão Claude está aberta neste ambiente. Ela mantém a conta anterior em memória e pode desfazer a troca ao renovar o token — reinicie-a depois de trocar.",
+    "sessions_running_other": "{{count}} sessões Claude estão abertas neste ambiente. Elas mantêm a conta anterior em memória e podem desfazer a troca ao renovar o token — reinicie-as depois de trocar.",
+    "switch_anyway": "Trocar mesmo assim",
+    "cancel": "Cancelar",
+    "offline": "offline",
+    "offline_hint": "Distro desligada — mostrando o último uso conhecido. O Oxyris nunca liga a distro sozinho.",
+    "wsl_offline": "O WSL ({{distro}}) está desligado. Ligue-o (abra um terminal ou um projeto WSL) e tente de novo.",
+    "widget": {
+      "heading": "Widget na barra de tarefas",
+      "enabled": "Mostrar uso na barra de tarefas do Windows",
+      "distro": "Linha WSL:",
+      "distro_auto": "Primeira distro monitorada",
+      "hint": "Mostra o uso de 5 horas e semanal da conta ativa do Windows e de uma distro WSL, ao lado da bandeja do sistema. Clique nele para abrir este painel. Distros WSL aparecem depois de monitoradas.",
+      "row_local": "WIN",
+      "row_wsl": "WSL"
+    }
+  }
 }

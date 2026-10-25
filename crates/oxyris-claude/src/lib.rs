@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod accounts;
 mod protocol;
 mod provider;
 

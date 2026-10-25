@@ -143,6 +143,10 @@ pub struct FsWriteArgs {
     /// File contents as a UTF-8 string. Binary writes go through a future
     /// `fs.write_base64` op once we need them.
     pub contents: String,
+    /// Unix permission bits applied to the written file (e.g. `0o600` for
+    /// credential files). `None` = leave whatever umask/existing mode gives.
+    #[serde(default)]
+    pub mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

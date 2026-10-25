@@ -86,5 +86,18 @@ rodio = { version = "0.19", default-features = false }
 tar = "0.4"
 bzip2 = "0.4"
 
+# Taskbar usage widget (`infra::usage_widget`): a native layered window
+# parented into the Windows taskbar. Pinned to the version Tauri already pulls
+# in so no second copy of the bindings is compiled.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 tempfile = "3.16"

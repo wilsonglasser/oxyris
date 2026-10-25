@@ -35,6 +35,8 @@ import { WelcomeScreen } from "~/components/WelcomeScreen.tsx";
 import { claudeLanguageDirective } from "~/lib/claudeLanguage.ts";
 import { useDragResize } from "~/lib/useDragResize.ts";
 import { useScopedWorktreeId } from "~/hooks/useScopedWorktreeId.ts";
+import { useUsageWidget } from "~/hooks/useUsageWidget.ts";
+import { useSettingsNavStore } from "~/stores/settingsNavStore.ts";
 import { isTypingTarget, matchesKey } from "~/lib/keybindings.ts";
 import { clearBadge } from "~/lib/taskbarBadge.ts";
 import { sessionStart, type SessionKind } from "~/ipc/session.ts";
@@ -63,6 +65,13 @@ export function App() {
   const active = projects.find((p) => p.id === activeId) ?? null;
 
   const [tab, setTab] = useState<Tab>("chat");
+  // Taskbar usage widget: keep it painted; a click deep-links to the
+  // Settings → Accounts panel (the backend already raised the window).
+  const openAccounts = useCallback(() => {
+    useSettingsNavStore.getState().setTab("accounts");
+    setTab("settings");
+  }, []);
+  useUsageWidget(openAccounts);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [projectSettingsId, setProjectSettingsId] = useState<string | null>(

@@ -65,7 +65,7 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
         }
         op_name::FS_WRITE => {
             let args: oxyris_ipc::ops::FsWriteArgs = from_args(args)?;
-            let result = fs::write(&args.path, &args.contents)?;
+            let result = fs::write(&args.path, &args.contents, args.mode)?;
             Ok(serde_json::to_value(result)?)
         }
         op_name::FS_WALK => {

@@ -18,6 +18,8 @@ use thiserror::Error;
 use crate::domain::session::{Session, SessionCommand, SessionEvent};
 use crate::infra::agent_pool::AgentPool;
 use crate::infra::autopilot::AutopilotManager;
+use crate::infra::claude_accounts::ClaudeAccounts;
+use crate::infra::claude_usage::ClaudeUsage;
 use crate::infra::event_store::{EventStore, EventStoreError};
 use crate::infra::fs_watcher::{FsWatchService, WslFsWatchService};
 use crate::infra::indexing::IndexingService;
@@ -28,6 +30,7 @@ use crate::infra::observability::{self, LogGuard};
 use crate::infra::projections::{ProjectionError, Projections};
 use crate::infra::pty::PtySupervisor;
 use crate::infra::session_supervisor::SessionSupervisor;
+use crate::infra::usage_widget::UsageWidget;
 use std::sync::Mutex as StdMutex;
 
 pub struct AppState {
@@ -94,6 +97,13 @@ pub struct AppState {
     /// enables it. The `mobile_takeover_*` commands flip this on/off; it serves
     /// pure sessions' PTYs to a paired phone over LAN.
     pub mobile: Arc<StdMutex<Option<crate::infra::mobile::MobileServer>>>,
+    /// Claude account pools per environment + the usage poller behind the
+    /// accounts panel and the taskbar widget. Reach the registry through
+    /// `claude_usage.accounts()`.
+    pub claude_usage: Arc<ClaudeUsage>,
+    /// Native taskbar strip rendering `claude_usage` (pixels come from the
+    /// main webview's canvas).
+    pub usage_widget: Arc<UsageWidget>,
 }
 
 #[derive(Debug, Error)]
@@ -169,6 +179,15 @@ impl AppState {
         let mut registry = ProviderRegistry::new();
         registry.register(Box::new(ClaudeProvider));
         let providers = Arc::new(registry);
+
+        // Claude account pools + usage poller (accounts panel, taskbar widget).
+        let claude_usage = Arc::new(ClaudeUsage::new(Arc::new(ClaudeAccounts::new(
+            data_dir.clone(),
+            agent_pool.clone(),
+        ))));
+        tauri::async_runtime::spawn(claude_usage.clone().run(app.clone()));
+        let usage_widget = Arc::new(UsageWidget::new(&data_dir));
+        usage_widget.start(app.clone());
 
         let app_for_cleanup = app.clone();
         let app_for_lsp = app.clone();
@@ -348,6 +367,8 @@ impl AppState {
             voice_tts: std::sync::Mutex::new(None),
             action_procs: Arc::new(StdMutex::new(HashMap::new())),
             mobile: Arc::new(StdMutex::new(None)),
+            claude_usage,
+            usage_widget,
         })
     }
 }

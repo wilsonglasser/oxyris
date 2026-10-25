@@ -271,6 +271,7 @@ async fn write_text(
                     serde_json::to_value(FsWriteArgs {
                         path: path.to_owned(),
                         contents: contents.to_owned(),
+                        mode: None,
                     })?,
                 )
                 .await?;

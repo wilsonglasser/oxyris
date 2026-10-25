@@ -86,6 +86,31 @@ pub fn environments_list() -> Vec<EnvironmentEntry> {
     out
 }
 
+/// Whether `distro` is running right now. Never starts it: `--list` only
+/// queries the WSL service. `--running --quiet` prints bare names, so this
+/// doesn't depend on the localized STATE column of `--verbose`.
+pub fn wsl_distro_running(distro: &str) -> bool {
+    #[cfg(windows)]
+    {
+        match Command::new("wsl.exe")
+            .args(["--list", "--running", "--quiet"])
+            .hide_console()
+            .output()
+        {
+            Ok(out) if out.status.success() => decode_output(&out.stdout)
+                .lines()
+                .map(|l| l.trim_matches(|c: char| c.is_whitespace() || c == '\0'))
+                .any(|name| name.eq_ignore_ascii_case(distro)),
+            _ => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = distro;
+        false
+    }
+}
+
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WslDistro {

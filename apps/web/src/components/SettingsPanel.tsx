@@ -20,6 +20,8 @@ import type { Environment } from "~/ipc/commands.ts";
 import { LanguageSwitcher } from "~/components/LanguageSwitcher.tsx";
 import { localEnvLabel } from "~/lib/host.ts";
 import { LanguagePacksPanel } from "~/components/LanguagePacksPanel.tsx";
+import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel.tsx";
+import { useSettingsNavStore } from "~/stores/settingsNavStore.ts";
 import { useKeybindingsStore } from "~/stores/keybindingsStore.ts";
 import {
   syncAutopilotDefaults,
@@ -70,11 +72,10 @@ async function settingsProviderDiscover(): Promise<DiscoveredInstall[]> {
   return invoke<DiscoveredInstall[]>("settings_provider_discover");
 }
 
-type Tab = "general" | "voice" | "languages" | "advanced";
-
 export function SettingsPanel() {
   const { t } = useTranslation("settings");
-  const [tab, setTab] = useState<Tab>("general");
+  const tab = useSettingsNavStore((s) => s.tab);
+  const setTab = useSettingsNavStore((s) => s.setTab);
 
   return (
     <section className="rounded-xl border border-neutral-800 bg-neutral-900/50">
@@ -84,7 +85,7 @@ export function SettingsPanel() {
           {t("heading")}
         </h2>
         <div className="flex gap-1">
-          {(["general", "voice", "languages", "advanced"] as const).map((k) => (
+          {(["general", "accounts", "voice", "languages", "advanced"] as const).map((k) => (
             <button
               key={k}
               type="button"
@@ -103,6 +104,7 @@ export function SettingsPanel() {
 
       <div className="px-5 py-5">
         {tab === "general" && <GeneralTab />}
+        {tab === "accounts" && <ClaudeAccountsPanel />}
         {tab === "voice" && <VoiceTab />}
         {tab === "languages" && <LanguagePacksPanel />}
         {tab === "advanced" && <AdvancedTab />}
