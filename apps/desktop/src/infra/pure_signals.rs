@@ -244,25 +244,44 @@ fn recap_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)([\x{2720}-\x{274F}]|※)\s*recap").expect("pure recap regex"))
 }
 
-/// While a turn is blocked on background agents (the Task tool run in
-/// parallel), claude paints a static status line — "✻ Waiting for 2
-/// background agents to finish" — and then goes completely silent: no
-/// spinner frames, no "esc to interrupt" footer, no output at all until an
-/// agent reports back. Both of the usual "a turn is running" tells are
-/// therefore absent, and the dot used to fall back to idle for what can be
-/// several minutes of real work.
+/// While a turn is blocked on background work (the Task tool run in parallel,
+/// a dynamic workflow), claude paints a static status line — "✻ Waiting for 2
+/// background agents to finish", "✻ Waiting for 1 dynamic workflow to finish"
+/// — and drops the spinner and the "esc to interrupt" footer until that work
+/// reports back. Both of the usual "a turn is running" tells are therefore
+/// absent, and the dot used to fall back to idle for what can be several
+/// minutes of real work.
 ///
-/// Anchored to the start of the line (past the TUI's box/bullet chrome) so
-/// the assistant *describing* background agents in prose doesn't read as the
-/// status line itself.
+/// The noun is open ("N <a few words> to finish") so a new kind of background
+/// work doesn't need a new regex. Anchored to the start of the line (past the
+/// TUI's box/bullet chrome) so the assistant *describing* background agents in
+/// prose doesn't read as the status line itself.
 fn waiting_agents_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?im)^[\s\x{2502}\x{2514}\x{251C}\x{2570}\x{2500}\x{2720}-\x{274F}*]*waiting\s+for\s+\d+\s+background\s+agents?\b",
+            r"(?im)^[\s\x{2502}\x{2514}\x{251C}\x{2570}\x{2500}\x{2720}-\x{274F}*]*waiting\s+for\s+\d+\s+(?:background\s+agents?\b|[\w-]+(?:\s+[\w-]+){0,2}?\s+to\s+finish\b)",
         )
         .expect("pure waiting-agents regex")
     })
+}
+
+/// "Interrupted · What should Claude do instead?" — the user hit Esc. Ends a
+/// background wait as surely as a turn-end footer does.
+fn interrupted_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\binterrupted\b").expect("pure interrupted regex"))
+}
+
+/// True if `s` (output painted after the waiting status line) shows the wait
+/// is over: claude resumed the turn (spinner / "esc to interrupt"), settled it
+/// (turn-end footer), asks for input, or was interrupted.
+fn ends_wait(s: &str) -> bool {
+    working_re().is_match(s)
+        || interrupt_re().is_match(s)
+        || turn_end_re().is_match(s)
+        || prompt_re().is_match(s)
+        || interrupted_re().is_match(s)
 }
 
 /// The turn-end footer sometimes reports work that outlived the turn — "✳
@@ -363,6 +382,9 @@ pub struct PureSniffer {
     turn_end_seen: bool,
     recap_seen: bool,
     working_active: bool,
+    /// Latched while claude is blocked on background work (see
+    /// [`waiting_agents_re`]); cleared by [`ends_wait`] output or [`reset`].
+    waiting: bool,
     /// Latched once an "API Error" line appears, until [`reset`] (the user's next
     /// submit). Drives the red bull + warning banner in pure mode.
     api_error_seen: bool,
@@ -445,6 +467,18 @@ impl PureSniffer {
         if !self.api_error_seen && api_error_re().is_match(&self.tail) {
             self.api_error_seen = true;
         }
+        // Background wait — a latch, not a recent-window match: during the
+        // wait claude keeps repainting a progress row (a workflow's elapsed
+        // time and token count tick every second), and under ConPTY each tick
+        // is a small screen diff that pushes the status line out of any window
+        // long before the work finishes. It holds until something painted
+        // after the status line ends it.
+        match waiting_agents_re().find_iter(&self.tail).last() {
+            Some(m) => self.waiting = !ends_wait(&self.tail[m.end()..]),
+            // The status line scrolled out of the capped tail: only this chunk
+            // is new, so it alone can end the wait.
+            None => self.waiting = self.waiting && !ends_wait(stripped),
+        }
 
         out
     }
@@ -502,18 +536,17 @@ impl PureSniffer {
         background_running_re().is_match(&self.tail[footer.start()..])
     }
 
-    /// True while the current frame shows claude blocked on background
-    /// agents (see [`waiting_agents_re`]). Scoped to the recent window rather
-    /// than the last line: the status line sits *above* the input box, so it
-    /// is never the bottom-most row, and the scoping keeps it from lingering
-    /// once claude paints past it.
+    /// True while claude is blocked on background agents / workflows (see
+    /// [`waiting_agents_re`]). Not a last-line check: the status line sits
+    /// *above* the input box, so it is never the bottom-most row. Holds until
+    /// claude resumes, settles, prompts, or is interrupted ([`ends_wait`]).
     ///
-    /// This is the one busy state with no output behind it — the turn is
-    /// live but the PTY is silent — so callers must treat it as busy
+    /// A busy state with no turn output behind it — the turn is live but
+    /// claude itself paints nothing — so callers must treat it as busy
     /// *without* the output-freshness gate that unsticks every other stale
     /// frame.
     pub fn waiting_for_agents(&self) -> bool {
-        waiting_agents_re().is_match(recent_window(&self.tail))
+        self.waiting
     }
 
     /// True while a permission/question menu is on screen. The idle watchdog
@@ -552,6 +585,7 @@ impl PureSniffer {
         self.turn_end_seen = false;
         self.recap_seen = false;
         self.working_active = false;
+        self.waiting = false;
         self.api_error_seen = false;
     }
 }
@@ -887,14 +921,45 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
         assert!(!sniffer.waiting_for_agents());
     }
 
-    /// Once claude paints past the wait, the marker leaves the recent window
-    /// and the state clears — otherwise the dot would stay blue forever.
+    /// A dynamic workflow blocks the turn the same way, with its own noun.
     #[test]
-    fn waiting_clears_once_newer_output_scrolls_past_it() {
+    fn waiting_matches_a_dynamic_workflow() {
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed("\u{273B} Waiting for 1 dynamic workflow to finish\n");
+        assert!(sniffer.waiting_for_agents());
+    }
+
+    /// The workflow's progress row keeps ticking under the status line (ConPTY
+    /// sends just the changed cells). Minutes of those diffs push the status
+    /// line out of the tail entirely; the wait must hold regardless.
+    #[test]
+    fn waiting_survives_progress_row_ticks() {
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed(
+            "\u{273B} Waiting for 1 dynamic workflow to finish\n\
+             \u{25CB} release-review  \u{25AC}\u{25AC}\u{25AC}  2/4 \u{b7} 9m34s \u{b7} \u{2193} 590.8k tokens\n",
+        );
+        for i in 0..400 {
+            sniffer.feed(&format!("\x1b[12;44H{i}s\x1b[12;53H59{i}.8k"));
+        }
+        assert!(sniffer.waiting_for_agents());
+    }
+
+    /// Once claude resumes (spinner) or settles (turn-end footer), the wait is
+    /// over — otherwise the dot would stay blue forever.
+    #[test]
+    fn waiting_clears_when_claude_resumes_or_settles() {
         let mut sniffer = PureSniffer::new();
         sniffer.feed("\u{2726} Waiting for 2 background agents to finish\n");
+        sniffer.feed(&"agent reported back\n".repeat(40));
         assert!(sniffer.waiting_for_agents());
-        sniffer.feed(&"agent reported back, continuing with the edit\n".repeat(40));
+        sniffer.feed("\u{273B} Reticulating\u{2026} (esc to interrupt)\n");
+        assert!(!sniffer.waiting_for_agents());
+
+        let mut sniffer = PureSniffer::new();
+        sniffer.feed("\u{273B} Waiting for 1 dynamic workflow to finish\n");
+        sniffer.feed(&"x".repeat(3000));
+        sniffer.feed("\u{2733} Worked for 12m 3s\n");
         assert!(!sniffer.waiting_for_agents());
     }
 

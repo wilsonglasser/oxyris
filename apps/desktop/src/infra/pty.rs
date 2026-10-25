@@ -272,8 +272,8 @@ fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     // Blocked on background agents: the turn is live but the PTY emits nothing
     // at all, so the freshness gate (which exists to unstick stale spinner
     // frames) would drop the dot mid-work. This is the one running state that
-    // has to survive silence — it clears as soon as claude paints past the
-    // status line.
+    // has to survive silence — it clears once claude resumes, settles,
+    // prompts, or is interrupted.
     let waiting_agents = sniffer.waiting_for_agents();
     // Background shells/monitors that outlived the turn ("… · 1 shell still
     // running"). claude is idle at its prompt — silent like the agents wait —

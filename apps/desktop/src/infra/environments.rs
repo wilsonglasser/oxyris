@@ -150,12 +150,12 @@ fn looks_like_utf16le(bytes: &[u8]) -> bool {
         return false;
     }
     let sample = &bytes[..bytes.len().min(64)];
-    let pairs = sample.chunks_exact(2);
+    let (pairs, _) = sample.as_chunks::<2>();
     let total = pairs.len();
     if total == 0 {
         return false;
     }
-    let zeros = sample.chunks_exact(2).filter(|p| p[1] == 0).count();
+    let zeros = pairs.iter().filter(|p| p[1] == 0).count();
     // Demand ≥80% high-byte zeros — comfortable margin against random binary.
     zeros * 5 >= total * 4
 }

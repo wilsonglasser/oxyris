@@ -171,6 +171,9 @@ pub enum SupervisorKind {
 
 /// Implemented by each supervisor adapter. Object-safe via `async_trait` so the
 /// controller can hold a `Box<dyn Supervisor>`.
+// `async_trait` marks the boxed-future methods `#[must_use]`; newer clippy
+// flags that as doubled with the future's own `#[must_use]`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Supervisor: Send + Sync {
     fn id(&self) -> &'static str;
