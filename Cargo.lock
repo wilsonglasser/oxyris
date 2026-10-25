@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "oxyris-desktop"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3324,6 +3324,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
+ "windows 0.61.3",
  "zip 5.1.1",
 ]
 
