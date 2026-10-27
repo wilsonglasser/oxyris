@@ -124,9 +124,18 @@ function playSoundById(id: string): void {
   }
 }
 
+// Completion chime is delayed and debounced: a burst of turns finishing (or the
+// same finish reported by several listeners) rings once, 5s after the last one.
+const COMPLETION_DELAY_MS = 5000;
+let completionTimer: ReturnType<typeof setTimeout> | null = null;
+
 /** Chime: a turn finished naturally (orange attention bull). */
 export function playCompletionChime(): void {
-  playSoundById(getChannelSound("completion"));
+  if (completionTimer !== null) clearTimeout(completionTimer);
+  completionTimer = setTimeout(() => {
+    completionTimer = null;
+    playSoundById(getChannelSound("completion"));
+  }, COMPLETION_DELAY_MS);
 }
 
 /** Chime: Claude is waiting for user input (red bull / approval prompt). */
