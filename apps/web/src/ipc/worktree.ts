@@ -9,6 +9,15 @@ import { invoke } from "@tauri-apps/api/core";
  */
 export const PRIMARY_WORKTREE_ID = "00000000-0000-0000-0000-000000000000";
 
+/**
+ * Synthetic "worktree" id whose root is the user's home dir in the project's
+ * environment. Mirror of `HOME_SCOPE_SENTINEL` in
+ * `apps/desktop/src/infra/fs.rs`. Accepted only by the single-file fs commands
+ * (read, write, abs path, reveal, open external) — lets the file viewer open
+ * `~/…` paths outside the worktree.
+ */
+export const HOME_SCOPE_ID = "00000000-0000-0000-0000-000000000001";
+
 export function isPrimaryWorktreeId(id: string | null | undefined): boolean {
   return id === PRIMARY_WORKTREE_ID;
 }

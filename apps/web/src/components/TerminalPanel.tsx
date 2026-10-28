@@ -300,6 +300,132 @@ const PATH_RE =
 const URL_RE = /https?:\/\/[^\s'"<>`]+/g;
 const URL_TRAILING_RE = /[.,;:!?)\]}>'"]+$/;
 
+// A token broken across rows. xterm marks its own soft wraps (`isWrapped`), but
+// the claude TUI hard-wraps itself: a word longer than its text box is cut at
+// the box edge and continued on the next row after a newline + the block's
+// indent. Such a row is treated as continuing when its last non-blank cell sits
+// within HARD_WRAP_SLACK columns of the edge (the box is a little narrower than
+// the terminal) and the words on either side of the break are together too long
+// to have fit on one row — ordinary word-wrapped prose never is, so its rows
+// aren't glued together.
+const HARD_WRAP_SLACK = 8;
+/** Rows joined in each direction around the hovered one. */
+const MAX_JOIN_ROWS = 4;
+
+/** One buffer row as text, with the 1-based column of each code unit. */
+interface RowText {
+  text: string;
+  xs: number[];
+}
+
+/**
+ * The hovered row plus the rows it wraps into / from, joined into one string
+ * for link matching. `pos[i]` is the buffer cell (1-based x, 1-based y) of
+ * `text[i]`, so a match maps back to a (possibly multi-row) link range.
+ */
+function logicalLine(
+  term: Terminal,
+  bufferLineNumber: number,
+): { text: string; pos: { x: number; y: number }[] } | null {
+  const buf = term.buffer.active;
+  const cols = term.cols;
+  const scratch = buf.getNullCell();
+  const rows = new Map<number, RowText | null>();
+  // Cell-walk rather than translateToString: wide glyphs (⏺, emoji) take two
+  // cells but one string slot, so string offsets drift from columns.
+  const row = (y: number): RowText | null => {
+    if (rows.has(y)) return rows.get(y) ?? null;
+    const line = buf.getLine(y);
+    let out: RowText | null = null;
+    if (line) {
+      let text = "";
+      const xs: number[] = [];
+      for (let x = 0; x < cols; x++) {
+        const cell = line.getCell(x, scratch);
+        if (!cell) break;
+        if (cell.getWidth() === 0) continue; // trailing half of a wide glyph
+        const ch = cell.getChars() || " ";
+        for (let i = 0; i < ch.length; i++) {
+          text += ch[i];
+          xs.push(x + 1);
+        }
+      }
+      out = { text, xs };
+    }
+    rows.set(y, out);
+    return out;
+  };
+  // How row `y` flows into row `y + 1`: "soft" (xterm wrap, cells contiguous),
+  // "hard" (TUI wrap, trailing blanks / next row's indent dropped) or null.
+  const flow = (y: number): "soft" | "hard" | null => {
+    const next = buf.getLine(y + 1);
+    if (!next) return null;
+    if (next.isWrapped) return "soft";
+    const cur = row(y);
+    const nxt = row(y + 1);
+    if (!cur || !nxt) return null;
+    const body = cur.text.trimEnd();
+    if (!body) return null;
+    const lastX = cur.xs[body.length - 1] ?? 0;
+    if (lastX < cols - HARD_WRAP_SLACK) return null;
+    const tail = /\S+$/.exec(body)?.[0] ?? "";
+    const head = /^\s*(\S*)/.exec(nxt.text)?.[1] ?? "";
+    if (!head) return null;
+    return tail.length + head.length > cols - HARD_WRAP_SLACK ? "hard" : null;
+  };
+
+  const y0 = bufferLineNumber - 1;
+  let start = y0;
+  while (start > 0 && y0 - start < MAX_JOIN_ROWS && flow(start - 1)) start--;
+  let end = y0;
+  while (end - y0 < MAX_JOIN_ROWS && flow(end)) end++;
+
+  let text = "";
+  const pos: { x: number; y: number }[] = [];
+  for (let y = start; y <= end; y++) {
+    const r = row(y);
+    if (!r) return null;
+    let from = 0;
+    let to = r.text.length;
+    if (y > start && flow(y - 1) === "hard") {
+      from = r.text.length - r.text.trimStart().length;
+    }
+    if (y === end || flow(y) === "hard") to = r.text.trimEnd().length;
+    for (let i = from; i < to; i++) {
+      text += r.text[i];
+      pos.push({ x: r.xs[i] ?? 1, y: y + 1 });
+    }
+  }
+  return { text, pos };
+}
+
+/**
+ * Run `re` over the logical line around `bufferLineNumber` and return the
+ * matches that touch that row, as link ranges. `trim` may shorten a match
+ * (URL trailing punctuation); empty results are dropped.
+ */
+function wrappedMatches(
+  term: Terminal,
+  bufferLineNumber: number,
+  re: RegExp,
+  trim: (raw: string) => string = (raw) => raw,
+): { text: string; range: ILink["range"] }[] {
+  const logical = logicalLine(term, bufferLineNumber);
+  if (!logical) return [];
+  const out: { text: string; range: ILink["range"] }[] = [];
+  re.lastIndex = 0;
+  for (let m = re.exec(logical.text); m; m = re.exec(logical.text)) {
+    const text = trim(m[0]);
+    if (!text) continue;
+    const start = logical.pos[m.index];
+    const end = logical.pos[m.index + text.length - 1];
+    if (!start || !end) continue;
+    if (start.y > bufferLineNumber || end.y < bufferLineNumber) continue;
+    out.push({ text, range: { start, end } });
+  }
+  return out;
+}
+
 interface LiveTerminal {
   term: Terminal;
   /** Live getter — the addon is nulled on GL context loss. */
@@ -514,27 +640,19 @@ export function TerminalView({
     const linkProvider = term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
         if (!onOpenPathRef.current) return callback(undefined);
-        const line = term.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) return callback(undefined);
-        const text = line.translateToString(true);
-        const links: ILink[] = [];
-        PATH_RE.lastIndex = 0;
-        for (let m = PATH_RE.exec(text); m; m = PATH_RE.exec(text)) {
-          const start = m.index + 1;
-          const raw = m[0];
-          links.push({
-            text: raw,
-            range: {
-              start: { x: start, y: bufferLineNumber },
-              end: { x: start + raw.length - 1, y: bufferLineNumber },
-            },
-            decorations: { pointerCursor: true, underline: true },
-            activate: (event: MouseEvent, token: string) => {
-              if (!(event.ctrlKey || event.metaKey)) return;
-              onOpenPathRef.current?.(token);
-            },
-          });
-        }
+        const links: ILink[] = wrappedMatches(
+          term,
+          bufferLineNumber,
+          PATH_RE,
+        ).map(({ text, range }) => ({
+          text,
+          range,
+          decorations: { pointerCursor: true, underline: true },
+          activate: (event: MouseEvent, token: string) => {
+            if (!(event.ctrlKey || event.metaKey)) return;
+            onOpenPathRef.current?.(token);
+          },
+        }));
         callback(links.length ? links : undefined);
       },
     });
@@ -544,28 +662,20 @@ export function TerminalView({
     // are safe). Always on, independent of the file-path provider above.
     const urlLinkProvider = term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
-        const line = term.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) return callback(undefined);
-        const text = line.translateToString(true);
-        const links: ILink[] = [];
-        URL_RE.lastIndex = 0;
-        for (let m = URL_RE.exec(text); m; m = URL_RE.exec(text)) {
-          const url = m[0].replace(URL_TRAILING_RE, "");
-          if (!url) continue;
-          const start = m.index + 1;
-          links.push({
-            text: url,
-            range: {
-              start: { x: start, y: bufferLineNumber },
-              end: { x: start + url.length - 1, y: bufferLineNumber },
-            },
-            decorations: { pointerCursor: true, underline: true },
-            activate: (event: MouseEvent, token: string) => {
-              if (!(event.ctrlKey || event.metaKey)) return;
-              void openUrl(token).catch(() => {});
-            },
-          });
-        }
+        const links: ILink[] = wrappedMatches(
+          term,
+          bufferLineNumber,
+          URL_RE,
+          (raw) => raw.replace(URL_TRAILING_RE, ""),
+        ).map(({ text, range }) => ({
+          text,
+          range,
+          decorations: { pointerCursor: true, underline: true },
+          activate: (event: MouseEvent, token: string) => {
+            if (!(event.ctrlKey || event.metaKey)) return;
+            void openUrl(token).catch(() => {});
+          },
+        }));
         callback(links.length ? links : undefined);
       },
     });

@@ -23,12 +23,13 @@ import {
   sessionStart,
 } from "~/ipc/session.ts";
 import {
+  HOME_SCOPE_ID,
   isPrimaryWorktreeId,
   PRIMARY_WORKTREE_ID,
   type WorktreeRow,
   worktreeList,
 } from "~/ipc/worktree.ts";
-import { fsOpenExternal } from "~/ipc/fs.ts";
+import { fsAbsPath, fsOpenExternal } from "~/ipc/fs.ts";
 import {
   claudePtySpawn,
   claudePureRefreshTitle,
@@ -74,11 +75,22 @@ import { onAutopilotEvent } from "~/ipc/autopilot.ts";
  * fs IPC accepts (it rejects absolute paths and `..`). `cwd` is the PTY's
  * working directory, which equals the worktree root for pure sessions. Returns
  * null when the path escapes the worktree (can't be opened via worktree-scoped
- * fs ops) or can't be resolved.
+ * fs ops) or can't be resolved. A `~/…` path — or an absolute one under
+ * `homeDir` (the environment's home, once known) — is returned home-relative
+ * with `home: true`: the caller opens it in the backend's home scope.
  */
-function resolveRelPath(raw: string, cwd: string): string | null {
+function resolveRelPath(
+  raw: string,
+  cwd: string,
+  homeDir: string | null,
+): { rel: string; home: boolean } | null {
   // Drop a trailing :line[:col] locator, then normalize separators.
   let p = raw.replace(/:\d+(?::\d+)?$/, "").replace(/\\/g, "/");
+  if (p.startsWith("~/")) {
+    const rel = p.slice(2).replace(/^\/+/, "");
+    const escapes = rel.split("/").some((seg) => seg === "..");
+    return rel && !escapes ? { rel, home: true } : null;
+  }
   let base = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
   // A WSL UNC cwd (\\wsl.localhost\<distro>\home\…) maps to the POSIX path the
   // distro — and claude's output — actually use.
@@ -87,16 +99,25 @@ function resolveRelPath(raw: string, cwd: string): string | null {
 
   const isAbs = /^[A-Za-z]:\//.test(p) || p.startsWith("/");
   if (isAbs) {
-    const pl = p.toLowerCase();
-    const bl = base.toLowerCase();
-    if (pl === bl) return null; // the worktree root itself, not a file
-    if (pl.startsWith(`${bl}/`)) return p.slice(base.length + 1);
-    return null; // outside the worktree
+    // Path below `root` (case-insensitive: Windows paths), or null.
+    const below = (root: string): string | null => {
+      const r = root.replace(/\\/g, "/").replace(/\/+$/, "");
+      if (!r) return null;
+      const rel = p.toLowerCase().startsWith(`${r.toLowerCase()}/`)
+        ? p.slice(r.length + 1)
+        : null;
+      if (!rel || rel.split("/").some((seg) => seg === "..")) return null;
+      return rel;
+    };
+    const inWorktree = below(base);
+    if (inWorktree) return { rel: inWorktree, home: false };
+    const inHome = homeDir ? below(homeDir) : null;
+    return inHome ? { rel: inHome, home: true } : null;
   }
   // Relative → already worktree-root-relative (cwd == root). Reject escapes.
   p = p.replace(/^\.\//, "");
   if (p === ".." || p.startsWith("../")) return null;
-  return p || null;
+  return p ? { rel: p, home: false } : null;
 }
 
 interface Attachment {
@@ -358,7 +379,10 @@ function PureSessionView({
   // forces control back. Driven by the backend `session:<id>:takeover` event.
   const [takenOver, setTakenOver] = useState(false);
   // Ctrl/Cmd+click target when opening a terminal file path in the in-app modal.
-  const [openRelPath, setOpenRelPath] = useState<string | null>(null);
+  const [openTarget, setOpenTarget] = useState<{
+    worktreeId: string;
+    relPath: string;
+  } | null>(null);
   const openFilesExternally = useAppSettingsStore((s) => s.openFilesExternally);
   // The fs ops a file-open uses must be scoped to the SESSION's own project +
   // worktree, not whatever project is selected in the sidebar (`project`). A
@@ -668,26 +692,40 @@ function PureSessionView({
     [termId],
   );
 
+  // The environment's home dir, so absolute paths outside the worktree but
+  // under home (scratchpads, `~` expanded by claude) open in the home scope.
+  const [homeDir, setHomeDir] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setHomeDir(null);
+    fsAbsPath({ projectId: openProjectId, worktreeId: HOME_SCOPE_ID, relPath: "" })
+      .then((h) => alive && setHomeDir(h))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [openProjectId]);
+
   // Ctrl/Cmd+click on a file path in the TUI. Resolve it against the PTY cwd,
   // then either hand off to the external editor or pop the in-app modal.
   const onOpenPath = useCallback(
     (raw: string) => {
       if (!cwd) return;
-      const rel = resolveRelPath(raw, cwd);
-      if (!rel) return;
+      const resolved = resolveRelPath(raw, cwd, homeDir);
+      if (!resolved) return;
+      const target = {
+        worktreeId: resolved.home ? HOME_SCOPE_ID : worktreeId,
+        relPath: resolved.rel,
+      };
       if (openFilesExternally) {
-        void fsOpenExternal({
-          projectId: openProjectId,
-          worktreeId,
-          relPath: rel,
-        }).catch((e) =>
-          setError(e instanceof Error ? e.message : String(e)),
+        void fsOpenExternal({ projectId: openProjectId, ...target }).catch(
+          (e) => setError(e instanceof Error ? e.message : String(e)),
         );
       } else {
-        setOpenRelPath(rel);
+        setOpenTarget(target);
       }
     },
-    [cwd, openFilesExternally, openProjectId, worktreeId],
+    [cwd, homeDir, openFilesExternally, openProjectId, worktreeId],
   );
 
   // Ctrl/Cmd+click on the mic dictates then auto-submits to the PTY once
@@ -1184,12 +1222,12 @@ function PureSessionView({
         </div>
       </div>
 
-      {openRelPath && (
+      {openTarget && (
         <FileViewerModal
           projectId={openProjectId}
-          worktreeId={worktreeId}
-          relPath={openRelPath}
-          onClose={() => setOpenRelPath(null)}
+          worktreeId={openTarget.worktreeId}
+          relPath={openTarget.relPath}
+          onClose={() => setOpenTarget(null)}
         />
       )}
     </section>

@@ -3,11 +3,13 @@ import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { EditorPane } from "~/components/FileEditorTabs.tsx";
 import { scopeKey, useFileEditorStore } from "~/stores/fileEditorStore.ts";
+import { HOME_SCOPE_ID } from "~/ipc/worktree.ts";
 
 interface Props {
   projectId: string;
+  /** Worktree id, or {@link HOME_SCOPE_ID} for a `~/…` file. */
   worktreeId: string;
-  /** Path relative to the worktree root. */
+  /** Path relative to the worktree root (home dir under the home scope). */
   relPath: string;
   onClose: () => void;
 }
@@ -24,6 +26,8 @@ export function FileViewerModal({ projectId, worktreeId, relPath, onClose }: Pro
   const tab = useFileEditorStore(
     (s) => s.tabs[scopeKey(projectId, worktreeId)]?.[relPath] ?? null,
   );
+
+  const shownPath = worktreeId === HOME_SCOPE_ID ? `~/${relPath}` : relPath;
 
   // Load (or focus) the file in the shared store when the target changes.
   useEffect(() => {
@@ -42,8 +46,8 @@ export function FileViewerModal({ projectId, worktreeId, relPath, onClose }: Pro
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6 backdrop-blur-sm">
       <div className="relative flex h-[80vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-950 shadow-2xl">
         <header className="flex h-9 shrink-0 items-center justify-between border-b border-neutral-800 bg-neutral-900 pl-3 pr-2 text-[12px] text-neutral-300">
-          <span className="truncate font-mono" title={relPath}>
-            {relPath}
+          <span className="truncate font-mono" title={shownPath}>
+            {shownPath}
           </span>
           <button
             type="button"

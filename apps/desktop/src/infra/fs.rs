@@ -28,6 +28,12 @@ use crate::infra::projections::ProjectionError;
 /// [`crate::tauri_commands::worktree::PRIMARY_WORKTREE_SENTINEL`].
 const PRIMARY_WORKTREE_SENTINEL: AggregateId = AggregateId(Uuid::nil());
 
+/// Synthetic id for "the user's home dir in the project's environment" — lets
+/// the file viewer open `~/…` paths claude prints (reports, notes) that live
+/// outside the worktree. Resolved by [`resolve_scope`] only; the tree, search
+/// and watcher commands stay worktree-only.
+pub const HOME_SCOPE_SENTINEL: AggregateId = AggregateId(Uuid::from_u128(1));
+
 #[derive(Debug, Error)]
 pub enum FsError {
     #[error("project not found")]
@@ -81,6 +87,40 @@ pub fn resolve_worktree(
         return Err(FsError::WorktreeProjectMismatch);
     }
     Ok((project.environment, row.path))
+}
+
+/// [`resolve_worktree`] plus the [`HOME_SCOPE_SENTINEL`] scope, whose root is
+/// the home dir of the project's environment: the host home for native
+/// projects, the distro's `$HOME` (asked of the agent) for WSL ones.
+pub async fn resolve_scope(
+    state: &AppState,
+    project_id: AggregateId,
+    worktree_id: AggregateId,
+) -> Result<(Environment, String), FsError> {
+    if worktree_id != HOME_SCOPE_SENTINEL {
+        return resolve_worktree(state, project_id, worktree_id);
+    }
+    let project = state
+        .projections
+        .get_project(project_id)?
+        .ok_or(FsError::ProjectNotFound)?;
+    let home = match &project.environment {
+        Environment::Local => oxyris_procutil::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .ok_or_else(|| FsError::InvalidPath("home directory not found".into()))?,
+        Environment::Wsl { distro } => {
+            let info = state
+                .agent_pool
+                .call(distro, op_name::SYSTEM_INFO, serde_json::json!({}))
+                .await?;
+            info.get("home")
+                .and_then(|h| h.as_str())
+                .filter(|h| !h.is_empty())
+                .ok_or_else(|| FsError::Agent(format!("no $HOME reported by {distro}")))?
+                .to_owned()
+        }
+    };
+    Ok((project.environment, home))
 }
 
 /// Join `rel` onto `root` using the right separator for `env`, after

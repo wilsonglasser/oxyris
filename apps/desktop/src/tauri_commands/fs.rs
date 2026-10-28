@@ -4,6 +4,10 @@
 //! (no escape via `..`, no absolute paths, no drive letters) is enforced in
 //! `infra::fs::join_inside_worktree`. Windows projects hit `std::fs`
 //! directly; WSL projects route through the agent.
+//!
+//! The single-file viewer commands (read, write, abs path, reveal, open
+//! external) also accept `infra::fs::HOME_SCOPE_SENTINEL` as `worktree_id`,
+//! rooting `rel_path` at the environment's home dir instead.
 
 use oxyris_core::AggregateId;
 use oxyris_ipc::ops::{FsListDirResult, FsReadResult, FsWriteResult};
@@ -104,7 +108,7 @@ pub async fn fs_read_file(
     input: FsReadFileInput,
     state: State<'_, AppState>,
 ) -> Result<FsReadFileOutput, TauriFsError> {
-    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let (env, root) = fs_infra::resolve_scope(&state, input.project_id, input.worktree_id).await?;
     let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let result: FsReadResult =
         fs_infra::read_file(&env, &state.agent_pool, abs, input.max_bytes).await?;
@@ -135,7 +139,7 @@ pub async fn fs_write_file(
     input: FsWriteFileInput,
     state: State<'_, AppState>,
 ) -> Result<FsWriteFileOutput, TauriFsError> {
-    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let (env, root) = fs_infra::resolve_scope(&state, input.project_id, input.worktree_id).await?;
     let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let result: FsWriteResult =
         fs_infra::write_file(&env, &state.agent_pool, abs, input.content).await?;
@@ -261,7 +265,7 @@ pub async fn fs_abs_path(
     input: FsAbsPathInput,
     state: State<'_, AppState>,
 ) -> Result<String, TauriFsError> {
-    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let (env, root) = fs_infra::resolve_scope(&state, input.project_id, input.worktree_id).await?;
     Ok(fs_infra::join_inside_worktree(
         &env,
         &root,
@@ -293,7 +297,7 @@ pub async fn fs_reveal(
     use oxyris_procutil::HideConsole;
     use std::process::Command;
 
-    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let (env, root) = fs_infra::resolve_scope(&state, input.project_id, input.worktree_id).await?;
     let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let windows_path = match &env {
         Environment::Local => abs,
@@ -422,7 +426,7 @@ pub async fn fs_read_file_bytes(
     input: FsReadFileBytesInput,
     state: State<'_, AppState>,
 ) -> Result<FsReadFileBytesOutput, TauriFsError> {
-    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let (env, root) = fs_infra::resolve_scope(&state, input.project_id, input.worktree_id).await?;
     let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     // Both branches go through the shared facade now (`fs_infra::read_bytes`):
     // Windows reads via std::fs in spawn_blocking, WSL routes through the
@@ -484,7 +488,7 @@ pub async fn fs_open_external(
     input: FsOpenExternalInput,
     state: State<'_, AppState>,
 ) -> Result<FsOpenExternalOutput, TauriFsError> {
-    let (env, root) = fs_infra::resolve_worktree(&state, input.project_id, input.worktree_id)?;
+    let (env, root) = fs_infra::resolve_scope(&state, input.project_id, input.worktree_id).await?;
     let abs = fs_infra::safe_join(&env, &root, &input.rel_path)?;
     let target = open_external::resolve(&env, &abs, input.editor.as_deref())
         .ok_or_else(|| TauriFsError::Backend("no external editor found".into()))?;
