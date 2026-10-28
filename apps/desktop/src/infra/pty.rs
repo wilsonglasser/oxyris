@@ -27,7 +27,8 @@ use uuid::Uuid;
 const OUTPUT_BROADCAST_CAP: usize = 4096;
 
 use crate::infra::pure_signals::{
-    PureSignal, PureSniffer, has_content_stripped, osc_title, strip_ansi, strip_for_detection,
+    PureSignal, PureSniffer, focus_event, has_content_stripped, osc_title, strip_ansi,
+    strip_for_detection,
 };
 
 /// In-process notification of a pure-signal marker edge, pushed from the PTY
@@ -123,6 +124,10 @@ struct LiveTerminal {
     /// chunk so `compute_pure_state` can drop a quiet turn out of "busy" even
     /// when a stale spinner frame lingers in the sniffer tail. `None` for shells.
     idle: Option<Arc<Mutex<IdleState>>>,
+    /// Cleared by the reader thread at PTY EOF. A dead claude PTY stays in the
+    /// map until the session is closed, and its sniffer may hold a busy title
+    /// frozen at the moment of death — `pure_state` must read it as idle.
+    alive: Arc<AtomicBool>,
     /// App handle kept so takeover acquire/release can emit
     /// `session:<id>:takeover` without threading an `AppHandle` through every
     /// supervisor method.
@@ -284,7 +289,9 @@ fn compute_pure_state(sniffer: &PureSniffer, idle: &IdleState) -> PureState {
     // keeps flipping through long silent commands (where the painted spinner
     // row only updates a cell or two, never a whole line the screen heuristic
     // could read) and settles the instant the turn ends — so it outranks the
-    // heuristic both ways. Unknown → the heuristic, as before.
+    // heuristic both ways. Unknown → the heuristic, as before. (claude freezes
+    // the spinner glyph while the terminal is blurred; the sniffer tracks focus
+    // from the input stream so a frozen title on a hidden thread stays trusted.)
     let running = match sniffer.title_busy() {
         Some(running) => running,
         None => fresh && (sniffer.is_busy_now() || busy_recent),
@@ -920,6 +927,26 @@ impl PtySupervisor {
                 }
             }
             reader_alive.store(false, Ordering::Relaxed);
+            // claude exited: ship a final idle snapshot so the dot can't stay
+            // blue on a title frozen at the moment of death (the heartbeat
+            // stops with `alive`, so nothing else would correct it).
+            if let Some(last) = &reader_last_state {
+                let changed = match last.lock() {
+                    Ok(mut prev) => {
+                        let idle = PureState::default();
+                        let changed = *prev != Some(idle);
+                        *prev = Some(idle);
+                        changed
+                    }
+                    Err(_) => false,
+                };
+                if changed {
+                    let _ = reader_app.emit(
+                        &format!("session:{reader_session}:pure-state"),
+                        PureState::default(),
+                    );
+                }
+            }
             let _ = reader_app.emit(&format!("terminal:{reader_id}:exit"), "eof");
         });
 
@@ -993,6 +1020,7 @@ impl PtySupervisor {
                 replay,
                 pure,
                 idle,
+                alive,
                 app,
                 desktop_size: Mutex::new((cols, rows)),
                 wsl_kill,
@@ -1042,7 +1070,10 @@ impl PtySupervisor {
     pub fn pure_state(&self, session_id: AggregateId) -> PureState {
         let terminals = self.terminals.lock().expect("pty mutex poisoned");
         for t in terminals.values() {
-            if t.session_id != session_id || t.kind != TerminalKind::Claude {
+            if t.session_id != session_id
+                || t.kind != TerminalKind::Claude
+                || !t.alive.load(Ordering::Relaxed)
+            {
                 continue;
             }
             if let (Some(pure), Some(idle)) = (&t.pure, &t.idle)
@@ -1117,17 +1148,29 @@ impl PtySupervisor {
         // fires fresh, and stamp the output clock so the just-started turn reads
         // "fresh" until claude paints its spinner. Matches the frontend's
         // `onPtyInput` reset on `\r`.
-        if data.contains('\r') {
-            if let Some(pure) = &live.pure
-                && let Ok(mut sniffer) = pure.lock()
-            {
+        //
+        // The same stream carries xterm's focus reports (`ESC[I` / `ESC[O`,
+        // DECSET 1004 — claude asks for them). claude freezes its title spinner
+        // while blurred, so the sniffer needs the focus level to know whether a
+        // frozen busy title is stale or legitimately frozen.
+        let submits = data.contains('\r');
+        let focus = focus_event(data);
+        if (submits || focus.is_some())
+            && let Some(pure) = &live.pure
+            && let Ok(mut sniffer) = pure.lock()
+        {
+            if submits {
                 sniffer.reset();
             }
-            if let Some(idle) = &live.idle
-                && let Ok(mut st) = idle.lock()
-            {
-                st.last_output = Instant::now();
+            if let Some(focused) = focus {
+                sniffer.note_focus(focused);
             }
+        }
+        if submits
+            && let Some(idle) = &live.idle
+            && let Ok(mut st) = idle.lock()
+        {
+            st.last_output = Instant::now();
         }
         let mut writer = live.writer.lock().expect("pty writer mutex poisoned");
         writer.write_all(data.as_bytes())?;

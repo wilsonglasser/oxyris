@@ -134,7 +134,8 @@ pub fn strip_ansi(s: &str) -> String {
 
 /// The last window title (OSC 0 / OSC 2) set in `raw`, if any. claude keeps
 /// its run state there: the title starts with a half-circle spinner (`◐`/`◑`,
-/// flipping about once a second) for the whole time a turn is live — through
+/// flipping about once a second while the terminal is focused, frozen on one
+/// glyph while it is blurred) for the whole time a turn is live — through
 /// long silent shell commands too — and with `✳` once it settles. Unlike the
 /// painted spinner row, it doesn't depend on how the screen is redrawn.
 pub fn osc_title(raw: &str) -> Option<&str> {
@@ -161,7 +162,30 @@ fn classify_title(title: &str) -> Option<bool> {
 /// A busy title that hasn't flipped for this long is no longer trusted (the
 /// spinner flips about once a second; a frozen one means claude stopped
 /// painting it) — the dot falls back to the screen heuristics.
+///
+/// Only applies while the terminal reports **focus**. claude gates the title
+/// spinner's flip interval on its `isTerminalFocused` context: on a focus-out
+/// (`ESC[O`, which xterm.js sends on blur / when the pane is torn down) the
+/// glyph freezes on ◐/◑ for the rest of the turn, while the title still flips
+/// to ✳ the instant the turn settles. So a frozen busy title on a blurred
+/// terminal is a trustworthy level, not a stuck heartbeat — ageing it out there
+/// made every background / hidden thread flap blue↔orange (or blue↔green on the
+/// active one) through each silent stretch of a running turn.
 const TITLE_STALE: Duration = Duration::from_secs(5);
+
+/// The terminal focus report claude asked for (DECSET 1004) as it rides the
+/// *input* stream: `ESC[I` = focus in, `ESC[O` = focus out. Returns the last
+/// one in `data`, or `None` when the chunk carries neither.
+pub fn focus_event(data: &str) -> Option<bool> {
+    let fin = data.rfind("\x1b[I");
+    let fout = data.rfind("\x1b[O");
+    match (fin, fout) {
+        (None, None) => None,
+        (Some(_), None) => Some(true),
+        (None, Some(_)) => Some(false),
+        (Some(i), Some(o)) => Some(i > o),
+    }
+}
 
 /// The claude TUI renders a numbered menu whenever it needs the user to approve
 /// a tool or answer a question. While it's on screen the thread "wants input".
@@ -392,6 +416,11 @@ pub struct PureSniffer {
     /// changed. A level, not a per-turn latch — [`reset`] leaves it alone.
     title: Option<String>,
     title_changed_at: Option<Instant>,
+    /// The terminal reported focus-out (`ESC[O`) and no focus-in since. claude
+    /// freezes its title spinner while blurred, so [`title_busy`] must not age
+    /// a busy title out in this state. `false` (focused) by default — claude's
+    /// own default is "unknown", which it treats as focused.
+    blurred: bool,
 }
 
 impl PureSniffer {
@@ -493,17 +522,36 @@ impl PureSniffer {
         }
     }
 
+    /// Record a terminal focus report seen on the input stream (see
+    /// [`focus_event`]). A focus-in restarts the title staleness clock: claude
+    /// resumes flipping the spinner only on its next tick, so without this the
+    /// first second after a refocus would read the (legitimately frozen) title
+    /// as stale and blip the dot through the screen heuristic.
+    pub fn note_focus(&mut self, focused: bool) {
+        self.blurred = !focused;
+        if focused && self.title.is_some() {
+            self.title_changed_at = Some(Instant::now());
+        }
+    }
+
     /// Turn state as claude reports it in its window title: `Some(true)` while
     /// the spinner title keeps flipping, `Some(false)` once it settled on `✳`,
-    /// `None` when unknown (no title yet, an unrecognised one, or a busy title
-    /// frozen past [`TITLE_STALE`]) — callers then fall back to the screen
-    /// heuristics.
+    /// `None` when unknown (no title yet, an unrecognised one, or — on a
+    /// focused terminal only — a busy title frozen past [`TITLE_STALE`]) —
+    /// callers then fall back to the screen heuristics. While the terminal is
+    /// blurred the busy glyph is frozen by design and trusted as a level.
     pub fn title_busy(&self) -> Option<bool> {
         let busy = classify_title(self.title.as_deref()?)?;
-        if busy && self.title_changed_at?.elapsed() >= TITLE_STALE {
+        if busy && !self.blurred && self.title_changed_at?.elapsed() >= TITLE_STALE {
             return None;
         }
         Some(busy)
+    }
+
+    /// Test hook: pretend the title last changed `by` ago.
+    #[cfg(test)]
+    fn age_title(&mut self, by: Duration) {
+        self.title_changed_at = self.title_changed_at.map(|t| t - by);
     }
 
     /// True once an "API Error" line has appeared this turn (until [`reset`]).
@@ -690,6 +738,42 @@ mod tests {
         // A submit clears the per-turn latches, not the title level.
         s.reset();
         assert_eq!(s.title_busy(), Some(false));
+    }
+
+    #[test]
+    fn frozen_busy_title_ages_out_only_while_focused() {
+        let mut s = PureSniffer::new();
+        s.note_title("\u{25D0} cargo build");
+        assert_eq!(s.title_busy(), Some(true));
+        // Focused terminal, spinner frozen past the stale window → unknown.
+        s.age_title(TITLE_STALE);
+        assert_eq!(s.title_busy(), None);
+        // Blurred terminal: claude freezes the spinner on purpose — trusted.
+        s.note_focus(false);
+        assert_eq!(s.title_busy(), Some(true));
+        s.age_title(Duration::from_secs(600));
+        assert_eq!(s.title_busy(), Some(true));
+        // The settled glyph still wins while blurred.
+        s.note_title("\u{2733} cargo build");
+        assert_eq!(s.title_busy(), Some(false));
+        // Refocus restarts the clock on a busy title (claude resumes flipping
+        // on its next tick), then the stale rule applies again.
+        s.note_title("\u{25D1} cargo test");
+        s.note_focus(false);
+        s.age_title(Duration::from_secs(60));
+        s.note_focus(true);
+        assert_eq!(s.title_busy(), Some(true));
+        s.age_title(TITLE_STALE);
+        assert_eq!(s.title_busy(), None);
+    }
+
+    #[test]
+    fn focus_event_reads_last_report_in_chunk() {
+        assert_eq!(focus_event("abc"), None);
+        assert_eq!(focus_event("\x1b[I"), Some(true));
+        assert_eq!(focus_event("\x1b[O"), Some(false));
+        assert_eq!(focus_event("\x1b[I\x1b[O"), Some(false));
+        assert_eq!(focus_event("\x1b[Ohello\x1b[I"), Some(true));
     }
 
     #[test]
