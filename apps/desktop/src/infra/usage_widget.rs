@@ -34,7 +34,10 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
+// Only emitted from the Windows-native widget; dead code elsewhere.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const METRICS_EVENT: &str = "usage-widget://metrics";
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const CLICKED_EVENT: &str = "usage-widget://clicked";
 const SETTINGS_FILE: &str = "usage-widget.json";
 
@@ -136,6 +139,7 @@ impl UsageWidget {
 
 /// RGBA (straight) → BGRA (premultiplied), which `UpdateLayeredWindow`
 /// with `AC_SRC_ALPHA` requires.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn premultiplied_bgra(mut px: Vec<u8>) -> Vec<u8> {
     for p in px.as_chunks_mut::<4>().0 {
         let a = u16::from(p[3]);
