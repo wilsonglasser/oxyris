@@ -6,7 +6,10 @@
 //! auth Just Work. This is the documented exception in `PLAN.md` §13:
 //! shellout when git2 doesn't cover the case cleanly.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use oxyris_procutil::HideConsole;
 use serde::{Deserialize, Serialize};
@@ -112,11 +115,44 @@ pub fn push_delete(
     run(&["-C", repo_path, "push", "--delete", "--", remote, branch])
 }
 
+/// How long to keep draining stdout/stderr after git itself has exited.
+/// Anything still holding the pipes past this is a detached helper, not git.
+const DRAIN_GRACE: Duration = Duration::from_millis(500);
+
 fn run(args: &[&str]) -> Result<RemoteOpResult, GitError> {
-    let out = Command::new("git").args(args).hide_console().output()?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !out.status.success() {
+    run_program("git", args)
+}
+
+/// Run `program` and return once *it* exits — not once its pipes close.
+///
+/// `Command::output()` waits for EOF on stdout/stderr, and git's remote ops
+/// routinely leave those fds in the hands of a process that outlives git: an
+/// ssh `ControlMaster`/`ControlPersist` daemon forked by the first connection,
+/// or `git gc --auto` detaching after a fetch. Both inherit git's stderr, so
+/// `output()` hangs forever while FETCH_HEAD has long been updated. Here the
+/// pipes are drained on side threads (both at once — a chatty git deadlocks on
+/// a full pipe otherwise), the child is waited on, and the readers get a short
+/// grace period before whatever they captured is returned. A reader still
+/// blocked after that is leaked; it ends when the fd holder finally exits.
+///
+/// stdin is `/dev/null`: in the WSL agent the inherited stdin is the NDJSON
+/// control pipe, which git must never read. Terminal prompts are disabled so
+/// a missing credential fails with a message instead of waiting on a tty.
+fn run_program(program: &str, args: &[&str]) -> Result<RemoteOpResult, GitError> {
+    let mut child = Command::new(program)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .hide_console()
+        .spawn()?;
+    let stdout_rx = drain(child.stdout.take());
+    let stderr_rx = drain(child.stderr.take());
+    let status = child.wait()?;
+    let stdout = collect(&stdout_rx);
+    let stderr = collect(&stderr_rx);
+    if !status.success() {
         return Err(GitError::NonZero(if stderr.is_empty() {
             stdout
         } else {
@@ -126,9 +162,59 @@ fn run(args: &[&str]) -> Result<RemoteOpResult, GitError> {
     Ok(RemoteOpResult { stdout, stderr })
 }
 
+/// Drain `pipe` to EOF on a thread, delivering the bytes once at the end.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    if let Some(mut pipe) = pipe {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+    }
+    rx
+}
+
+/// What the reader captured, or empty when something still holds the pipe
+/// open past [`DRAIN_GRACE`] after the child exited.
+fn collect(rx: &mpsc::Receiver<Vec<u8>>) -> String {
+    match rx.recv_timeout(DRAIN_GRACE) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A detached child that inherits stderr must not keep `run_program`
+    /// waiting after the program itself has exited (ssh ControlPersist, `git
+    /// gc --auto`). `Command::output()` would block here for the full sleep.
+    #[cfg(unix)]
+    #[test]
+    fn returns_when_program_exits_not_when_pipes_close() {
+        let started = std::time::Instant::now();
+        let out = run_program("sh", &["-c", "(sleep 5 >&2 &); echo ok"]).unwrap();
+        assert_eq!(out.stdout.trim(), "ok");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "waited on the detached fd holder: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn non_zero_exit_is_an_error_with_output() {
+        #[cfg(unix)]
+        let err = run_program("sh", &["-c", "echo nope >&2; exit 3"]).unwrap_err();
+        #[cfg(windows)]
+        let err = run_program("cmd.exe", &["/C", "echo nope 1>&2 & exit 3"]).unwrap_err();
+        assert!(
+            matches!(&err, GitError::NonZero(m) if m.contains("nope")),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn rejects_option_like_positional() {

@@ -44,6 +44,19 @@ impl OpError {
 
 pub use fs::start_watch;
 
+/// Run a synchronous op off the runtime thread. The agent runs on a
+/// `current_thread` runtime and dispatches requests concurrently, so a git op
+/// that blocks (a fetch over a slow link, a status walk of a big repo) must
+/// not pin the thread every other request shares.
+async fn blocking<F>(f: F) -> Result<serde_json::Value, OpError>
+where
+    F: FnOnce() -> Result<serde_json::Value, OpError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| OpError::Io(std::io::Error::other(e)))?
+}
+
 pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
     let args = req.args;
     let id = req.id;
@@ -129,49 +142,69 @@ pub async fn dispatch(req: RequestFrame) -> Result<serde_json::Value, OpError> {
             let args: oxyris_ipc::ops::FsUnwatchArgs = from_args(args)?;
             fs::stop_watch(args)
         }
-        op_name::GIT_LIST_BRANCHES => git::list_branches(from_args(args)?),
-        op_name::GIT_LIST_WORKTREES => git::list_worktrees(from_args(args)?),
-        op_name::GIT_CREATE_WORKTREE => git::create_worktree(from_args(args)?),
-        op_name::GIT_REMOVE_WORKTREE => git::remove_worktree(from_args(args)?),
-        op_name::GIT_CHECKPOINT_CAPTURE => git::checkpoint_capture(from_args(args)?),
-        op_name::GIT_CHECKPOINT_DIFF => git::checkpoint_diff(from_args(args)?),
-        op_name::GIT_CHECKPOINT_REVERT => git::checkpoint_revert(from_args(args)?),
-        op_name::GIT_STATUS => git::status(from_args(args)?),
-        op_name::GIT_DIFF_FILE => git::diff_file(from_args(args)?),
-        op_name::GIT_STAGE => git::stage(from_args(args)?),
-        op_name::GIT_UNSTAGE => git::unstage(from_args(args)?),
-        op_name::GIT_COMMIT => git::commit(from_args(args)?),
-        op_name::GIT_CLONE => git::clone(from_args(args)?),
-        op_name::GIT_FETCH => git::fetch(from_args(args)?),
-        op_name::GIT_PULL => git::pull(from_args(args)?),
-        op_name::GIT_PUSH => git::push(from_args(args)?),
-        op_name::GIT_CHECKOUT => git::checkout(from_args(args)?),
-        op_name::GIT_BRANCH_CREATE => git::branch_create(from_args(args)?),
-        op_name::GIT_BRANCH_DELETE => git::branch_delete(from_args(args)?),
-        op_name::GIT_BRANCH_LIST_DETAILED => git::branch_list_detailed(from_args(args)?),
-        op_name::GIT_BRANCH_RENAME => git::branch_rename(from_args(args)?),
-        op_name::GIT_BRANCH_DELETE_REMOTE => git::branch_delete_remote(from_args(args)?),
-        op_name::GIT_CHECKOUT_REMOTE => git::checkout_remote(from_args(args)?),
-        op_name::GIT_PUSH_DELETE => git::push_delete(from_args(args)?),
-        op_name::GIT_MERGE => git::merge(from_args(args)?),
-        op_name::GIT_MERGE_ABORT => git::merge_abort(from_args(args)?),
-        op_name::GIT_REBASE => git::rebase(from_args(args)?),
-        op_name::GIT_REBASE_CONTINUE => git::rebase_continue(from_args(args)?),
-        op_name::GIT_REBASE_ABORT => git::rebase_abort(from_args(args)?),
-        op_name::GIT_LOG => git::log(from_args(args)?),
-        op_name::GIT_GET_CONFLICT => git::get_conflict(from_args(args)?),
-        op_name::GIT_RESOLVE => git::resolve(from_args(args)?),
-        op_name::GIT_APPLY_PATCH => git::apply_patch(from_args(args)?),
-        op_name::GIT_STASH_LIST => git::stash_list(from_args(args)?),
-        op_name::GIT_STASH_SAVE => git::stash_save(from_args(args)?),
-        op_name::GIT_STASH_APPLY => git::stash_apply(from_args(args)?),
-        op_name::GIT_STASH_DROP => git::stash_drop(from_args(args)?),
-        op_name::GIT_TAG_LIST => git::tag_list(from_args(args)?),
-        op_name::GIT_TAG_CREATE => git::tag_create(from_args(args)?),
-        op_name::GIT_TAG_DELETE => git::tag_delete(from_args(args)?),
-        op_name::GIT_CHERRY_PICK => git::cherry_pick(from_args(args)?),
-        op_name::GIT_REVERT => git::revert(from_args(args)?),
-        op_name::GIT_DIFF_REVS => git::diff_revs(from_args(args)?),
+        op_name::GIT_LIST_BRANCHES => blocking(move || git::list_branches(from_args(args)?)).await,
+        op_name::GIT_LIST_WORKTREES => {
+            blocking(move || git::list_worktrees(from_args(args)?)).await
+        }
+        op_name::GIT_CREATE_WORKTREE => {
+            blocking(move || git::create_worktree(from_args(args)?)).await
+        }
+        op_name::GIT_REMOVE_WORKTREE => {
+            blocking(move || git::remove_worktree(from_args(args)?)).await
+        }
+        op_name::GIT_CHECKPOINT_CAPTURE => {
+            blocking(move || git::checkpoint_capture(from_args(args)?)).await
+        }
+        op_name::GIT_CHECKPOINT_DIFF => {
+            blocking(move || git::checkpoint_diff(from_args(args)?)).await
+        }
+        op_name::GIT_CHECKPOINT_REVERT => {
+            blocking(move || git::checkpoint_revert(from_args(args)?)).await
+        }
+        op_name::GIT_STATUS => blocking(move || git::status(from_args(args)?)).await,
+        op_name::GIT_DIFF_FILE => blocking(move || git::diff_file(from_args(args)?)).await,
+        op_name::GIT_STAGE => blocking(move || git::stage(from_args(args)?)).await,
+        op_name::GIT_UNSTAGE => blocking(move || git::unstage(from_args(args)?)).await,
+        op_name::GIT_COMMIT => blocking(move || git::commit(from_args(args)?)).await,
+        op_name::GIT_CLONE => blocking(move || git::clone(from_args(args)?)).await,
+        op_name::GIT_FETCH => blocking(move || git::fetch(from_args(args)?)).await,
+        op_name::GIT_PULL => blocking(move || git::pull(from_args(args)?)).await,
+        op_name::GIT_PUSH => blocking(move || git::push(from_args(args)?)).await,
+        op_name::GIT_CHECKOUT => blocking(move || git::checkout(from_args(args)?)).await,
+        op_name::GIT_BRANCH_CREATE => blocking(move || git::branch_create(from_args(args)?)).await,
+        op_name::GIT_BRANCH_DELETE => blocking(move || git::branch_delete(from_args(args)?)).await,
+        op_name::GIT_BRANCH_LIST_DETAILED => {
+            blocking(move || git::branch_list_detailed(from_args(args)?)).await
+        }
+        op_name::GIT_BRANCH_RENAME => blocking(move || git::branch_rename(from_args(args)?)).await,
+        op_name::GIT_BRANCH_DELETE_REMOTE => {
+            blocking(move || git::branch_delete_remote(from_args(args)?)).await
+        }
+        op_name::GIT_CHECKOUT_REMOTE => {
+            blocking(move || git::checkout_remote(from_args(args)?)).await
+        }
+        op_name::GIT_PUSH_DELETE => blocking(move || git::push_delete(from_args(args)?)).await,
+        op_name::GIT_MERGE => blocking(move || git::merge(from_args(args)?)).await,
+        op_name::GIT_MERGE_ABORT => blocking(move || git::merge_abort(from_args(args)?)).await,
+        op_name::GIT_REBASE => blocking(move || git::rebase(from_args(args)?)).await,
+        op_name::GIT_REBASE_CONTINUE => {
+            blocking(move || git::rebase_continue(from_args(args)?)).await
+        }
+        op_name::GIT_REBASE_ABORT => blocking(move || git::rebase_abort(from_args(args)?)).await,
+        op_name::GIT_LOG => blocking(move || git::log(from_args(args)?)).await,
+        op_name::GIT_GET_CONFLICT => blocking(move || git::get_conflict(from_args(args)?)).await,
+        op_name::GIT_RESOLVE => blocking(move || git::resolve(from_args(args)?)).await,
+        op_name::GIT_APPLY_PATCH => blocking(move || git::apply_patch(from_args(args)?)).await,
+        op_name::GIT_STASH_LIST => blocking(move || git::stash_list(from_args(args)?)).await,
+        op_name::GIT_STASH_SAVE => blocking(move || git::stash_save(from_args(args)?)).await,
+        op_name::GIT_STASH_APPLY => blocking(move || git::stash_apply(from_args(args)?)).await,
+        op_name::GIT_STASH_DROP => blocking(move || git::stash_drop(from_args(args)?)).await,
+        op_name::GIT_TAG_LIST => blocking(move || git::tag_list(from_args(args)?)).await,
+        op_name::GIT_TAG_CREATE => blocking(move || git::tag_create(from_args(args)?)).await,
+        op_name::GIT_TAG_DELETE => blocking(move || git::tag_delete(from_args(args)?)).await,
+        op_name::GIT_CHERRY_PICK => blocking(move || git::cherry_pick(from_args(args)?)).await,
+        op_name::GIT_REVERT => blocking(move || git::revert(from_args(args)?)).await,
+        op_name::GIT_DIFF_REVS => blocking(move || git::diff_revs(from_args(args)?)).await,
         op_name::INDEX_ENSURE => {
             let a: oxyris_ipc::ops::IndexRootArgs = from_args(args)?;
             index::ensure(a.root).await

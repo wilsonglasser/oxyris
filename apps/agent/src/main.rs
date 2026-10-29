@@ -43,13 +43,25 @@ async fn main() -> Result<()> {
         };
 
         match frame {
-            Frame::Request(req) => handle_request(req).await,
+            // Each request runs as its own task so one slow op (a fetch over a
+            // slow link, a push waiting on the remote) never queues every
+            // other op behind it. The backend matches replies by request id,
+            // so out-of-order completion is fine. fs.watch/unwatch stay
+            // inline: a watch/unwatch pair for one id must not reorder.
+            Frame::Request(req) if is_watch_op(&req.op) => handle_request(req).await,
+            Frame::Request(req) => {
+                tokio::spawn(handle_request(req));
+            }
             other => tracing::warn!(?other, "unexpected frame kind from backend; ignoring"),
         }
     }
 
     tracing::info!("oxyris-agent shutting down (stdin closed)");
     Ok(())
+}
+
+fn is_watch_op(op: &str) -> bool {
+    op == op_name::FS_WATCH || op == op_name::FS_UNWATCH
 }
 
 async fn handle_request(req: RequestFrame) {
