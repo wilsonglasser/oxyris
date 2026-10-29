@@ -303,14 +303,18 @@ const URL_TRAILING_RE = /[.,;:!?)\]}>'"]+$/;
 // A token broken across rows. xterm marks its own soft wraps (`isWrapped`), but
 // the claude TUI hard-wraps itself: a word longer than its text box is cut at
 // the box edge and continued on the next row after a newline + the block's
-// indent. Such a row is treated as continuing when its last non-blank cell sits
-// within HARD_WRAP_SLACK columns of the edge (the box is a little narrower than
-// the terminal) and the words on either side of the break are together too long
-// to have fit on one row — ordinary word-wrapped prose never is, so its rows
-// aren't glued together.
+// indent. The box can be a good deal narrower than the terminal (wide panels),
+// so its edge is not `term.cols` — it is estimated as the widest row in a
+// window around the hovered one. A row is treated as continuing when its last
+// non-blank cell sits within HARD_WRAP_SLACK columns of that edge and the
+// words on either side of the break are together too long to have fit in the
+// box — a broken token is by definition longer than the box, while ordinary
+// word-wrapped prose never is, so its rows aren't glued together.
 const HARD_WRAP_SLACK = 8;
 /** Rows joined in each direction around the hovered one. */
 const MAX_JOIN_ROWS = 4;
+/** Rows scanned in each direction to estimate the TUI box edge. */
+const EDGE_WINDOW_ROWS = 8;
 
 /** One buffer row as text, with the 1-based column of each code unit. */
 interface RowText {
@@ -355,6 +359,24 @@ function logicalLine(
     rows.set(y, out);
     return out;
   };
+  /** Column of row `y`'s last non-blank cell (0 when blank/missing). */
+  const lastCol = (y: number): number => {
+    const r = row(y);
+    if (!r) return 0;
+    const body = r.text.trimEnd();
+    return body ? (r.xs[body.length - 1] ?? 0) : 0;
+  };
+
+  const y0 = bufferLineNumber - 1;
+  // The TUI box edge: widest row nearby. Never wider than the terminal.
+  let edge = 0;
+  const yMax = Math.min(buf.length - 1, y0 + EDGE_WINDOW_ROWS);
+  for (let y = Math.max(0, y0 - EDGE_WINDOW_ROWS); y <= yMax; y++) {
+    edge = Math.max(edge, lastCol(y));
+  }
+  edge = Math.min(edge, cols);
+  const minWrapCol = edge - HARD_WRAP_SLACK;
+
   // How row `y` flows into row `y + 1`: "soft" (xterm wrap, cells contiguous),
   // "hard" (TUI wrap, trailing blanks / next row's indent dropped) or null.
   const flow = (y: number): "soft" | "hard" | null => {
@@ -366,15 +388,13 @@ function logicalLine(
     if (!cur || !nxt) return null;
     const body = cur.text.trimEnd();
     if (!body) return null;
-    const lastX = cur.xs[body.length - 1] ?? 0;
-    if (lastX < cols - HARD_WRAP_SLACK) return null;
+    if (lastCol(y) < minWrapCol) return null;
     const tail = /\S+$/.exec(body)?.[0] ?? "";
     const head = /^\s*(\S*)/.exec(nxt.text)?.[1] ?? "";
     if (!head) return null;
-    return tail.length + head.length > cols - HARD_WRAP_SLACK ? "hard" : null;
+    return tail.length + head.length > minWrapCol ? "hard" : null;
   };
 
-  const y0 = bufferLineNumber - 1;
   let start = y0;
   while (start > 0 && y0 - start < MAX_JOIN_ROWS && flow(start - 1)) start--;
   let end = y0;
