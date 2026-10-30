@@ -654,32 +654,15 @@ export function TerminalView({
     const liveEntry: LiveTerminal = { term, webgl: () => webgl };
     liveTerminals.add(liveEntry);
 
-    // Linkify file paths so Ctrl/Cmd+click opens them (the host resolves the
-    // token against the PTY's cwd). Decorations are only emitted when a handler
-    // is wired, so plain dock terminals show no spurious underlines.
-    const linkProvider = term.registerLinkProvider({
-      provideLinks(bufferLineNumber, callback) {
-        if (!onOpenPathRef.current) return callback(undefined);
-        const links: ILink[] = wrappedMatches(
-          term,
-          bufferLineNumber,
-          PATH_RE,
-        ).map(({ text, range }) => ({
-          text,
-          range,
-          decorations: { pointerCursor: true, underline: true },
-          activate: (event: MouseEvent, token: string) => {
-            if (!(event.ctrlKey || event.metaKey)) return;
-            onOpenPathRef.current?.(token);
-          },
-        }));
-        callback(links.length ? links : undefined);
-      },
-    });
-
     // Linkify http(s) URLs so Ctrl/Cmd+click opens them in the system browser
     // (via the opener plugin — it escapes the URL, so query strings with `&`
-    // are safe). Always on, independent of the file-path provider above.
+    // are safe). Always on, independent of the file-path provider below.
+    //
+    // Registered first on purpose: xterm resolves the hovered cell to the
+    // first provider (in registration order) that returns a link for it, and
+    // PATH_RE also matches the inside of a URL ("/github.com/x/y.io" — it
+    // stops at the last dotted segment), which would turn a URL into a
+    // broken file-path link ending mid-way.
     const urlLinkProvider = term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
         const links: ILink[] = wrappedMatches(
@@ -694,6 +677,30 @@ export function TerminalView({
           activate: (event: MouseEvent, token: string) => {
             if (!(event.ctrlKey || event.metaKey)) return;
             void openUrl(token).catch(() => {});
+          },
+        }));
+        callback(links.length ? links : undefined);
+      },
+    });
+
+    // Linkify file paths so Ctrl/Cmd+click opens them (the host resolves the
+    // token against the PTY's cwd). Decorations are only emitted when a handler
+    // is wired, so plain dock terminals show no spurious underlines. Loses to
+    // the URL provider above where the two overlap.
+    const linkProvider = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        if (!onOpenPathRef.current) return callback(undefined);
+        const links: ILink[] = wrappedMatches(
+          term,
+          bufferLineNumber,
+          PATH_RE,
+        ).map(({ text, range }) => ({
+          text,
+          range,
+          decorations: { pointerCursor: true, underline: true },
+          activate: (event: MouseEvent, token: string) => {
+            if (!(event.ctrlKey || event.metaKey)) return;
+            onOpenPathRef.current?.(token);
           },
         }));
         callback(links.length ? links : undefined);
